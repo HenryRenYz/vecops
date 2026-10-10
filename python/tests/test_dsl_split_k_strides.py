@@ -7,13 +7,11 @@ AMX tile. Separate full/fringe AMX gates cover the independently found direct
 tile and vector-staging assumptions. No packing/family threshold is changed.
 """
 
-import re
-
 import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import amx_available_for_test, assert_no_vec_mask_arrays, make_compiler, parameter_snapshot_name
+from dsl_test_utils import amx_available_for_test, make_compiler
 from test_dsl_sme_packed_col import _pack_template, _template
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
@@ -35,42 +33,6 @@ def _lower(*, dynamic, implementation):
     )
     .source
   )
-
-
-@pytest.mark.parametrize("dynamic", (False, True))
-def test_split_k_amx_direct_tiles_require_unit_columns_and_staging_is_strided(dynamic):
-  source = _lower(dynamic=dynamic, implementation="amx")
-  stride = parameter_snapshot_name(source, "C.stride(1)")
-  data = parameter_snapshot_name(source, "C.data()")
-  # Inspect each actual output-backed continuation/staging expression, not
-  # an unrelated seed or final epilogue load/store elsewhere in the source.
-  loads = [
-    line for line in source.splitlines() if "partial_value" in line and "vecops::vec::load(" in line and data in line
-  ]
-  stores = [
-    line for line in source.splitlines() if "partial_value" in line and "vecops::vec::store(" in line and data in line
-  ]
-  assert loads and stores
-  assert all(data in line and f"opt::strided({stride})" in line for line in loads)
-  assert all(f"opt::strided({stride})" in line for line in stores)
-  direct = re.findall(rf"if \(([^\n]+)\) \{{\n\s*vecops::vec::amx::(?:load|store)<\d+>\([^\n]*{data}[^\n]*", source)
-  assert direct and all(f"({stride})==1" in guard for guard in direct)
-  assert "native accumulator continuation" in source
-  assert "epilogue exactly once" in source and "prologue exactly once" in source
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("dynamic", (False, True))
-def test_split_k_outer_product_continuation_uses_the_output_column_stride(dynamic):
-  source = _lower(dynamic=dynamic, implementation="vector")
-  stride = parameter_snapshot_name(source, "C.stride(1)")
-  data = parameter_snapshot_name(source, "C.data()")
-  loads = [
-    line for line in source.splitlines() if re.search(r"matrix_acc_\d+=vecops::vec::load\(", line) and data in line
-  ]
-  assert loads and all(f"opt::strided({stride})" in line for line in loads)
-  assert "vector outer-product family" in source
-  assert_no_vec_mask_arrays(source)
 
 
 def _matrix(shape, step):

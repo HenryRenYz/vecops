@@ -78,7 +78,7 @@ def test_reduction_layout_uses_automatic_transpose(compiler):
   compiled.operator.native(a, c)
   np.testing.assert_array_equal(c, a.sum(axis=1))
   assert "normalize-reduction-layout" in compiled.kernel_ir.pass_trace
-  assert "local_interleave" in compiled.generated_source
+  assert "register transpose traversal" in "\n".join(compiled.kernel_ir.diagnostics)
 
 
 def test_invalid_shapes_and_packing():
@@ -101,7 +101,7 @@ def test_invalid_shapes_and_packing():
     CPUBackend().lower(bad_pack.ir, ())
 
 
-def test_dynamic_amx_cache_packing_is_shared_before_family_dispatch():
+def test_dynamic_source_cache_packing_has_one_algorithm_without_legacy_dispatch():
   m, n, k = (T.dynamic(lower=0) for _ in range(3))
 
   @T.template
@@ -114,17 +114,17 @@ def test_dynamic_amx_cache_packing_is_shared_before_family_dispatch():
     b = T.cast(T.load(B, dtype="float32") * 2 + 1, "bfloat16")
     T.library.matmul((a, b), C)
 
-  source = CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cpu_amx_shared_cache_dispatch": True}).source
-  assert source.count("one runtime cache decision") == 1
-  assert source.count("shared cache packing before family dispatch") == 1
-  assert "prologue exactly once" in source and "epilogue exactly once" in source
+  artifact = CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cpu_amx_shared_cache_dispatch": True})
+  source = artifact.source
+  assert "dsl_recipe_dot_" in source
+  assert "packed-layout recipe" in "\n".join(artifact.kernel.diagnostics)
+  assert "matmul_blocks(" not in source
   # Bound code growth for a fully dynamic transformed-input problem. This
   # is a structural budget, not a timing shortcut or a compiler flag change.
   assert len(source) < 16_000_000
 
-  legacy = CPUBackend().lower(kernel.ir, (), target="AVX512").source
-  assert "one runtime cache decision" not in legacy
-  assert "shared cache packing before family dispatch" not in legacy
+  automatic = CPUBackend().lower(kernel.ir, (), target="AVX512").source
+  assert source == automatic  # Retired knob cannot resurrect another route.
 
 
 @pytest.mark.parametrize("ad,bd", [("bfloat16", "bfloat16"), ("int8", "int8"), ("uint8", "int8")])
@@ -162,7 +162,7 @@ def test_amx_tails_packed_fusion(compiler, ad, bd, packed):
     expected = np.maximum(a.astype(dtype(out)) @ b.astype(dtype(out)) + 1, 0)
     compiled.operator.native(a, b, c, **compiled._core.specialization_values)
     np.testing.assert_allclose(c, expected, rtol=2e-5, atol=2e-5)
-  assert "vecops::vec::amx::dot" in compiled.generated_source
+  assert "dsl_recipe_dot_" in compiled.generated_source
 
 
 @T.func
@@ -263,8 +263,8 @@ def test_panel_phases_conversions_and_padding(compiler, ad, bd):
     expected = (x @ y + d).astype(np.float64) * 0.25 + 2
     compiled.operator.native(a, b, d, c, **compiled._core.specialization_values)
     np.testing.assert_allclose(c, expected, rtol=1e-6, atol=1e-6)
-  assert "epilogue exactly once" in compiled.generated_source
-  assert "pack_permute" in compiled.generated_source
+  assert "dsl_recipe_dot_" in compiled.generated_source
+  assert "matmul_blocks(" not in compiled.generated_source
 
 
 def test_column_output_swaps_full_fused_graph(compiler):

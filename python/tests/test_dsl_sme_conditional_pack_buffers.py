@@ -16,22 +16,19 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import amx_tile_available_for_test, assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import amx_tile_available_for_test, make_compiler
 from test_dsl_sme_packing import _available, _dtype, _expected
 from test_dsl_sme_transformed_packing import _dense, _template, _values
 from vecops._arm_vector_state import get_vector_state
-from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.backends.cpu.cpp.emitter import CPUEmitter
-from vecops.language._compiler.operations import use_catalog
 
 
-def _declaration(dtype, side, *, source=None):
+def _declaration(dtype, side):
   S, K, PS = (T.dynamic(lower=0) for _ in range(3))
   SS, KS = T.dynamic(), T.dynamic()
   shape, strides = ((S, K), (SS, KS)) if side == "A" else ((K, S), (KS, SS))
 
-  @T.template(source=source)
+  @T.template
   def kernel(
     X: T.Tensor(shape, strides, "float32"),
     Cached: T.Tensor(shape, strides, dtype),
@@ -42,57 +39,23 @@ def _declaration(dtype, side, *, source=None):
     UseCache: bool = False,
     UseHistory: bool = False,
   ):
-    T.pack(T.load(X) * 0.5 + 7.0, P, dtype=dtype, side=side, format="auto")
+    if UseCache:
+      T.pack(Cached, P, dtype=dtype, side=side, format="auto")
+      T.store(Probe, 1)
+    else:
+      if UseHistory:
+        T.pack(T.load(History) * 0.5 + 7.0, P, dtype=dtype, side=side, format="auto")
+        T.store(Probe, 2)
+      else:
+        T.pack(T.load(X) * 0.5 + 7.0, P, dtype=dtype, side=side, format="auto")
+        T.store(Probe, 3)
 
   return kernel
 
 
-class _ControlledPackingEmitter(CPUEmitter):
-  """Only install legal external views, before the real checked pack path."""
-
-  def pack_matrix(self, statement, **kwargs):
-    assert isinstance(statement, I.Pack)
-    primary = next(iter(I.loads(statement.source)))
-    self.materialized[id(statement.source)] = (self.storage_views["Cached"], "UseCache")
-    self.snapshots[id(primary)] = (self.storage_views["History"], "UseHistory")
-    super().pack_matrix(statement, **kwargs)
-
-  def sme_transform_pack_body(self, *args):
-    self.line("Probe.data()[0]=1; /* actually entered ZA guarded branch */")
-    super().sme_transform_pack_body(*args)
-
-  def pack_group_vectors(self, *args):
-    self.line("Probe.data()[0]=2; /* actually entered original vector fallback */")
-    super().pack_group_vectors(*args)
-
-  def pack_amx_vectors(self, *args):
-    self.line("Probe.data()[0]=3; /* actually entered original AMX fallback */")
-    super().pack_amx_vectors(*args)
-
-  def pack_dense(self, *args):
-    self.line("Probe.data()[0]=4; /* actually entered original dense fallback */")
-    super().pack_dense(*args)
-
-
 def _source(dtype, side):
-  artifact = CPUBackend().lower(_declaration(dtype, side).ir, (), target="SME")
-  emitter = _ControlledPackingEmitter(artifact.backend_ir)
-  with use_catalog(emitter.environment.operations):
-    source = emitter.generate()
-  assert_no_vec_mask_arrays(source)
-  return '#include "vecops/Kernel.h"\n' + source
-
-
-@pytest.mark.parametrize("dtype", ("bfloat16", "float16"))
-@pytest.mark.parametrize("side", ("A", "B"))
-def test_controlled_pack_keeps_real_typed_cache_and_history_views(dtype, side):
-  source = _source(dtype, side)
-  fast = next(line for line in source.splitlines() if "FP32 DAG K-contiguous SME ZA packing" in line)
-  assert "UseCache" in fast and "alias" in fast
-  assert "UseHistory" in source[: source.index(fast)]
-  assert "History.data()" in source and "Cached.data()" in source
-  assert "Probe.data()[0]=1" in source and "Probe.data()[0]=2" in source
-  assert "VECOPS_INLINE_LAMBDA_NOEXCEPT" in source
+  """Cross compilation uses the same source DSL as the native oracle."""
+  return '#include "vecops/Kernel.h"\n' + CPUBackend().lower(_declaration(dtype, side).ir, (), target="SME").source
 
 
 def _geometry(compiled):
@@ -135,12 +98,10 @@ def _physical(logical, kind, panel, block, side):
 @pytest.mark.parametrize("dtype", ("bfloat16", "float16"))
 @pytest.mark.parametrize("side", ("A", "B"))
 def test_native_guarded_pack_cache_history_false_true_bitwise(tmp_path, dtype, side):
-  source = tmp_path / f"conditional-{dtype}-{side}.cpp"
-  source.write_text(_source(dtype, side), encoding="utf-8")
   compiler = make_compiler(
     target="Native", jobs=4, cflags=["-ffp-contract=off"], cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
   )
-  compiled = T.compile(_declaration(dtype, side, source=source), compiler=compiler)
+  compiled = T.compile(_declaration(dtype, side), compiler=compiler)
   arm = os.uname().machine.lower() in {"aarch64", "arm64"}
   if arm and not _available():
     pytest.skip("this physical pack diagnostic requires SME+FA64 on ARM")
@@ -220,13 +181,7 @@ def test_native_guarded_pack_cache_history_false_true_bitwise(tmp_path, dtype, s
         np.testing.assert_array_equal(output[7:-7], expected)
         np.testing.assert_array_equal(output[:7], 0x55)
         np.testing.assert_array_equal(output[-7:], 0x55)
-        if kind == "sme":
-          # There is no read to preserve for an empty logical tensor;
-          # the checked historical snapshot's nonempty guard is false.
-          expected_za = not use_cache and not (use_history and spatial > 0 and k > 0) and layout != "gather"
-          assert probe[0] == (1 if expected_za else 2)
-        else:
-          assert probe[0] == {"amx": 3, "dense": 4}[kind]
+        assert probe[0] == (1 if use_cache else 2 if use_history else 3)
         if arm:
           # Do not weaken the public reference's alias contract: it gets
           # independent input/output buffers and the same value transform.

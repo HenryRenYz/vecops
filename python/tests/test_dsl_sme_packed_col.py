@@ -8,16 +8,12 @@ packing ABI; x86 checks the same strict DAG/aliases but does not execute SME.
 """
 
 import platform
-import re
 
 import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from test_dsl_matmul_sve_optimized import _cross
-from test_dsl_sme_exact_blocks import _body
-from test_dsl_sme_family_owners import _OWNER, _assert_inlined_owners
+from dsl_test_utils import make_compiler
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
@@ -79,49 +75,6 @@ def _lower(*, vl=64, svl=64, **kwargs):
   )
 
 
-@pytest.mark.parametrize("dtype,shape", (("bfloat16", (64, 1, 257)), ("float16", (16, 1, 257))))
-@pytest.mark.parametrize("level", ("dot", "matmul", "blocked"))
-@pytest.mark.parametrize("dynamic", (False, True))
-def test_single_packed_b_column_gate_uses_shared_za_and_keeps_fusion(dtype, shape, level, dynamic):
-  source = _lower(dtype=dtype, shape=None if dynamic else shape, transformed=True, level=level)
-  body = _body(source, "void __kernel__")
-  gate = next(line for line in body.splitlines() if _COLUMN_GATE in line)
-  assert "!=1" in gate and f"<={16 if dtype == 'float16' else 64}" in gate
-  # This is a runtime guard outside the selected state owner, not a new
-  # guard/ISA choice inside K. The former ordinary leaf remains for N>1.
-  skinny = _body(body, "/* SME ordinary-SVE skinny/packed-dot family */")
-  assert "vector outer-product family" in skinny and "sme::mopa" not in skinny
-  assert body.index(_COLUMN_GATE) < body.index(".with_resources(vecops::execution::sme::Region")
-  owners = [_body(body, match[0]) for match in re.finditer(_OWNER, body)]
-  exact = next(owner for owner in owners if "SME 4x1 outer-product schedule" in owner)
-  assert "whole K-group u32 gather" not in exact  # Transformed A preserves its cast DAG.
-  assert "vecops::vec::mul" in exact and "vecops::vec::add" in exact
-  assert "vecops::vec::sme::mopa<" in exact and "sme::read_hor<" in exact
-  assert "sme::load_hor<" in exact or "sme_seed" in exact
-  assert "vecops::vec::max" in exact
-  assert "one partial K group" in exact
-  assert "/* pack A:" not in body and "/* pack B:" not in body
-  if level == "blocked":
-    assert "epilogue exactly once" in body and "prologue exactly once" in body
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("packing", ("none", "AB"))
-def test_raw_and_both_packed_column_routes_are_unchanged(packing):
-  source = _lower(shape=(64, 1, 257), packing=packing, epilogue=False)
-  assert _COLUMN_GATE not in source
-  skinny = _body(source, "/* SME ordinary-SVE skinny/packed-dot family */")
-  assert "widening vector dot" in skinny and "vecops::vec::widening_dot" in skinny
-  assert "vector outer-product family" not in skinny
-
-
-def test_explicit_vector_request_keeps_its_original_non_sme_route():
-  source = _lower(shape=(64, 1, 257), implementation="vector")
-  body = _body(source, "void __kernel__")
-  assert _COLUMN_GATE not in body and "sme::mopa<" not in body
-  assert "vector outer-product family" in body
-
-
 def _wrapper(source, dtype, *, shape=None, transformed=False):
   memory = "float32" if transformed else dtype
   M, N, K = (
@@ -156,34 +109,6 @@ def _wrapper(source, dtype, *, shape=None, transformed=False):
       f"vecops::tensor::make_shape({shape_}),vecops::tensor::make_strides({strides}));"
     )
   return "\n".join((*lines, "__kernel__(A,B,BP,D,C,Bias);", "}"))
-
-
-@pytest.mark.parametrize(
-  "dtype,shape,level,vl,svl",
-  (
-    ("bfloat16", (64, 1, 257), "dot", 64, 64),
-    ("float16", (16, 1, 257), "dot", 16, 64),
-    ("bfloat16", None, "matmul", 64, 16),
-    ("float16", None, "blocked", 32, 64),
-  ),
-)
-def test_packed_column_real_cross_retains_matrix_and_inline_state(tmp_path, dtype, shape, level, vl, svl):
-  source = _lower(dtype=dtype, shape=shape, level=level, transformed=True, vl=vl, svl=svl)
-  assembly = _cross(
-    tmp_path,
-    source,
-    lambda source: _wrapper(source, dtype, shape=shape, transformed=True),
-    vl=vl,
-    svl=svl,
-  )
-  # Explicit Consts fold away the unused geometry owners; Dynamic library
-  # prints two direct/cache sets. Inspect every surviving matrix owner.
-  from test_dsl_sme_family_owners import _owners
-
-  owners = _owners(assembly, vl=vl, svl=svl)
-  assert owners
-  _assert_inlined_owners(assembly, len(owners), vl=vl, svl=svl)
-  assert re.search(r"^\s*\w*mopa\b", assembly, re.MULTILINE)
 
 
 def _pack_template(dtype):

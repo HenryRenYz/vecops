@@ -37,6 +37,10 @@ def positive_extent(value, catalog, names=frozenset()):
     and value.data in names
     or value.op == "mul"
     and all(positive_extent(v, catalog, names) for v in value.args)
+    or value.op == "max"
+    and any(positive_extent(v, catalog, names) for v in value.args)
+    or value.op == "min"
+    and all(positive_extent(v, catalog, names) for v in value.args)
   )
 
 
@@ -159,6 +163,23 @@ def interval(value, bounds, *, _ordered=True):
     return (I.binary(value.op, a[0], b[value.op == "sub"]), I.binary(value.op, a[1], b[value.op != "sub"]))
   if value.op == "floordiv" and type(I.constant(value.args[1])) is int and I.constant(value.args[1]) > 0:
     return tuple(I.binary("floordiv", v, value.args[1]) for v in operands[0])
+  if value.op in {"floordiv", "mod", "mul"}:
+    from ..operations import current
+
+    # A positive native extent is invariant within these loops, even when
+    # its process-specific value was not captured by a cross-build.
+    if value.op in {"floordiv", "mod"}:
+      divisor = value.args[1]
+      if not affine_contains(divisor, bounds, {}) and positive_extent(divisor, current()):
+        return (
+          tuple(I.binary("floordiv", v, divisor) for v in operands[0])
+          if value.op == "floordiv"
+          else (I.literal(0), I.binary("sub", divisor, I.literal(1)))
+        )
+    else:
+      for index, factor in enumerate(value.args):
+        if not affine_contains(factor, bounds, {}) and positive_extent(factor, current()):
+          return tuple(I.binary("mul", factor, endpoint) for endpoint in operands[1 - index])
   if value.op == "mod" and type(I.constant(value.args[1])) is int and I.constant(value.args[1]) > 0:
     # DSL floor division/remainder is Euclidean, including signed operands.
     return I.literal(0), I.literal(I.constant(value.args[1]) - 1)
@@ -452,6 +473,13 @@ def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constan
     return ()
 
   def visit(value):
+    if isinstance(value, I.Expr):
+      from ..operations import Trait, current
+
+      # A read/captured state is a timed value, not loop-local metadata to
+      # clone separately in each branch. Keep identity and root geometry.
+      if current().has(value, Trait.MEMORY_READ | Trait.STATE_REFERENCE) or value.op == "packed_load":
+        return value
     if isinstance(value, I.For):
       start, stop, step = (visit(v) for v in (value.start, value.stop, value.step))
       increment = I.constant(step)
@@ -462,6 +490,9 @@ def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constan
         if increment is not None and increment < 0
         else (start, I.binary("sub", stop, I.literal(1)))
       )
+      first, limit = I.constant(start), I.constant(stop)
+      if type(first) is int and type(limit) is int and type(increment) is int and increment > 0 and first < limit:
+        endpoints = (start, I.literal(first + ((limit - first - 1) // increment) * increment))
       return replace(
         value,
         start=start,
@@ -491,7 +522,8 @@ def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constan
       return tuple(visit(v) for v in value)
     if isinstance(value, I.Node):
       if id(value) not in memo:
-        changed = replace(value, **{field.name: visit(getattr(value, field.name)) for field in fields(value)})
+        changes = {field.name: visit(getattr(value, field.name)) for field in fields(value)}
+        changed = value if all(v is getattr(value, k) for k, v in changes.items()) else replace(value, **changes)
         if isinstance(changed, I.Expr):
           if changed.op in {"local", "frozen"} and changed.data in constants:
             changed = constants[changed.data]

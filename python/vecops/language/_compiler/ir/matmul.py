@@ -42,15 +42,6 @@ class DotOptions(Node):
   swap: bool = True
 
 
-@dataclass(frozen=True)
-class OperandFusion:
-  expression: object
-  materialization: object | None
-  condition: object | None
-  operation_cost: float
-  reason: str
-
-
 def transpose_matrix(value, memo=None):
   """Transpose a matrix DAG, promoting trailing rank-one broadcasts first."""
   from .kernel import literal

@@ -31,9 +31,11 @@ class PrimitivesEmitter:
       if snapshot is not None:
         saved, condition = snapshot
         pointer = f"({condition} ? {self.pointer(saved, coords)} : {pointer})"
-      scalar = f"static_cast<{CPP_TYPES[load.type.dtype]}>(*{pointer})"
+      scalar = self.scalar_convert(load.type.dtype, f"*{pointer}", load.data.dtype)
+      source_dtype = load.type.dtype
       for dtype in casts:
-        scalar = f"static_cast<{CPP_TYPES[dtype]}>({scalar})"
+        scalar = self.scalar_convert(dtype, scalar, source_dtype)
+        source_dtype = dtype
       return scalar
     coords = tuple(self.scalar(v) for v in indices)
     tag = self.unique("scalar_tag")
@@ -44,6 +46,10 @@ class PrimitivesEmitter:
     return f"vecops::vec::get({tag}{{}}, {result}, 0)"
 
   def primitive_vector(self, value, tag, shape, coords, active, axis):
+    if value.op == "bitreinterpret":
+      if id(value) in self.prepared.register_programs:
+        return self.geometry_vector(value, tag, shape, coords, active, axis)
+      return NotImplemented  # Same-width elementwise spelling is in vector().
     if self.environment.operations.get(value).family == "register_geometry":
       return self.geometry_vector(value, tag, shape, coords, active, axis)
     if value.op == "gather":
@@ -146,9 +152,8 @@ class PrimitivesEmitter:
       # Lane-wise fallback remains register-only; contiguous reads are folded
       # into a view by a separate pass rather than a hidden emitter optimizer.
       result, lane = self.unique("reshape"), self.unique("reshape_lane")
-      fill = "mfill" if value.type.mask else "fill"
-      zero = "false" if value.type.mask else f"vecops::vec::ElementOf<{tag}>{{0}}"
-      self.line(f"auto {result} = vecops::vec::{fill}({tag}{{}}, {zero});")
+      zero = f"vecops::vec::mfill({tag}{{}}, false)" if value.type.mask else f"vecops::vec::zeros({tag}{{}})"
+      self.line(f"auto {result} = {zero};")
       self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({active}); ++{lane})")
       offset = "0"
       for i, (c, extent) in enumerate(zip(own, value.type.shape)):
@@ -179,6 +184,9 @@ class PrimitivesEmitter:
     if self.environment.operations.get(value).family != "register_geometry":
       coordinate = I.Expr(I.ScalarType("int64"), "raw", data=index)
       return self.element_at(I.Expr(I.ScalarType(value.type.dtype), "element_at", (value, coordinate)))
+    if operation == "bitreinterpret":
+      scalar = self.geometry_scalar(source, index)
+      return f"std::bit_cast<{CPP_TYPES[value.type.dtype]}>(static_cast<{CPP_TYPES[source.type.dtype]}>({scalar}))"
     if operation in {"lower", "upper"}:
       offset = 0 if operation == "lower" else self.scalar(value.type.shape[0])
       return self.geometry_scalar(source, f"(({index})+{offset})")
@@ -245,6 +253,49 @@ class PrimitivesEmitter:
     return select(0)
 
   def geometry_vector(self, value, tag, shape, coords, active, axis):
+    plan = self.prepared.register_programs.get(id(value))
+    extent = I.constant(value.type.shape[0])
+    geometry = self.tag_geometry.get(tag)
+    target = self.environment.codegen_target
+    native_bytes = (
+      self.environment.vector_state.sve_bytes or 16
+      if target.architecture == "arm"
+      else (target.vector_bits or 128) // 8
+    )
+    capacity = (
+      (native_bytes // ELEMENT_BYTES[value.type.dtype]) * (1 << geometry[1])
+      if geometry is not None and geometry[0] and geometry[1] >= 0
+      else None
+    )
+    complete = len(shape) == 1 and I.same_expr(shape[0], value.type.shape[0]) and tuple(coords) == ("0",)
+    if plan is not None and complete and (
+      self.fixed_tag_lanes.get(tag) == extent or capacity is not None and capacity >= extent
+    ):
+      # Closed fixed state updates use the same instruction program as stores.
+      # Partial/multi-piece consumers retain exact indexed legalization.
+      output_tag, result = self.register_program(
+        plan.program,
+        lambda index, own: self.vector(
+          plan.program.inputs[index],
+          own,
+          plan.program.inputs[index].type.shape,
+          ("0",),
+          str(I.constant(plan.program.inputs[index].type.shape[0])),
+        ),
+        physical_tags=plan.tags,
+      )
+      result = result[0]
+      if target.architecture != "arm" and capacity is not None:
+        # State may use a larger physical word than its logical prefix. Pad
+        # with named zero registers, not scalar insert loops or Vec arrays.
+        while extent < capacity:
+          next_tag, padded = self.unique("geometry_pad_tag"), self.unique("geometry_pad")
+          self.line(f"using {next_tag}=vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {extent * 2}>;")
+          self.line(
+            f"auto {padded}=vecops::vec::concat({next_tag}{{}}, {result}, vecops::vec::zeros({output_tag}{{}}));"
+          )
+          output_tag, result, extent = next_tag, padded, extent * 2
+      return result
     result, lane = self.unique("geometry"), self.unique("geometry_lane")
     self.line(f"auto {result}=vecops::vec::zeros({tag}{{}});")
     own = self.coordinates(value.type.shape, shape, coords)

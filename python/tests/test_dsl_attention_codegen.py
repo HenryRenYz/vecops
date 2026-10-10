@@ -41,7 +41,8 @@ def test_streamed_attention_keeps_named_vectors_and_inline_callbacks():
     if "[&](" in line:
       assert "VECOPS_INLINE_LAMBDA" in line or "VECOPS_KERNEL_LAMBDA" in line
   assert "ops::Attention" not in source
-  assert "vecops::vec::amx::dot<" in source
+  assert "dsl_recipe_dot_" in source
+  assert "vecops::vec::fmadd" in source
 
 
 def test_executor_only_kernels_keep_lightweight_source_contract():

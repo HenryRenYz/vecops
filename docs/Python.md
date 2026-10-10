@@ -691,206 +691,62 @@ repair this padding. Shape/capacity/alias validation precedes hardware-state
 entry. A/B formats
 are distinct: AMX A is row/K-blocked, B is dword-group/VNNI interleaved; SME
 uses spatial panels and K groups parameterized by SVL. Dense B stores `[N,K]`.
-Explicit AMX packing supports bf16/fp16/int8/uint8 and requires an AMX target.
-Full AMX spatial/K panels use unmasked load/convert and a prepared dword
-permutation; only the final spatial panel or K block clears transformed padding.
-Prepacked cache panels retain the original physical layout and logical
-origins, including K-block continuation; block sizes do not reinterpret the
-buffer. Dense `T.pack` and runtime dense cache panels use the automatic
-transpose/vector memory planner. External packed buffers are tied to the
-target ISA and (for SME) SVL ABI; shape reinterpretation is not a format
-conversion.
+Packing/layout algorithms are source-parsed `T.func` recipes. Dense B stores
+`[N,K]` and uses ordinary transpose/vector memory planning. Interleaved formats
+zero their physical padding before writing logical elements; padded positions
+never evaluate an input DAG. Capacity and layout checks precede every access.
+The physical packing ABI decoder remains a compiler primitive, not a hidden
+packing loop. External packed buffers remain tied to their target ISA and
+process SVL; changing a logical shape is not a format conversion.
 
-Ordinary-SVE BF16 PackedDot leaves load full registers for complete K groups
-only when the actual vector width fits inside each operand's current physical
-spatial panel. Shifted windows near a panel boundary keep masked loads.
-MMLA's row/column segments do not mix discarded spatial-padding results into
-valid outputs; the final partial K group explicitly clears its nonlogical
-halfword before MAC, rather than relying on an external buffer's zero padding.
-This local robustness does not change `T.packed`'s general zero-K-padding
-contract: other packed consumers and fallback families still require it.
-FP16 inner-product leaves keep FP16 input vectors and use the public grouped
-widening-dot primitive with FP32 accumulators (FMLALB/FMLALT on SVE2).
-The input DAG's FP16 conversion boundary and strict multiply/add policy remain
-in place, and an explicit `T.fma` remains fused. These ordinary-SVE operations
-use VL independently of SVL and do not enter streaming mode.
+`T.dot` and `T.library.matmul` expand into ordinary DSL loops, mutable
+accumulator state, conversions and stores before vector optimization.
+`T.func` is inlined before fusion analysis, including nested library calls.
+Rank-two layernorm/softmax compute row statistics once; their final affine/exp
+tail can remain in the operand DAG. Fusion estimates the complete DAG's cost,
+not membership in an expensive-op list.
+`pass_options={"cpu_matmul_fusion": "auto"/"always"/"never"}` overrides this
+heuristic. Expensive producers materialize before cache traversal; conditional
+caches are allocated and read only on their selected branch.
 
-Dynamic SME matrix geometry is selected before entering streaming mode. Each
-selected family has its own small forced-inline callback and owns one SM/ZA
-interval; unrelated family bodies do not share an oversized streaming owner.
-Scalar lane bounds use the captured SVL independently of ordinary VL, and
-clipped fringe extents use public forced-inline scalar helpers. This is an
-inlining/code-generation policy, not a change to packing or family thresholds;
-target disassembly and paired execution still determine its effectiveness.
+The library recipe owns BM/BN/BK cache loops, optional dense packing, one
+initial accumulator seed per panel and one final epilogue. Explicit blocks
+and packing choices remain authoritative. Automatic blocks query actual
+L1/L2 capacity and may bypass packing/blocking when A, B and C fit conservative
+private-L2 shares. Empty M/N is checked before cache queries and traversal.
+L3 and LLC queries do not invent absent cache levels. Dot alone does not add
+cache blocking or automatic packing. Column-contiguous library outputs may
+transpose the complete fused DAG by swapping A/B.
 
-On an SME-FA64 target, same-storage-type operands with unit K stride can
-pack through public ZA horizontal loads and vertical drains. Full panels
-of elements up to 32 bits ping-pong between two ZA tile pairs; FP64 and
-spatial/K fringes use element-width staging with exact zero padding. Raw
-packing preserves storage bits (including NaN payloads and signed zeros).
-Negative spatial strides are legal; non-unit K strides retain the vector
-gather/conversion path. An unmasked rank-two FP32 storage leaf can also stage
-through ZA32 and feed its transposed slices to the normal pointwise Vector
-DAG before narrowing to BF16/FP16/int8/uint8. FP32 row-statistic and K-axis
-parameter broadcasts keep their own logical coordinates; final mul/add
-remain separate unless the DSL explicitly requests FMA. The route does not
-cross reduction, materialization or register/state boundaries, and 16-bit
-auxiliary loads retain the ordinary path. A folded load-convert's narrow
-alias snapshot also uses the ordinary path rather than pretending it is
-FP32 input storage. Absent spatial lanes are zeroed after the DAG and before
-conversion; padded K slots skip the entire DAG, including parameter reads.
-Conversion uses the public ordered/saturating conversion contract, not a
-bitwise guarantee for converted NaNs. Capacity and alias checks, including
-any snapshot, run before streaming entry. Geometry
-uses the captured calling-thread SVL, not a build-host or fixed 64-byte
-assumption, and no vector arrays are generated.
+`cpu_gemv_k_unroll` accepts 1, 2 or 4 (default 2) and controls source K-loop
+unrolling. `cpu_matmul_pipeline` accepts auto/off/prefetch/staged; source
+recipes use the generic `T.pipelined` planner. A staged request that cannot
+legally double-buffer a recurrence uses its diagnosed prefetch fallback.
+There is no private matrix pipeline printer.
 
-`T.func` is inlined **before** fusion analysis, including nested
-`T.library.*` calls in frozen capture identity. Rank-two layernorm/softmax
-hoist row statistics once; their final affine/exp tail stays in the operand
-DAG. The CPU fusion policy estimates operation cost and reloads to choose
-recomputation versus materialization, or puts the transform in packing loads.
-Dynamic row/column GEMV selects the non-packing reuse model when it bypasses
-packing; a tiled API alone does not imply that B is produced only once.
-`pass_options={"cpu_matmul_fusion": "auto"/"always"/"never"}` provides an
-explicit diagnostic override; `auto` is a heuristic, not an optimality proof.
-`cpu_sme_packed_ab_cache_bypass` is a strict boolean override. The SME cost
-profile enables the narrow policy by default; `False` retains the blocked
-control path. It may skip automatic cache panels for short, wide BF16 products
-whose A and B are already SME-packed. Geometry follows captured SVL, while a
-quotient-based runtime test requires the padded two-by-two full-K micro-panel
-to fit private L2 (the default budget uses its full capacity, not an
-arbitrary half-cache reservation). A target cost profile can select a stricter
-`sme_packed_ab_private_cache_divisor`; this is a performance budget, not an
-instruction-legality rule or universal profitability guarantee. Tuning thresholds live in the immutable SME cost
-profile (`sme_packed_ab_*`), not scattered opcode or exact-shape tables.
-Explicit BM/BN/BK, other dtypes/formats, ordinary vector requests and raw
-operands keep their existing paths. The full-dot leaf preserves prior
-accumulation, fused epilogue and alias checks. A processor cost profile can
-disable the default with `sme_packed_ab_cache_bypass=0` (the policy accepts only
-integer 0 or 1); the explicit boolean override takes precedence. The default
-is qualified by the complete 44-key packed-AB geometry cohort on 920f-lx,
-not a universal performance-parity claim or a fixed processor vector length.
-`benchmarks/dsl_matmul_packed_ab_ab.py` compares the explicitly blocked control, this
-policy and the original C++ reference on the complete source-registered
-geometry cohort. It retains GEMV/no-op dispatches, policy/fusion variants
-and private-cache budget rejects rather than selecting only profitable keys.
-Listing requires an explicit `--svl-bytes`; execution queries actual process
-SVL inside a scheduled ARM job and verifies any supplied value. Deterministic
-`--shard-index`/`--shard-count` partitions permit parallel validation without
-dropping or duplicating original keys. Every six rounds balance all three
-labels' positions and directed neighbors; all clocks, repeats and samples
-are retained. Offline packing remains outside timing, as in the source
-registration; original packing ABI and independent numerical checks precede
-timing. These measurements qualify this cohort, not the entire DSL catalog.
-`cpu_sme_narrow_singleton_slices` is a strict boolean experiment, default
-`False`. For a statically one-element ZA slice, memory loads, conversions and
-fused elementwise work use `FixedTag<T,1>`; ZA instructions keep their native
-word tag and masks. The proof is orientation-specific: a vertical slice of an
-Mx1 output still contains M elements and is not narrowed. Dynamic or merely
-short/tail slices keep their original route. This avoids instantiating wide
-index/predicate tuples for scalar-width memory work without scalarizing the
-matrix instruction. Cross-codegen checks pass; Native correctness and paired
-performance acceptance remain separate prerequisites for enabling a default.
-For an unpacked BF16 operand whose spatial axis is statically one, the same
-experiment computes one value per K slot and interleaves those values before
-MOPA. Already packed words, other operand dtypes and unknown spatial extents
-retain their original operand path. This is not a smaller hardware ZA tile.
+Raw first-sink, same-type FP32/FP64 SME products use a source MOPA recipe with
+a checked lexical SM/ZA owner, strided operand loads and direct horizontal
+stores. Its geometry follows the calling process's captured SVL. More complex
+products and narrow SME/AMX products currently use portable source vector
+recipes, including packed input decoding. Implementation hints retain dtype
+legality checks but do not resurrect the removed instruction-family generator.
+This deliberately sacrifices some hardware fast paths to complete migration;
+whole-catalog performance parity has not been established.
 
-`cpu_sve_runtime_quant` is a strict boolean experimental option, default
-`False`. When enabled, a lane-local FP32-to-U8 operand DAG and pure signed-I8
-SME-packed B can use an ordinary-SVE widening-dot row driver without ZA.
-Matching uses inlined IR semantics, not helper names. Four quantized K bytes
-are broadcast per dot instruction; incomplete K groups are zeroed **after**
-conversion, preserving a nonzero zero-point. Strict multiply/add remains
-separate; an explicit `T.fma` remains fused. Ordinary VL sizes the arithmetic
-vectors while the independently captured SVL bounds packed-panel loads.
-Cache blocking, phased I32 prior accumulation and the final epilogue remain
-in place; unsupported DAGs, execution domains or layouts retain the general
-path. This experiment fuses A production unless `cpu_matmul_fusion="never"`
-explicitly requests materialization. It does not yet assert a profitability
-crossover: compare its target timings with both the general MOPA path and
-the public C++ RuntimeQuant family before choosing a default or M threshold.
-Its intermediate tile values are limited to FP32/I32/bool, followed by the
-final U8 conversion. FP64 intermediates and staged FP16/BF16 conversions
-retain the general lowering, including their original rounding boundaries.
-SME cache leaves retain a constant K extent only when it fits the actual
-rounded BK: the K quantum is 1 for FP32/FP64, 2 for FP16/BF16 and 4 for byte
-operands. For example, `K=5, BK=3` still needs two phases, including its
-shortened final panel; the generic vector family's quantum of 32 is not a
-valid bound for this proof. Accumulator input applies only to the first
-phase, and output transforms only to the final phase.
-`cpu_gemv_columns` (integer 1–8, default 4) controls independent GEMV result
-columns per register group for CPU tuning; it is not a tile shape restriction.
-`cpu_gemv_k_unroll` (1, 2 or 4) overrides independent K accumulator banks.
-The target cost policy defaults to one bank on x86 and two on other CPU
-targets: four independent output columns already hide short x86 dot
-dependencies. Known K >= 512 retains two banks according to the
-`gemv_k_unroll_long` / `gemv_k_unroll_long_min` policies; unknown K also retains
-the conservative two-bank schedule. Simple epilogues use two-column then
-single-column remainders with at least four independent accumulators; known one/two
-column groups narrow to their real column count and retain at least four
-independent accumulators. Mathematical epilogues retain vector-grouped output
-evaluation. An explicit K-bank override bypasses the long-K policy.
-Automatic AMX cache panels align to the selected register family, not a
-universal 32-column boundary. A proven single M group does not automatically
-pack B a second time; explicit packing/block sizes remain authoritative.
-The x86 `amx_cache_b_panel_divisor` (4) bounds automatic B panels by a quarter
-of the target's runtime L2, rounded to the selected register-family quantum.
-This reserves residency for A and the B producer/packed-copy footprint, rather
-than budgeting packed B alone. `amx_cache_b_panel_max_m` (256) limits the policy
-to shallower M reuse; larger M keeps the original budget. Dynamic M selects
-the budget once outside panel loops. These are measured scheduling heuristics,
-not guarantees about cache occupancy. Explicit BN always wins; a zero divisor
-disables the cap, and a zero max-M removes its M gate. Other target profiles
-leave the cap disabled. Both settings can be overridden with a cost profile.
-On x86, a native, untransformed, K-contiguous B also skips automatic cache-panel
-packing when the original constant M is below the `amx_native_b_pack_min_m`
-policy (128) and both spatial extents fill complete register groups. Unknown
-M and ragged groups remain conservative; conversions, transforms,
-non-K-contiguous B and explicitly requested packing retain their own paths.
-The original problem's M, not a shortened cache panel, determines this gate.
-Small unblocked multi-M-group products retain their resident packed buffer;
-repeating the raw transpose is not necessarily cheaper than that small copy.
-Explicit dynamic cache phases share one packing wrapper with runtime family
-alignment, rather than cloning transformed panel producers for every family;
-shortened leaves still select a suitable register family.
-Known instruction-aligned extents survive aligned cache-panel slicing. Full
-AMX K loops hoist compatible raw-A addresses/strides and packed-A/B offsets
-into individual pointer cursors; only unproven spatial/K tails retain staging
-and padding checks. A padded K walk is legal for AMX packing, not dense packing.
-The x86 `amx_m_major_n_max` (128) and `amx_m_major_ratio` (4) policies select
-M-major instruction traversal for tall small-N strips. Dynamic selection uses
-one coordinate body rather than duplicating the entire matrix kernel; other
-CPU profiles leave this AMX-specific policy disabled by default.
-Known-size library products retain the cache driver's N-major order: a tall
-whole problem does not prove that shortened MC/NC panels remain tall. Direct
-dot retains whole-tile M-major; dynamic traversal uses its separately measured
-coordinate-selection path. Panel-local profitability remains a tuning task.
-The cost policies `matmul_unblocked_bytes` (512 KiB for constant shapes) and
-`matmul_runtime_unblocked_bytes` (128 KiB for dynamic shapes) control the
-automatic small-footprint bypass. Dynamic matrices above the latter cutoff
-retain cache-panel packing even when an equal-sized constant kernel can be
-simplified enough to profit from an unblocked schedule.
-For SME, automatic packing can also pack native, K-contiguous A when its
-spatial gather loads are sufficiently expensive. The decision includes padded
-storage and reuse within the actual NC panel, rather than assuming reuse
-across all N panels. Small/GEMV, broadcast and spatially contiguous inputs
-retain their existing route. A rejected decision neither allocates nor packs
-A; a selected decision dispatches once before each ZA block's K traversal.
-This does not add automatic packing to `T.dot`, or change explicit `packing=`
-requests. The centralized SME cost profile controls this internal policy.
-Alias snapshots preserve a statically known unit-stride axis while removing
-padding and overlap; compatible unmasked loads select an address/layout before
-one load/convert instead of selecting between two complete load expressions.
-Nested products, sibling products and product-to-pack/reduction boundaries
-materialize only the necessary intermediate products. A trailing rank-one
-bias/scale follows the matrix orientation and cache-panel origin.
-GEMV mathematical epilogues group completed horizontal sums into a legal
-vector before evaluating exp/log/etc, including strided output and K-block
-continuation. SME source generation keeps vector-only math exceptional
-paths inline, preserving their numerical contract and the no-call gate.
-No generated kernel calls `vecops::ops::Matmul` or private kernel helpers.
+The old matrix/cache/packing C++ loop generators, specialized schedule IR,
+SME automatic-packing policy objects and their experiment switches are gone.
+`cpu_sme_packed_ab_cache_bypass`, `cpu_sme_narrow_singleton_slices`,
+`cpu_sve_runtime_quant` and `cpu_gemv_columns` no longer select an algorithm.
+Use the general source catalog and cache-block benchmarks for current
+comparisons. Public C++ operators remain supported and provide unchanged
+reference implementations; no generated DSL kernel calls `vecops::ops::Matmul`.
+
+Alias snapshots preserve historical load identity, including writes crossing
+helper boundaries, and retain a proven contiguous axis without retaining
+padding/overlap. Shared, nested, masked and non-pointwise dot consumers receive
+ordinary private intermediate values. Scalar tails and physical packing
+conversions use the public saturating scalar conversion contract; same-dtype
+copies preserve storage bits instead of routing FP16/BF16 through FP32.
 
 `T.Vector(dtype, N=...)` or `T.Vector(dtype, pow=...)` describes a tagged virtual
 vector. It is not limited by the C++ Vec maximum power. `T.load(A,
@@ -1244,6 +1100,9 @@ with T.amx.region(((16, 64),)):  # (rows, column bytes) per tile, immutable tupl
 These are compiled lexical regions, not Python host context managers. SME
 bodies admit simple whole-view rank-2 transposes, `zero_za`, typed load/mopa and
 direct ZA slice moves; AMX admits typed tile zero/load/stream_load/store/tdp.
+`T.sme.load(view, strided=True)` explicitly enables signed-stride numeric
+vector loads (including gathers) under the same pre-owner root/word bounds.
+The default, raw ZA memory moves and `load_bits` still require unit stride.
 Bounded `T.serial` instruction loops preserve one owner. Pure integer/boolean
 metadata branches must be invariant in enclosing instruction loops. Views are
 validated before entry; allocation, throwing work, nested explicit regions and
@@ -1893,7 +1752,12 @@ absence/ambiguity is a diagnostic miss rather than loading an incompatible file.
 ### Source-parsed register algorithms
 
 `T.bitcast(value, dtype)` reinterprets equal logical bytes, unlike numeric
-`T.cast`. `T.lower_half`/`T.upper_half` select halves of a logical vector and
+`T.cast`. Equal element widths use an elementwise bit reinterpretation,
+retaining scalar/tile shape and any clipped Vector prefix; this does not
+require a complete register geometry. Different widths change logical lane
+geometry and retain the complete-register constraints below. Numeric casts
+may saturate and are not a substitute for signed/unsigned bit reinterpretation.
+`T.lower_half`/`T.upper_half` select halves of a logical vector and
 `T.concat` joins two equal-width vectors. Their names do not replace the
 existing debugging function `T.lower`. `T.local_interleave_lower` and
 `T.local_interleave_upper` interleave within complete 16-byte blocks;
@@ -2020,14 +1884,40 @@ replicates source lane zero rather than advancing through inactive lanes.
 An exact unit-step `T.simd` scatter into a known nonzero-stride rank-one view
 can become a bounded vector store without requiring a `unique=True` hint.
 Arbitrary/permuted indices and unknown or zero strides retain their indexed
-semantics and checks. Unpacked, unblocked floating-point vector dots now use
+semantics and checks. Unblocked numeric vector dots, including packed inputs, use
 source-parsed register or streaming helpers by default, including K-vectorized
-inner products for column GEMV/K-contiguous B. Other hardware, packed and
-cache-blocked families are still being migrated. Their epilogues are projected
+inner products for column GEMV/K-contiguous B. Cache-blocked products now use
+the same source leaves inside ordinary DSL panel/K loops. Their epilogues are projected
 from the captured caller DAG into the current vector, not implemented as host
 callbacks or native closures. Cost-based operand caches use lazy reads: an
 inactive cache branch never loads uninitialized private memory or evaluates
 both arithmetic alternatives.
+Integer vector recipes perform modulo-32-bit multiply/accumulate using unsigned
+arithmetic plus bit reinterpretation, not numeric saturating conversion.
+Packed ABI capacity, density and output-disjointness checks precede decoding.
+Raw first-sink FP32/FP64 SME dots without acc/epilogue stage a direct MOPA
+helper: no implicit packing, signed-stride vector loads, masked ZA stores and
+pre-owner alias copies. Earlier writes/captured state and broader native
+families use identity-preserving DSL vector recipes, not a native matrix loop
+printer. This migration does **not** claim AMX/SME instruction-family performance
+parity: complex/narrow matrix-instruction families currently use the portable
+vector implementation, including when requested as the implementation hint.
+Unsupported explicit dtype combinations still fail. Low-level `T.amx`/`T.sme`
+instruction APIs remain available; public C++ operators are unchanged.
+
+Cache traversal, private accumulator initialization, K-phase accumulation,
+optional dense packing and final epilogue application live in
+`_library/matmul.py`. `T.cache_bytes("L1"/"L2"/"L3"/"LLC")` queries the execution
+CPU; an absent L3/LLC returns zero. Block sizes use positive bounded DSL
+arithmetic rather than a target-side native scheduler. Generic packed-ABI
+construction is in `_library/packing.py`, including zero padding and source
+transforms; this conservative implementation can be slower than the retired
+specialized packers. Packed offset/size decoding remains a physical ABI
+primitive, not an opaque packing algorithm. Automatic register-transpose
+traversal is also source DSL (`_library/layout.py`); hardware-unavailable,
+unsupported-stride and alias cases use ordinary gather/scatter lowering.
+The historical descriptions of native-family tuning and raw-packing selection
+earlier in this guide are superseded by this section.
 
 `broadcast_to` also accepts scalar expressions, filling the requested logical
 shape with the scalar's dtype. This covers scalar initial accumulators without

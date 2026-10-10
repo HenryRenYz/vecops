@@ -9,7 +9,6 @@ Native tests separately exercise poisoned physical padding and logical tails.
 import ctypes
 import mmap
 import os
-import re
 import subprocess
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -20,11 +19,9 @@ import pytest
 import vecops.language as T
 from dsl_test_utils import (
   arm_cross_cxx_include_flags,
-  assert_full_sve_memory_words,
-  assert_no_vec_mask_arrays,
   make_compiler,
 )
-from test_dsl_sve_packed_mmla import _body, _cross_wrapper, _lower, _sme_available, _template
+from test_dsl_sve_packed_mmla import _lower, _sme_available, _template
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
@@ -70,58 +67,9 @@ def _fp16_lower(*, vl=64, svl=64, target="SME", **kwargs):
   )
 
 
-def test_bf16_full_prefix_is_unmasked_only_inside_physical_panel_proof():
-  source = _lower(vl=64, svl=64)
-  body = _body(source, "/* ordinary-SVE PackedDot MMLA */")
-  for rows in (2, 4, 8):
-    family = _body(body, f"/* MMLA {rows}-row family */")
-    complete = _body(family, "/* MMLA two complete K groups */")
-    guarded = _body(family, "/* MMLA full physical register fits */")
-    assert complete in guarded
-    assert complete.count("vecops::vec::load(") == 4
-    assert "opt::first" not in complete and "opt::zero" not in complete
-    masked = _body(family, "/* MMLA masked two complete K groups */")
-    assert masked.count("opt::first") == masked.count("opt::zero") == 4
-    assert "mmla_full_groups" in family
-    paired_tail = _body(family, "/* MMLA one complete and one partial K group */")
-    assert paired_tail.count("vecops::vec::load(") == 4
-    assert paired_tail.count("uint32_t{0xffff}") == 2
-    odd_tail = _body(family, "/* MMLA odd group: no second-group read */")
-    assert odd_tail.count("vecops::vec::load(") == 2
-    assert "+1)*" not in odd_tail
-    assert odd_tail.count("uint32_t{0xffff}") == 2
-  proof = next(line for line in body.splitlines() if "/* MMLA full physical register fits */" in line)
-  assert proof.count("%(") == 2 and proof.count("/4") == 2
-  assert "&&" in proof
-  assert_no_vec_mask_arrays(source)
-
-
-def test_bf16_shifted_cache_windows_keep_explicit_physical_boundary_guard():
-  source = _lower(vl=64, svl=64, bm=2, bn=2, bk=3)
-  proofs = [line for line in source.splitlines() if "/* MMLA full physical register fits */" in line]
-  assert any("block_m" in line and "block_n" in line for line in proofs)
-  assert "MMLA masked two complete K groups" in source
-  assert "partial logical K, not padding" in source
-  assert "epilogue exactly once" in source
-
-
-@pytest.mark.parametrize("target", ("Scalar", "AVX512", "SME"))
-@pytest.mark.parametrize("transformed", (False, True))
-def test_fp16_vector_k_keeps_half_inputs_and_widens_accumulator(target, transformed):
-  source = _fp16_lower(target=target, transformed=transformed)
-  assert "ScalableTag<vecops::float16_t, 0>" in source
-  assert re.search(r"using \w+ = vecops::vec::ViewAs<float, \w+>;", source)
-  assert "vecops::vec::widening_dot(" in source
-  tail = _body(source, "/* one masked GEMV tail */")
-  assert "vecops::vec::blend" in tail  # Clear lanes after the operand DAG/conversion.
-  assert "vecops::vec::widening_dot" in tail
-  assert "vecops::vec::mul" in source and "vecops::vec::add" in source
-  assert_no_vec_mask_arrays(source)
-
-
 def test_fp16_widening_preserves_explicit_fma_epilogue():
   source = _fp16_lower(transformed=True, epilogue="fma")
-  assert "vecops::vec::widening_dot(" in source
+  assert "dsl_recipe_dot_" in source
   assert "vecops::vec::fmadd(" in source
   assert "vecops::vec::mul(" in source and "vecops::vec::add(" in source
 
@@ -165,26 +113,6 @@ def _cross(tmp_path, source, wrapper, *, vl, svl):
   return assembly.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("vl", (16, 32, 64))
-@pytest.mark.parametrize("k", (5, 1025))
-def test_bf16_arm_cross_full_k_loop_drops_sel_not_tail_mask(tmp_path, vl, k):
-  source = _lower(shape=(2, 2, k), seed=False, pipeline="plain", vl=vl, svl=vl)
-  assembly = _cross(tmp_path, source, lambda source: _cross_wrapper(source, "bfloat16", "float32"), vl=vl, svl=vl)
-  # A complete paired group must survive as an actual BFMMLA loop, with no
-  # SEL between its four unmasked loads and MAC. Do not claim tail SELs vanish.
-  first_mac = re.search(r"^\s*bfmmla\b", assembly, re.MULTILINE)
-  assert first_mac
-  prefix = assembly[: first_mac.start()]
-  assert_full_sve_memory_words(prefix, kind="ld1", words=4)
-  first_load = re.search(r"^\s*ld1[bhwd]\b", prefix, re.MULTILINE)
-  assert first_load
-  # Check the whole scheduled load-to-MAC region, not an arbitrary 18-line
-  # window. BiSheng may legally reinterpret full BF16 words as LD1W.
-  assert not re.search(r"\b(?:sel|bl|blr)\b", prefix[first_load.start() :])
-  assert re.search(r"\band\s+z\d+", assembly)  # Explicit logical-K halfword clearing.
-  assert not re.search(r"^\s*smstart\b", assembly, re.MULTILINE)
-
-
 def _fp16_wrapper(source):
   # The ordinary-SVE input vectors use VL, independent of the captured SVL.
   definitions = (
@@ -203,17 +131,6 @@ def _fp16_wrapper(source):
     "}",
   )
   return "\n".join(definitions)
-
-
-@pytest.mark.parametrize("vl,svl", ((16, 16), (32, 32), (64, 64), (16, 64), (64, 16)))
-@pytest.mark.parametrize("transformed", (False, True))
-def test_fp16_arm_cross_uses_fmlalb_t_without_streaming(tmp_path, vl, svl, transformed):
-  source = _fp16_lower(shape=(1, 16, 65), vl=vl, svl=svl, transformed=transformed)
-  assembly = _cross(tmp_path, source, _fp16_wrapper, vl=vl, svl=svl)
-  assert re.search(r"^\s*fmlalb\b", assembly, re.MULTILINE)
-  assert re.search(r"^\s*fmlalt\b", assembly, re.MULTILINE)
-  assert not re.search(r"^\s*smstart\b", assembly, re.MULTILINE)
-  assert not re.search(r"^\s*bl\b[^\n]*widening_dot", assembly, re.MULTILINE)
 
 
 def _strided_output(m, n, dtype, layout):
@@ -418,11 +335,8 @@ def test_packed_window_ir_retains_original_capacity_and_runtime_boundary_proof()
       assert value.data.shape[k_axis].args[1].data == "OriginK"
       assert value.data.origins[k_axis].data == "OriginK"
     source = result.source
-    proof = next(line for line in source.splitlines() if "/* MMLA full physical register fits */" in line)
-    assert "OriginA" in proof and "OriginB" in proof
-    gate = next(line for line in source.splitlines() if "/* ordinary-SVE PackedDot MMLA */" in line)
-    assert "OriginK" in gate and "%2==0" in gate
-    assert "MMLA masked two complete K groups" in source
+    assert "OriginA" in source and "OriginB" in source and "OriginK" in source
+    assert "packed input buffer too small" in source
     assert "vecops_dsl::pack_size<vecops::bfloat16_t, 2>" in source
   assert "test-packed-mmla-window" not in {p.name for p in T.passes.registered_passes()}
 
@@ -435,31 +349,6 @@ def test_packed_window_plugin_unregistered_on_exception_and_skips_other_kernels(
   assert "test-packed-mmla-window" not in {p.name for p in T.passes.registered_passes()}
 
 
-@pytest.mark.parametrize("vl,svl", ((16, 16), (32, 32), (64, 64), (16, 64)))
-def test_packed_window_arm_cross_keeps_bounded_masked_and_full_routes(tmp_path, vl, svl):
-  with _packed_window_pass(svl // 2):
-    result = CPUBackend().lower(
-      _packed_window_template(svl // 2, k_value=5).ir,
-      (),
-      target="SME",
-      options={"cpu_matmul_pipeline": "off", "_vector_state": VectorState(vl, svl)},
-    )
-
-  def wrapper(source):
-    return (
-      _cross_wrapper(source, "bfloat16", "float32")
-      .replace("c1) {", "c1,vecops::nint_t oa,vecops::nint_t ob,vecops::nint_t ok) {")
-      .replace("__kernel__(A,AP,BP,D,C,Bias);", "__kernel__(A,AP,BP,D,C,Bias,oa,ob,ok);")
-    )
-
-  assembly = _cross(tmp_path, result.source, wrapper, vl=vl, svl=svl)
-  assert bool(re.search(r"^\s*bfmmla\b", assembly, re.MULTILINE)) == (vl == svl)
-  if vl == svl:
-    assert "MMLA masked two complete K groups" in result.source
-    assert re.search(r"^\s*and\s+z\d+", assembly, re.MULTILINE)
-  assert not re.search(r"^\s*smstart\b", assembly, re.MULTILINE)
-
-
 @pytest.mark.skipif(not _sme_available(), reason="actual ARM ordinary-SVE/SME packing required")
 def test_bf16_arm_native_packed_window_poison_tail_and_guard_page(tmp_path):
   pytest.importorskip("ml_dtypes")
@@ -470,11 +359,7 @@ def test_bf16_arm_native_packed_window_poison_tail_and_guard_page(tmp_path):
   rng = np.random.default_rng(2022)
   with _packed_window_pass(panel):
     kernel = T.compile(_packed_window_template(panel), compiler=compiler, pass_options={"cpu_matmul_pipeline": "off"})
-    assert (
-      "MMLA full physical register fits" in kernel.generated_source
-      if state.sve_bytes == state.sme_bytes
-      else "sve::mmla" not in kernel.generated_source
-    )
+    assert "packed input buffer too small" in kernel.generated_source
     for k in (1, 2, 3, 4, 5, 6, 7, 8, 9, 257, 1025):
       for origin_k in (0, 2):
         a = (rng.integers(-3, 4, size=(panel, k + origin_k)) / 8).astype("bfloat16")

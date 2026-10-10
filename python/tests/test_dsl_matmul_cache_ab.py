@@ -38,7 +38,7 @@ def test_listing_retains_actual_slow_key_and_never_compiles(benchmark, monkeypat
   rows = list(csv.DictReader(capsys.readouterr().out.splitlines()))
   assert len(rows) == 12
   assert {row["profile"] for row in rows} == set(benchmark.LABELS)
-  assert sum(row["execution_id"] == "84e258c6e4fc904a541c1d04" for row in rows) == 6
+  assert sorted(Counter(row["execution_id"] for row in rows).values()) == [6, 6]
   assert all("packedab" in row["key"] and "/128/4096/4096/" in row["key"] for row in rows)
 
 
@@ -46,15 +46,13 @@ def test_opt_in_whole_problem_diagnostic_changes_only_one_profile(benchmark, cap
   selected = benchmark.diagnostic_profiles(packed_ab_bypass=True)
   assert selected[0] == benchmark.PROFILES[0] and selected[2:] == benchmark.PROFILES[2:]
   assert selected[1] == ("whole-problem-library", (None, None, None), "matmul")
-  assert benchmark.profile_options("whole-problem-library") == {"cpu_sme_packed_ab_cache_bypass": True}
-  assert all(
-    benchmark.profile_options(label) == {"cpu_sme_packed_ab_cache_bypass": False} for label, _, _ in benchmark.PROFILES
-  )
+  assert benchmark.profile_options("whole-problem-library") == {}
+  assert all(benchmark.profile_options(label) == {} for label, _, _ in benchmark.PROFILES)
   benchmark.main(["--svl-bytes", "64", "--source-archive-sha256", "0" * 64, "--sme-packed-ab-bypass", "--list"])
   rows = list(csv.DictReader(capsys.readouterr().out.splitlines()))
   assert len(rows) == 12
   assert sum(row["profile"] == "whole-problem-library" for row in rows) == 2
-  assert sum(row["execution_id"] == "84e258c6e4fc904a541c1d04" for row in rows) == 6
+  assert sorted(Counter(row["execution_id"] for row in rows).values()) == [6, 6]
 
 
 @pytest.mark.parametrize("extra", (("--rounds", "7"), ("--jobs", "0")))
@@ -74,7 +72,9 @@ def test_block_overrides_are_explicit_and_reference_is_unchanged(benchmark, monk
   case = next(
     case
     for case in benchmark.scenarios(benchmark.load_cases(svl_bytes=64), levels=("matmul",))
-    if case.execution_id == "84e258c6e4fc904a541c1d04"
+    if case.packing == "packedab"
+    and case.mode == "Const"
+    and (case.case.m, case.case.n, case.case.k) == (128, 4096, 4096)
   )
   default, default_packing = benchmark.source_templates(case)
   blocked, blocked_packing = benchmark.source_templates(case, blocks=(128, 128, 512))

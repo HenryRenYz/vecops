@@ -59,6 +59,7 @@ class Frontend(
     self.helper_depth = 0
     self.helper_scopes = []
     self.control_depth = 0
+    self.mutable_names = set()
     self.promoted = {}
     self.diagnostics = []
     self.hardware_regions = []
@@ -942,7 +943,7 @@ class Frontend(
     if isinstance(existing, CarriedTuple):
       self.update_tuple(existing, self.capture_assignment(value), node)
       return
-    if isinstance(existing, I.Expr) and existing.op == "state_ref":
+    if isinstance(existing, I.Expr) and existing.op == "state_ref" and target.id in self.mutable_names:
       self.check_state_type(existing.type, value, node)
       self.block.statements.append(I.UpdateState(existing.data, self.freeze_tile(value)))
       return

@@ -67,7 +67,6 @@ def profile(args):
   import torch
   import vecops
   import vecops.language as T
-
   from dsl_matmul import kernels
   from dsl_timing import isolate_compilation, reserve_cpu
   from dsl_transpose import aligned_empty
@@ -95,7 +94,7 @@ def profile(args):
     args.kind,
     args.pipeline,
     args.level,
-    {"cpu_matmul_fusion": "auto", "cpu_gemv_columns": 4},
+    {"cpu_matmul_fusion": "auto", "cpu_gemv_k_unroll": 2},
   )
   if args.baseline_source:
     baseline = copy(pair[0].template)

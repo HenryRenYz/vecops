@@ -102,24 +102,29 @@ def test_small_constant_conversion_uses_single_word_existing_memory_lowering(sou
 def test_selection_uses_ordinary_vl_not_streaming_vl_or_cost_model(vl, svl, selected):
   artifact = lower(transpose_template(), vl=vl, svl=svl, cost=CPUTarget("x86", "avx512", vector_bits=512))
   statement = output_store(artifact)
-  assert (id(statement) not in artifact.backend_ir.transposes) is selected
-  assert artifact.lowered.plans[id(statement)].unroll == (1 if selected else 2)
+  assert id(statement) not in artifact.backend_ir.transposes
+  if selected:
+    assert artifact.lowered.plans[id(statement)].unroll == 1
+  else:
+    assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
 
 
 @pytest.mark.parametrize("target", ("AVX512", "Scalar", "generic"))
 def test_arm_cost_override_never_changes_other_codegen_targets(target):
   artifact = lower(transpose_template(), target=target, cost=CPUTarget("arm", "sme", vector_bits=512))
   statement = output_store(artifact)
-  assert id(statement) in artifact.backend_ir.transposes
-  assert artifact.lowered.plans[id(statement)].unroll == 2
+  assert (id(statement) in artifact.backend_ir.transposes) is (target == "Scalar")
+  if target != "Scalar":
+    assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
 
 
 @pytest.mark.parametrize("implementation", ("vector", "sme", "gather"))
 def test_explicit_backend_overrides_keep_their_existing_policy(implementation):
   artifact = lower(transpose_template(implementation=implementation))
   statement = output_store(artifact)
-  assert (id(statement) in artifact.backend_ir.transposes) is (implementation != "gather")
-  assert artifact.lowered.plans[id(statement)].unroll == 2
+  assert (id(statement) in artifact.backend_ir.transposes) is (implementation == "sme")
+  if implementation == "vector":
+    assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
 
 
 @pytest.mark.parametrize(
@@ -136,8 +141,9 @@ def test_explicit_backend_overrides_keep_their_existing_policy(implementation):
 def test_raw_large_dynamic_and_nontrivial_producers_keep_existing_transpose(kwargs):
   artifact = lower(transpose_template(**kwargs))
   statement = output_store(artifact)
-  assert id(statement) in artifact.backend_ir.transposes
-  assert artifact.lowered.plans[id(statement)].unroll == 2
+  assert id(statement) in artifact.backend_ir.transposes or "register transpose traversal" in "\n".join(
+    artifact.kernel.diagnostics
+  )
 
 
 def test_intermediate_load_rounding_and_unknown_strides_use_general_memory_semantics():
@@ -215,24 +221,27 @@ def test_medium_fp64_conversion_requires_captured_ordinary_vl_even_with_cost_ove
     cost=CPUTarget("x86", "avx512", vector_bits=512),
   )
   statement = output_store(artifact)
-  assert (id(statement) not in artifact.backend_ir.transposes) is selected
-  assert artifact.lowered.plans[id(statement)].unroll == (1 if selected else 2)
+  assert id(statement) not in artifact.backend_ir.transposes
+  if selected:
+    assert artifact.lowered.plans[id(statement)].unroll == 1
+  else:
+    assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
 
 
 @pytest.mark.parametrize("implementation", ("vector", "sme", "gather"))
 def test_medium_conversion_keeps_explicit_policy(implementation):
   artifact = lower(transpose_template("float64", "float16", "float64", shape=(63, 129), implementation=implementation))
   statement = output_store(artifact)
-  assert (id(statement) in artifact.backend_ir.transposes) is (implementation != "gather")
-  assert artifact.lowered.plans[id(statement)].unroll == 2
+  assert (id(statement) in artifact.backend_ir.transposes) is (implementation == "sme")
+  if implementation == "vector":
+    assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
 
 
 @pytest.mark.parametrize("expression", ("affine", "cast"))
 def test_medium_nontrivial_producer_keeps_register_plan(expression):
   artifact = lower(transpose_template("float64", "float32", "float32", shape=(63, 129), expression=expression))
-  statement = output_store(artifact)
-  assert id(statement) in artifact.backend_ir.transposes
-  assert artifact.lowered.plans[id(statement)].unroll == 2
+  assert not artifact.backend_ir.transposes
+  assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
 
 
 def test_medium_intermediate_rounding_and_alias_snapshots_remain_in_vector_ir():

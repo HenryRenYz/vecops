@@ -10,6 +10,7 @@ same optimization/legalization pipeline as user-written DSL code.
 from dataclasses import replace
 
 from ... import ir as I
+from ...analysis.affine import simplify_loop_metadata
 from ...analysis.projection import pointwise_row_projection
 from ...cost import estimate
 from ...dtypes import ELEMENT_BYTES
@@ -20,19 +21,33 @@ from ...passes.manager import PassResult, register_pass
 from .policies import recompute_limit
 
 
-@register_pass("cpu-expand-dot-recipes", after="orient-matmul", before="fuse-elementwise")
+@register_pass("cpu-expand-dot-recipes", after="cpu-stage-matrix-values", before="fuse-elementwise")
 def expand_dot_recipes(ir, context):
-  from ...._library.matmul import vector_dot_into, vector_tile_dot
+  from ...._library.matmul import blocked_dot_into, vector_dot_into, vector_tile_dot
 
   environment = context.environment
   target = environment.codegen_target
   vector_state = environment.vector_state
   native_bytes = vector_state.sve_bytes or 16 if target.isa in {"sve", "sme"} else (target.vector_bits or 128) // 8
   budget = context.options.get("cpu_state_register_budget", 12)
-  serial, rewritten = 0, set()
+  serial, rewritten, sme_rewritten = 0, set(), set()
   fusion = context.options.get("cpu_matmul_fusion", "auto")
   if fusion not in {"auto", "always", "never"}:
     raise ValueError("cpu_matmul_fusion must be auto, always or never")
+  pipeline = context.options.get("cpu_matmul_pipeline", "auto")
+  if pipeline not in {"auto", "off", "prefetch", "staged"}:
+    raise ValueError("cpu_matmul_pipeline must be auto, off, prefetch or staged")
+  if pipeline == "auto":
+    policy = environment.costs.policy("matmul_pipeline", 0)
+    if policy not in (0, 1, 2):
+      raise ValueError("target matmul_pipeline policy must be 0, 1 or 2")
+    pipeline = ("off", "prefetch", "staged")[int(policy)]
+  distance = context.options.get("cpu_matmul_prefetch_distance", 1)
+  if type(distance) is not int or not 1 <= distance <= 16:
+    raise ValueError("cpu_matmul_prefetch_distance must be in [1,16]")
+  unroll = context.options.get("cpu_gemv_k_unroll", 2)
+  if type(unroll) is not int or unroll not in (1, 2, 4):
+    raise ValueError("cpu_gemv_k_unroll must be 1, 2 or 4")
 
   def input_policy(product, ordinal, prefix):
     expression = product.args[ordinal]
@@ -61,15 +76,32 @@ def expand_dot_recipes(ir, context):
     ]
 
   def eligible(product):
-    vector_family = product.data.implementation == "vector" or (
-      product.data.implementation == "auto"
-      and target.architecture == "x86"
-      and all(arg.type.dtype == product.type.dtype for arg in product.args[:2])
+    a_dtype, b_dtype = (value.type.dtype for value in product.args[:2])
+    native_narrow = (
+      a_dtype == b_dtype
+      and a_dtype in {"float16", "bfloat16"}
+      and product.type.dtype == "float32"
+      or a_dtype in {"int8", "uint8"}
+      and b_dtype in {"int8", "uint8"}
+      and product.type.dtype == "int32"
     )
-    if product.data.tiled or not vector_family or product.type.dtype not in {"float32", "float64"}:
+    if (
+      product.data.implementation == "amx"
+      and not native_narrow
+      or product.data.implementation == "sme"
+      and not (
+        native_narrow or a_dtype == b_dtype == product.type.dtype and product.type.dtype in {"float32", "float64"}
+      )
+    ):
+      raise TypeError(f"unsupported {product.data.implementation} dot dtype combination")
+    if product.type.dtype not in {"float32", "float64", "int32"}:
       return False
-    if any(value.op in {"dot", "packed_load", "state_ref"} for arg in product.args for value in walk_unique(arg)):
+    if any(value.op == "dot" for arg in product.args for value in walk_unique(arg)):
       return False
+    if product.data.tiled:
+      return "blocked"
+    if pipeline != "off":
+      return "streaming"
     m, n = map(I.constant, product.type.shape)
     widest = max(
       ELEMENT_BYTES[value.type.dtype] for value in walk_unique(product) if isinstance(value.type, I.TileType)
@@ -89,6 +121,44 @@ def expand_dot_recipes(ir, context):
       memo[id(value)] = replace(value, args=args) if any(a is not b for a, b in zip(args, value.args)) else value
     return memo[id(value)]
 
+  def packed_checks(product, destination):
+    """Packed ABI validation precedes all source-algorithm reads/writes.
+
+    Packing offsets remain a physical-layout primitive. A bare T.packed
+    declaration is not evidence of capacity, density or nonaliasing.
+    """
+    output, seen = [], set()
+    for operand in product.args:
+      for value in walk_unique(operand):
+        if value.op != "packed_load" or id(value.data) in seen:
+          continue
+        seen.add(id(value.data))
+        packed, expected = value.data, I.literal(1)
+        view = packed.view
+        output.append(
+          I.Assert(
+            I.binary("ge", I.Expr(I.ScalarType("int64"), "checked_shape", view.shape), I.literal(0)),
+            "invalid packed buffer shape",
+          )
+        )
+        for extent, stride in zip(reversed(view.shape), reversed(view.strides)):
+          output.append(I.Assert(I.binary("eq", stride, expected), "packed input must be dense"))
+          expected = I.binary("mul", expected, extent)
+        spatial, k = packed.shape if packed.side == "A" else packed.shape[::-1]
+        required = I.Expr(I.ScalarType("int64"), "packing_size", (spatial, k), (view.dtype, packed.format))
+        # The ABI decoder is disabled if the physical view is not a valid
+        # dense buffer. Shape metadata is nonnegative by the tensor schema;
+        # the packing-size helper additionally checks byte-count overflow.
+        output.append(I.Assert(I.binary("ge", expected, required), "packed input buffer too small"))
+        if not view.owned:
+          output.append(
+            I.Assert(
+              I.Expr(I.ScalarType("bool"), "view_disjoint", data=(view, destination)),
+              "packed input and matrix output may not overlap",
+            )
+          )
+    return output
+
   # A register result is scoped to its sink. Do not replace a product consumed
   # by another sink or a nonlocal/state/conditional consumer with that local.
   consumers = {}
@@ -102,7 +172,7 @@ def expand_dot_recipes(ir, context):
           if product.op == "dot":
             consumers.setdefault(id(product), set()).add(id(statement))
 
-  def visit(block):
+  def visit(block, *, top=False):
     nonlocal serial
     output = []
     for statement in block.statements:
@@ -121,11 +191,63 @@ def expand_dot_recipes(ir, context):
             if id(value) not in operands
           )
           family = eligible(product)
-          if family and epilogue and consumers[id(product)] == {id(statement)}:
+          raw_sme = (
+            top
+            and target.architecture == "arm"
+            and target.isa == "sme"
+            and not product.data.tiled
+            and product.data.implementation in {"auto", "sme"}
+            and product.type.dtype in {"float32", "float64"}
+            and len(product.args) == 2
+            and statement.value is product
+            and I.constant(statement.destination.strides[-1]) == 1
+            and statement.destination.dtype == product.type.dtype
+            and all(
+              operand.op == "load"
+              and not operand.args
+              and operand.data.dtype == operand.type.dtype == product.type.dtype
+              and operand.data.region is not None
+              for operand in product.args
+            )
+            # Passing views to a raw instruction recipe must not turn an old
+            # captured read into a fresh read after any possible earlier write.
+            # More general captures use the existing identity-bearing path.
+            and all(isinstance(item, (I.BindTile, I.Assert, I.Assign)) for item in output)
+          )
+          if raw_sme and consumers[id(product)] == {id(statement)}:
+            from ...._library.sme_matmul import direct_dot
+
             serial += 1
+            output.append(
+              I.Assert(
+                I.Expr(I.ScalarType("bool"), "view_nonoverlap", data=statement.destination),
+                "matrix output layout overlaps",
+              )
+            )
+            _, body = expand_helper(
+              direct_dot,
+              (*[operand.data for operand in product.args], statement.destination),
+              catalog=environment.operations,
+              prefix=f"dsl_recipe_sme_dot_{serial}",
+            )
+            output.extend(body)
+            rewritten.add(id(product))
+            sme_rewritten.add(id(product))
+            continue
+          if family and epilogue:
+            serial += 1
+            output.append(
+              I.Assert(
+                I.Expr(I.ScalarType("bool"), "view_nonoverlap", data=statement.destination),
+                "matrix output layout overlaps",
+              )
+            )
+            output.extend(packed_checks(product, statement.destination))
             kwargs = {"acc": product.args[2] if len(product.args) > 2 else None, "acc_dtype": product.type.dtype}
+            kwargs["unroll"] = unroll
             arguments = (product.args[:2],)
-            if family == "streaming":
+            if family in {"streaming", "blocked"}:
+              kwargs.update(pipeline=pipeline, distance=distance)
               inputs = []
               for ordinal in range(2):
                 operand, preamble = input_policy(product, ordinal, f"dsl_recipe_dot_{serial}_{ordinal}")
@@ -142,7 +264,11 @@ def expand_dot_recipes(ir, context):
                 None,
               )
               kwargs["prefer_k"] = (
-                I.literal(False) if primary is None else I.binary("eq", primary.data.strides[0], I.literal(1))
+                I.literal(True)
+                if product.args[1].op == "packed_load" and product.args[1].data.format == "dense"
+                else I.literal(False)
+                if primary is None
+                else I.binary("eq", primary.data.strides[0], I.literal(1))
               )
               extent = I.Expr(I.ScalarType("int64"), "region_argument", data="prefix")
               reference = I.Expr(
@@ -158,22 +284,33 @@ def expand_dot_recipes(ir, context):
                 ),
               )
               arguments += (statement.destination,)
+              if family == "blocked":
+                kwargs.update(
+                  BM=product.data.block_m,
+                  BN=product.data.block_n,
+                  BK=product.data.block_k,
+                  packing=product.data.packing,
+                )
             result, body = expand_helper(
-              vector_tile_dot if family == "tile" else vector_dot_into,
+              vector_tile_dot if family == "tile" else blocked_dot_into if family == "blocked" else vector_dot_into,
               arguments,
               keyword_arguments=kwargs,
               catalog=environment.operations,
               prefix=f"dsl_recipe_dot_{serial}",
             )
+            if family != "blocked" and all(
+              type(I.constant(v)) is int for v in (*product.type.shape, product.args[0].type.shape[1])
+            ):
+              body = simplify_loop_metadata(I.Block(body)).statements
             output.extend(body)
             rewritten.add(id(product))
-            if family == "streaming":
+            if family in {"streaming", "blocked"}:
               continue
             statement = replace(statement, value=replace_product(statement.value, product, result, {}))
       output.append(statement)
     block.statements = output
 
-  visit(ir.body)
+  visit(ir.body, top=True)
 
   # Keep original lazy-load provenance, but discard unused opaque products.
   def provenance(block):
@@ -195,5 +332,8 @@ def expand_dot_recipes(ir, context):
     from ...passes.kernel.transforms import fold_value_transforms
 
     ir = fold_value_transforms(ir, context)
-    ir.diagnostics.append(f"staged {len(rewritten)} vector dot leaf/leaves from DSL library")
+    if len(rewritten) > len(sme_rewritten):
+      ir.diagnostics.append(f"staged {len(rewritten) - len(sme_rewritten)} vector dot leaf/leaves from DSL library")
+    if sme_rewritten:
+      ir.diagnostics.append(f"staged {len(sme_rewritten)} direct SME dot leaf/leaves from DSL library")
   return PassResult(ir, changed=bool(rewritten))

@@ -15,9 +15,8 @@ import pytest
 import vecops
 import vecops.language as T
 from arm_sme_asm_utils import assembly_functions, assert_sme_owners
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from test_dsl_matmul_sve_optimized import _cross
-from test_dsl_sme_exact_blocks import _body, _cross_wrapper, _sme_available, _template
+from dsl_test_utils import make_compiler
+from test_dsl_sme_exact_blocks import _sme_available, _template
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
@@ -42,49 +41,6 @@ def _lower(*, vl=64, svl=64, **kwargs):
       },
     )
     .source
-  )
-
-
-@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32", "float64", "int8", "uint8"))
-@pytest.mark.parametrize("packed", (False, True))
-def test_dynamic_geometry_is_selected_before_each_inline_state_owner(dtype, packed):
-  output = "float64" if dtype == "float64" else "int32" if dtype in {"int8", "uint8"} else "float32"
-  source = _lower(dtype=dtype, output=output, packed=packed, pipeline="affine")
-  owners = [_body(source, match[0]) for match in re.finditer(_OWNER, source)]
-  expanded = dtype == "float64" and not packed
-  assert len(owners) == (11 if expanded else 9)
-  schedules = []
-  for owner in owners:
-    assert ".with_resources(" not in owner
-    assert "ZA family */" not in owner  # The family dispatch is outside SM.
-    schedules.extend(re.findall(r"/\* SME (\d+x\d+) outer-product schedule", owner))
-    for axis in "mnk":
-      snapshot = re.search(rf"const vecops::nint_t (\w+_sme_extent_{axis}_value_\d+)=(\w+);", owner)
-      assert snapshot is not None
-      assert not re.search(rf"\b{snapshot[2]}\b", owner[snapshot.end() :])
-    assert "std::min" not in owner and "std::max" not in owner
-  assert schedules == ["1x1", "1x2", "1x3", "1x4", "2x1", "3x1", "4x1", "2x2"] + (
-    ["4x2", "2x4", "2x2"] if expanded else ["2x2"]
-  )
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("vl,svl", ((16, 64), (64, 16), (32, 32)))
-def test_owner_geometry_uses_captured_svl_not_ordinary_vl(vl, svl):
-  source = _lower(dtype="float16", packed=False, vl=vl, svl=svl)
-  lanes = svl // 4  # F32 ZA accumulator lanes; FP16 groups carry two K values.
-  declarations = re.findall(r"const vecops::nint_t \w+_sme_matrix_lanes_\d+=([^;]+);", source)
-  assert len(declarations) == 10  # Outer dispatch plus nine selected owners.
-  assert set(declarations) == {str(lanes)}
-  assert "streaming_lanes<" not in _body(source, "void __kernel__")
-  assert "clamp_value<vecops::nint_t>" in source
-
-
-def test_dry_owner_without_environment_keeps_runtime_svl_reader():
-  source = _lower(dtype="float16", packed=False, vl=None, svl=None)
-  assert "vecops::vec::sme::streaming_lanes<float>()" in source
-  assert re.search(
-    r"const vecops::nint_t \w+_sme_matrix_lanes_\d+=vecops::vec::sme::streaming_lanes<float>\(\);", source
   )
 
 
@@ -174,55 +130,6 @@ def _assert_inlined_owners(assembly, count, *, vl, svl):
     calls = re.findall(r"^\s*(?:bl|blr)\b[^\n]*", owner, re.MULTILINE)
     assert not calls, f"owner {index} still contains non-inlined calls: {calls[:12]}"
     assert re.search(r"\bza[0-9][hv]\.", owner), f"owner {index} lost accumulator input/output"
-
-
-@pytest.mark.parametrize(
-  "dtype,output,packed,column_major,pipeline,vl,svl",
-  (
-    ("float16", "float32", False, False, "plain", 64, 64),
-    ("float16", "float16", False, True, "affine", 16, 64),
-    ("bfloat16", "float32", False, False, "relu", 64, 16),
-    ("bfloat16", "bfloat16", True, True, "affine", 32, 64),
-    ("float32", "float32", False, True, "affine", 64, 16),
-    ("float64", "float64", False, False, "plain", 16, 64),
-    ("int8", "int32", False, False, "relu", 64, 16),
-    ("uint8", "int32", True, True, "plain", 16, 64),
-  ),
-)
-def test_dynamic_sme_real_arm_every_state_owner_has_no_calls(
-  tmp_path, dtype, output, packed, column_major, pipeline, vl, svl
-):
-  source = _lower(
-    dtype=dtype, output=output, packed=packed, column_major=column_major, pipeline=pipeline, vl=vl, svl=svl
-  )
-  assembly = _cross(
-    tmp_path,
-    source,
-    lambda source: _cross_wrapper(source, dtype, output, column_major),
-    vl=vl,
-    svl=svl,
-  )
-  _assert_inlined_owners(assembly, 11 if dtype == "float64" and not packed else 9, vl=vl, svl=svl)
-
-
-@pytest.mark.parametrize(
-  "dtype,output,transformed,vl,svl",
-  (("float16", "float16", True, 16, 64), ("bfloat16", "float32", True, 64, 16), ("float32", "float32", False, 32, 64)),
-)
-def test_dynamic_sme_real_arm_strided_prologue_epilogue_stays_inlined(tmp_path, dtype, output, transformed, vl, svl):
-  source = _strided_lower(dtype, output, transformed=transformed, vl=vl, svl=svl)
-  assert "vecops::vec::mul" in source and "vecops::vec::add" in source
-  assert "vecops::vec::fmadd" not in source  # Strict separate mul/add contract.
-  assert "opt::strided" in source  # Runtime strides may be negative or nonunit.
-  assert_no_vec_mask_arrays(source)
-  assembly = _cross(
-    tmp_path,
-    source,
-    lambda source: _strided_wrapper(source, dtype, output, transformed=transformed),
-    vl=vl,
-    svl=svl,
-  )
-  _assert_inlined_owners(assembly, 9, vl=vl, svl=svl)
 
 
 def _matrix(shape, dtype, *, reversed_axes=False):

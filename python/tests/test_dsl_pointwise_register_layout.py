@@ -21,7 +21,7 @@ from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.cost import CPUTarget
 from vecops.language._compiler.backends.cpu.cpp.vectors import VectorsEmitter
 from vecops.language._compiler.backends.cpu.planning import prepare
-from vecops.language._compiler.backends.cpu.register_layout import PointwiseRegisterLayout, prove_pointwise_layout
+from vecops.language._compiler.backends.cpu.register_layout import PointwiseRegisterLayout
 from vecops.language._compiler.ir.vector import VectorGroup
 
 MARKER = "private pointwise register layout: paired native 16->32 conversions"
@@ -45,16 +45,12 @@ def test_hardware_matmul_plans_are_not_pointwise_regions_when_reprepared(target,
   else:
     options["cpu_pointwise_register_layout_policy"] = policy
   artifact = CPUBackend().lower(kernel.ir, (), target=target, options=options)
-  environment = artifact.lowered.manager.options["_compiler_environment"]
-  original_plans = tuple(artifact.backend_ir.matmuls.values())
-  assert original_plans
-  for plan in original_plans:
-    assert prove_pointwise_layout(plan, environment.operations) is None
-  # Emission appends the selected hardware plans to the shared debug inventory.
-  # A second planning pass must accept that inventory without duck-typing those
-  # plans as VectorRegion or disabling valid pointwise regions elsewhere.
+  assert not artifact.backend_ir.matmuls
+  # Matrix recipes now produce ordinary states/loops. Re-preparation must
+  # retain those and never invent an opaque matrix or pointwise instruction.
   repeated = prepare(artifact.lowered)
-  assert tuple(plan.k_unroll for plan in repeated.matmuls.values()) == tuple(plan.k_unroll for plan in original_plans)
+  assert not repeated.matmuls
+  assert set(repeated.states) == set(artifact.backend_ir.states)
 
 
 def pointwise_template(

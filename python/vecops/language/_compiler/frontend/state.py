@@ -91,6 +91,7 @@ class StateFrontend:
 
     for name in sorted(assigned_names(nodes) - set(ignore)):
       if name in self.env:
+        self.mutable_names.add(name)
         self.env[name] = promote(self.env[name], name)
 
   def available_scalar_names(self, environment):

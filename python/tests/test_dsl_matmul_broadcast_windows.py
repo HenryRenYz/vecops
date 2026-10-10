@@ -22,11 +22,65 @@ from test_dsl_sme_packed_ab_col import (
 )
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.backends.cpu.cpp.matmul import MatmulEmitter
+from vecops.language._compiler.frontend.helpers import expand_helper
+from vecops.language._compiler.operations import snapshot
+from vecops.language._debug.interpreter import Interpreter
+
+
+@T.func
+def _broadcast_window(value, row, column, rows, columns):
+  rs = T.where(value.shape[0] == 1, 0, row)
+  cs = T.where(value.shape[1] == 1, 0, column)
+  re = T.where(value.shape[0] == 1, 1, row + rows)
+  ce = T.where(value.shape[1] == 1, 1, column + columns)
+  return value[rs:re, cs:ce]
+
+
+@pytest.mark.parametrize("extent", [1, 9])
+@pytest.mark.parametrize("stride", [5, -5])
+def test_source_windows_preserve_singletons_and_original_read_identity(extent, stride):
+  from vecops.language._compiler.ir.traversal import walk_unique
+
+  shape = (_scalar("dm"), I.literal(1))
+  view = I.View("Prior", "float32", shape, (I.literal(stride), I.literal(1)), I.literal(51))
+  load = I.Expr(I.TileType("float32", shape), "load", data=view)
+  expression = I.binary("add", load, load)
+  result, statements = expand_helper(_broadcast_window, (expression, 4, 0, 3, 1), catalog=snapshot(), prefix="window")
+  assert {id(v) for v in I.loads_unique(result)} == {id(load)}
+  assert load.data is view
+  data = np.arange(100, dtype=np.float32)
+  reference = Interpreter(I.KernelIR(I.Block(statements), {}, {}), {"Prior": data, "dm": extent})
+  reference.block(I.Block(statements))
+  actual = reference.value(result)
+  start, count = (0, 1) if extent == 1 else (4, 3)
+  expected = data[51 + (np.arange(start, start + count) * stride)] * 2
+  np.testing.assert_array_equal(actual[:, 0], expected)
+  assert sum(v is load for v in walk_unique(result)) == 1
+
+
+@pytest.mark.parametrize("dm,dn", [(1, 1), (1, 9), (9, 1), (9, 9), (0, 0)])
+def test_source_packed_window_does_not_rewrite_physical_abi_origins(dm, dn):
+  shape = (_scalar("dm"), _scalar("dn"))
+  view = I.View("Packed", "float32", (I.literal(4096),), (I.literal(1),), I.literal(0))
+  packed = I.PackedView(view, (I.literal(32), I.literal(32)), "A", "sme", (I.literal(2), I.literal(4)))
+  value = I.Expr(I.TileType("float32", shape), "packed_load", data=packed)
+  result, statements = expand_helper(
+    _broadcast_window,
+    (value, 3 if dm else 0, 5 if dn else 0, 2 if dm else 0, 3 if dn else 0),
+    catalog=snapshot(),
+    prefix="packed_window",
+  )
+  assert result.args[0] is value and value.data is packed
+  reference = Interpreter(I.KernelIR(I.Block(statements), {}, {}), {"dm": dm, "dn": dn})
+  reference.block(I.Block(statements))
+  assert tuple(reference.value(v) for v in result.type.shape) == (
+    1 if dm == 1 else 2 if dm else 0,
+    1 if dn == 1 else 3 if dn else 0,
+  )
 
 
 def _scalar(name):
-  return I.Expr(I.ScalarType("int64"), "local", data=name)
+  return I.Expr(I.ScalarType("int64"), "symbol", data=name)
 
 
 def _evaluate(value, variables):
@@ -38,82 +92,6 @@ def _evaluate(value, variables):
     return _evaluate(value.args[1 if _evaluate(value.args[0], variables) else 2], variables)
   lhs, rhs = (_evaluate(argument, variables) for argument in value.args)
   return {"add": lambda: lhs + rhs, "mul": lambda: lhs * rhs, "eq": lambda: lhs == rhs}[value.op]()
-
-
-class _WindowEmitter(MatmulEmitter):
-  def __init__(self):
-    self.materialized = {}
-    self.snapshots = {}
-
-  def retain_expression(self, value):
-    pass
-
-
-@pytest.mark.parametrize("extent", (1, 9))
-@pytest.mark.parametrize("stride", (5, -5))
-def test_runtime_and_const_axis_origin_extent_agree_without_out_of_bounds(extent, stride):
-  emitter = _WindowEmitter()
-  view = I.View("Prior", "float32", (_scalar("dm"), I.literal(1)), (I.literal(stride), I.literal(1)), I.literal(31))
-  panel = emitter.slice_matrix_view(view, (I.literal(4), I.literal(0)), (I.literal(3), I.literal(1)))
-  assert _evaluate(panel.offset, {"dm": extent}) == 31 + (0 if extent == 1 else 4 * stride)
-  assert _evaluate(panel.shape[0], {"dm": extent}) == (1 if extent == 1 else 3)
-  for known in (1, 9):
-    origin, size = emitter.slice_matrix_axis(I.literal(known), I.literal(4), I.literal(3))
-    assert I.constant(origin) == (0 if known == 1 else 4)
-    assert I.constant(size) == (1 if known == 1 else 3)
-
-
-@pytest.mark.parametrize("extent", (1, 9))
-def test_sliced_dag_history_and_materialization_keep_identity_and_singletons(extent):
-  emitter = _WindowEmitter()
-  shape = (_scalar("dm"), I.literal(1))
-  original = I.View("Prior", "float32", shape, (I.literal(-5), I.literal(1)), I.literal(17))
-  cached = I.View("Snapshot", "float32", shape, (I.literal(1), I.literal(1)), I.literal(0), owned=True)
-  load = I.Expr(I.TileType("float32", shape), "load", data=original)
-  expression = I.binary("add", load, load)
-  emitter.snapshots[id(load)] = cached, "alias_prior"
-  emitter.materialized[id(load)] = cached, "cache_enabled"
-  sliced = emitter.slice_matrix_value(expression, (I.literal(4), I.literal(0)), (I.literal(3), I.literal(1)))
-  left, right = sliced.args
-  assert left is right and left is not load
-  assert _evaluate(left.type.shape[0], {"dm": extent}) == (1 if extent == 1 else 3)
-  assert _evaluate(left.data.offset, {"dm": extent}) == (17 if extent == 1 else -3)
-  for mapping, condition in ((emitter.snapshots, "alias_prior"), (emitter.materialized, "cache_enabled")):
-    view, enabled = mapping[id(left)]
-    assert enabled == condition and view.storage == "Snapshot"
-    assert _evaluate(view.offset, {"dm": extent}) == (0 if extent == 1 else 4)
-    assert _evaluate(view.shape[0], {"dm": extent}) == (1 if extent == 1 else 3)
-    assert mapping[id(load)] == (cached, condition)  # Historical binding is not overwritten.
-
-
-@pytest.mark.parametrize("extent", (1, 9))
-def test_runtime_singleton_arange_uses_zero_panel_origin(extent):
-  emitter = _WindowEmitter()
-  value = I.Expr(I.TileType("int64", (_scalar("dm"), I.literal(1))), "arange", (I.literal(7),), data=0)
-  sliced = emitter.slice_matrix_value(value, (I.literal(4), I.literal(0)), (I.literal(3), I.literal(1)))
-  assert _evaluate(sliced.args[0], {"dm": extent}) == (7 if extent == 1 else 11)
-
-
-@pytest.mark.parametrize("dm,dn", ((1, 1), (1, 9), (9, 1), (9, 9), (0, 0)))
-def test_packed_capture_preserves_original_window_origin_and_both_broadcast_axes(dm, dn):
-  emitter = _WindowEmitter()
-  shape = (_scalar("dm"), _scalar("dn"))
-  view = I.View("Packed", "float32", (I.literal(4096),), (I.literal(1),), I.literal(0))
-  packed = I.PackedView(view, (I.literal(32), I.literal(32)), "A", "sme", (I.literal(2), I.literal(4)))
-  value = I.Expr(I.TileType("float32", shape), "packed_load", data=packed)
-  origin = (I.literal(3 if dm else 0), I.literal(5 if dn else 0))
-  extent = (I.literal(2 if dm else 0), I.literal(3 if dn else 0))
-  sliced = emitter.slice_matrix_value(value, origin, extent)
-  variables = {"dm": dm, "dn": dn}
-  assert tuple(_evaluate(v, variables) for v in sliced.type.shape) == (
-    1 if dm == 1 else 2 if dm else 0,
-    1 if dn == 1 else 3 if dn else 0,
-  )
-  assert tuple(_evaluate(v, variables) for v in sliced.data.origins) == (
-    2 + (0 if dm == 1 else 3 if dm else 0),
-    4 + (0 if dn == 1 else 5 if dn else 0),
-  )
-  assert sliced.data.shape == packed.shape and sliced.data.view is packed.view
 
 
 @pytest.mark.parametrize("shape", (None, (64, 1, 257)))
@@ -129,9 +107,13 @@ def test_cache_seed_source_retains_runtime_prior_extent_and_origin_guard(shape):
     .source
   )
   dm = parameter_snapshot_name(source, "D.size(0)")
-  assert re.search(rf"{dm} == std::int64_t\{{1\}}\) \? std::int64_t\{{0\}} : \w+_block_m_", source)
-  assert re.search(rf"{dm} == std::int64_t\{{1\}}\) \? std::int64_t\{{1\}} : \w+_panel_m_", source)
-  assert "prologue exactly once" in source and "epilogue exactly once" in source
+  # Constant-M induction can fold the broadcast choice for the first block.
+  if shape is None:
+    assert re.search(rf"\({dm}\) == 1 \? 0 :", source)
+  else:
+    assert dm in source
+  assert "dsl_recipe_dot_" in source
+  assert "matmul_blocks(" not in source
 
 
 @pytest.mark.parametrize("shape,vl,svl", (((64, 1, 257), 64, 64), (None, 16, 64), (None, 64, 16)))

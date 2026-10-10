@@ -20,6 +20,18 @@ class PrimitivesFrontend:
 
   def primitive(self, operation, args, kwargs, node):
     family = self.operations.get(operation).family
+    if operation == "_packing_offset":
+      if len(args) != 7 or kwargs:
+        self.error(node, "_packing_offset expects s, k, spatial, reduction, dtype, format, side")
+      s, k, spatial, reduction = (self.value(v, node) for v in args[:4])
+      dtype, format_, side = dtype_name(args[4]), args[5], args[6]
+      if format_ not in {"auto", "dense", "amx", "sme"} or side not in {"A", "B"}:
+        self.error(node, "invalid packing ABI")
+      return I.Expr(I.ScalarType("int64"), "packing_offset", (s, k, spatial, reduction), (dtype, format_, side))
+    if operation == "cache_bytes":
+      if len(args) != 1 or kwargs or args[0] not in {"L1", "L2", "L3", "LLC"}:
+        self.error(node, "cache_bytes expects one cache level: L1, L2, L3 or LLC")
+      return I.Expr(I.ScalarType("int64"), "cache_bytes", data=args[0])
     if operation == "view_disjoint":
       if len(args) != 2 or kwargs:
         self.error(node, "view_disjoint expects two views or captured values")
@@ -32,7 +44,9 @@ class PrimitivesFrontend:
         views = {}
         for expression in walk_unique(value):
           definition = self.operations.get(expression)
-          if self.operations.has(expression, Trait.MEMORY_READ):
+          if expression.op == "packed_load":
+            views[id(expression.data.view)] = expression.data.view
+          elif self.operations.has(expression, Trait.MEMORY_READ):
             if not isinstance(expression.data, I.View):
               self.error(node, "view_disjoint cannot prove an opaque memory access")
             views[id(expression.data)] = expression.data
@@ -228,6 +242,15 @@ class PrimitivesFrontend:
     if len(args) != arity:
       self.error(node, f"{operation} expects {arity} arguments")
     value = self.value(args[0], node)
+    if operation == "bitcast":
+      dtype = dtype_name(args[1])
+      if value.type.dtype != "bool" and dtype != "bool" and ELEMENT_BYTES[value.type.dtype] == ELEMENT_BYTES[dtype]:
+        typ = (
+          I.shaped_type(dtype, value.type.shape, value.type, keep_tag=True)
+          if isinstance(value.type, I.TileType)
+          else I.ScalarType(dtype)
+        )
+        return I.Expr(typ, "bitreinterpret", (value,))
     if not isinstance(value.type, I.TileType) or value.type.mask or len(value.type.shape) != 1:
       self.error(node, "register geometry requires a numeric rank-one value")
     extent = value.type.shape[0]

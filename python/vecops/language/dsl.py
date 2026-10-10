@@ -127,6 +127,8 @@ _OPERATIONS = (
   "pack",
   "packed",
   "_matmul",
+  "cache_bytes",
+  "_packing_offset",
   "alloc",
   "zeros",
   "full",
@@ -189,4 +191,4 @@ _OPERATIONS += tuple(
   sorted(operation_snapshot().names(Trait.UNARY_MATH | Trait.SCALAR_REDUCTION | Trait.MASK_REDUCTION))
 )
 globals().update({name: Intrinsic(name) for name in _OPERATIONS})
-__all__ = ["Vector", "ExecutionLayout", "Reducer", "reducer", "func", *_OPERATIONS]
+__all__ = ["Vector", "ExecutionLayout", "Reducer", "reducer", "func", *_OPERATIONS]  # noqa: PLE0604 -- generated names are strings

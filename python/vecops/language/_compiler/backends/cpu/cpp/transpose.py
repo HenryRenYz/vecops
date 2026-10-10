@@ -3,8 +3,6 @@
 """Print prepared transpose DAGs. Algorithm selection lives in CPU planning."""
 
 from .... import ir as I
-from ....dtypes import ELEMENT_BYTES
-from ..capabilities import CPP_TYPES
 
 
 class TransposeEmitter:
@@ -53,10 +51,10 @@ class TransposeEmitter:
       if implementation == "sme":
         self.line('#error "explicit SME transpose requires an SME-FA64 target"')
       else:
-        self.register_transpose(plan, tuple(batch))
+        self.streaming_store(statement)
       self.line("#endif")
     else:
-      self.register_transpose(plan, tuple(batch))
+      self.streaming_store(statement)
     for _ in batch:
       self.close()
     self.snapshots = snapshots
@@ -67,115 +65,6 @@ class TransposeEmitter:
     stream()
     self.close()
     return True
-
-  def register_transpose(self, plan, batch):
-    for variant, (guard, network) in enumerate(plan.variants):
-      self.line(f"#{'if' if variant == 0 else 'elif'} {guard}")
-      self.register_transpose_variant(plan, network, batch)
-    self.line("#endif")
-
-  def register_transpose_variant(self, plan, network, batch):
-    statement, dtype = plan.statement, network.dtype or plan.dtype
-    destination = statement.destination
-    source = statement.value
-    if source.op == "cast" and source.type.dtype == destination.dtype:
-      source = source.args[0]
-    if dtype != source.type.dtype:
-      source = I.Expr(I.TileType(dtype, source.type.shape), "load", data=source.data)
-    rows, columns = network.rows, network.columns
-    m, n = map(self.scalar, destination.shape[-2:][::-1])
-    self.opening(f"if (({m}) == {rows} && ({n}) == {columns}) /* single register tile */")
-    self.register_tile(plan, network, source, batch, "0", "0", None)
-    self.close()
-    self.opening("else")
-    mb, nb, mi, ni = (self.unique(name) for name in ("cache_m", "cache_n", "tile_m", "tile_n"))
-    mend, nend = self.unique("m_end"), self.unique("n_end")
-    cache = plan.cache_block
-    self.opening(f"for (vecops::nint_t {mb} = 0; {mb} < ({m}); {mb} += {cache})")
-    self.line(f"const auto {mend} = std::min<vecops::nint_t>({mb} + {cache}, {m});")
-    self.opening(f"for (vecops::nint_t {nb} = 0; {nb} < ({n}); {nb} += {cache})")
-    self.line(f"const auto {nend} = std::min<vecops::nint_t>({nb} + {cache}, {n});")
-    self.line(f"vecops::nint_t {ni} = {nb};")
-    if plan.loop_order == "output":
-      self.opening(f"for (; {ni} + {columns} <= {nend}; {ni} += {columns})")
-      self.line(f"vecops::nint_t {mi} = {mb};")
-      self.opening(f"for (; {mi} + {rows} <= {mend}; {mi} += {rows})")
-      self.register_tile(plan, network, source, batch, mi, ni, None)
-      self.close()
-      self.opening(f"if ({mi} < {mend})")
-      self.register_tile(plan, network, source, batch, mi, ni, f"({mend} - {mi})")
-      self.close()
-      self.close()
-    else:
-      self.line(f"vecops::nint_t {mi} = {mb};")
-      self.opening(f"for (; {mi} + {rows} <= {mend}; {mi} += {rows})")
-      self.opening(f"for ({ni} = {nb}; {ni} + {columns} <= {nend}; {ni} += {columns})")
-      self.register_tile(plan, network, source, batch, mi, ni, None)
-      self.close()
-      self.close()
-      self.opening(f"if ({mi} < {mend})")
-      self.opening(f"for ({ni} = {nb}; {ni} + {columns} <= {nend}; {ni} += {columns})")
-      self.register_tile(plan, network, source, batch, mi, ni, f"({mend} - {mi})")
-      self.close()
-      self.close()
-      self.line(f"{ni} = {nb} + (({nend} - {nb}) / {columns}) * {columns};")
-    # Only the narrow source-column fringe gathers; complete tiles use dense
-    # loads, register permutations and dense converting stores.
-    tag = self.unique("fringe_tag")
-    self.line("#if defined(CPU_CAPABILITY_SVE) && !defined(HAS_FIXED_SVE_BITS)")
-    self.line(
-      f"using {tag} = vecops::vec::FixedTag<{CPP_TYPES[dtype]}, {min(rows, 4, 16 // (plan.lane_bytes or ELEMENT_BYTES[dtype]))}>;"
-    )
-    self.line("#else")
-    self.line(f"using {tag} = vecops::vec::FixedTag<{CPP_TYPES[dtype]}, {rows}>;")
-    self.line("#endif")
-    self.tag_dtypes[tag] = dtype
-    self.opening(f"for (; {ni} < {nend}; ++{ni})")
-    self.opening(f"for (vecops::nint_t {mi} = {mb}; {mi} < {mend}; {mi} += {self.vector_size(tag)})")
-    active = f"std::min<vecops::nint_t>({self.vector_size(tag)}, {mend} - {mi})"
-    coords = batch + (ni, mi)
-    before = self.chunk_cache
-    self.chunk_cache = {}
-    value = self.vector(source, tag, destination.shape, coords, active)
-    self.line(
-      f"vecops::vec::store_convert({tag}{{}}, {self.pointer(destination, coords)}, {value}, vecops::vec::opt::first({active}));"
-    )
-    self.chunk_cache = before
-    self.close()
-    self.close()
-    self.close()
-    self.close()
-    self.close()
-
-  def register_tile(self, plan, network, source, batch, mi, ni, active_m):
-    before = self.chunk_cache
-    self.chunk_cache = {}
-
-    def load(row, own_tag):
-      name = self.unique("transpose_vec")
-      coords = batch + (ni, f"({mi} + {row})")
-      if active_m is not None:
-        self.line(f"vecops::vec::Vec<{own_tag}> {name} = vecops::vec::zeros({own_tag}{{}});")
-        self.opening(f"if ({row} < {active_m})")
-      previous_full = getattr(self, "full_vector", False)
-      # A complete source row has no inactive lanes, even in a row fringe.
-      # Preserve this proof to select the same fused native load_convert.
-      self.full_vector = True
-      value = self.vector(
-        source, own_tag, plan.statement.destination.shape, coords, str(network.columns), plan.source_axis
-      )
-      self.full_vector = previous_full
-      self.line(f"{'auto ' if active_m is None else ''}{name} = {value};")
-      if active_m is not None:
-        self.close()
-      return name
-
-    store_tag, outputs = self.register_program(network, load, prefix="transpose")
-    options = f", vecops::vec::opt::first({active_m})" if active_m is not None else ""
-    for column, output in enumerate(outputs):
-      pointer = self.pointer(plan.statement.destination, batch + (f"({ni} + {column})", mi))
-      self.line(f"vecops::vec::store_convert({store_tag}{{}}, {pointer}, {output}{options});")
-    self.chunk_cache = before
 
   def sme_transpose(self, plan, batch):
     # A private state-owning leaf, containing only public vector/ZA primitives.

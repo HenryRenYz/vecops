@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
+# ruff: noqa: F401 -- this module is the IR re-export facade
 """Internal structured IR vocabulary."""
 
 from .collective import Barrier, Team, TeamReduce
@@ -38,7 +39,7 @@ from .kernel import (
   same_expr,
   shaped_type,
 )
-from .matmul import DotOptions, OperandFusion, Pack, PackedView, transpose_matrix
+from .matmul import DotOptions, Pack, PackedView, transpose_matrix
 from .pipeline import PipelineFor, Prefetch
 from .printing import FormattedText, Print
 from .state import DeclareState, Exit, ExitRegion, TileState, UpdateState

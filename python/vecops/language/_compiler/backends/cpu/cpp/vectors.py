@@ -225,6 +225,14 @@ class VectorsEmitter:
       vector_axis = axis - (len(root_shape) - len(value.type.shape))
       operation = "iota" if own_axis == vector_axis else "fill"
       expression = f"vecops::vec::{operation}({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>(({start}) + ({vcoords[own_axis]})))"
+    elif value.op == "bitreinterpret":
+      if id(value) in self.prepared.register_programs:
+        expression = self.geometry_vector(value, tag, root_shape, coords, active, axis)
+      else:
+        source = value.args[0]
+        own_tag = self.rebound_tag(source.type.dtype, tag)
+        original = self.vector(source, own_tag, root_shape, coords, active, axis)
+        expression = f"vecops::vec::bitcast({tag}{{}}, {own_tag}{{}}, {original})"
     elif value.op == "cast":
       source = value.args[0]
       if source.op == "load" and source.type.dtype == source.data.dtype:
@@ -290,7 +298,7 @@ class VectorsEmitter:
     elif self.environment.implementations.get(value.op).lane_fallback:
       args = [self.vector(a, tag, root_shape, coords, active, axis) for a in value.args]
       name, lane = self.unique("lane_fallback"), self.unique("scalar_lane")
-      self.line(f"auto {name} = vecops::vec::fill({tag}{{}}, vecops::vec::ElementOf<{tag}>{{0}});")
+      self.line(f"auto {name} = vecops::vec::zeros({tag}{{}});")
       self.opening(f"for (vecops::nint_t {lane} = 0; {lane} < {active}; ++{lane})")
       arguments = ", ".join(f"vecops::vec::get({tag}{{}}, {a}, {lane})" for a in args)
       self.line(
@@ -379,9 +387,8 @@ class VectorsEmitter:
           representation = "Mask" if operation.type.mask else "Vec"
           self.line(f"vecops::vec::{representation}<{tag}> {name};")
           self.opening(f"if ({count} == 0)")
-          empty = "mfill" if operation.type.mask else "fill"
-          zero = "false" if operation.type.mask else f"vecops::vec::ElementOf<{tag}>{{0}}"
-          self.line(f"{name} = vecops::vec::{empty}({tag}{{}}, {zero});")
+          zero = f"vecops::vec::mfill({tag}{{}}, false)" if operation.type.mask else f"vecops::vec::zeros({tag}{{}})"
+          self.line(f"{name} = {zero};")
           self.close()
           self.opening("else")
         self.chunk_cache = {}
@@ -740,7 +747,7 @@ class VectorsEmitter:
   def identity(self, dtype, op):
     cpp = CPP_TYPES[dtype]
     if op == "add":
-      return f"{cpp}{{0}}"
+      return f"{cpp}{{}}"
     if dtype.startswith("float"):
       return ("-" if op == "max" else "") + f"std::numeric_limits<{cpp}>::infinity()"
     return f"std::numeric_limits<{cpp}>::{'lowest' if op == 'max' else 'max'}()"

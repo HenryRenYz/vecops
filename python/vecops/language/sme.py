@@ -3,7 +3,10 @@
 """SME-specific DSL state and instruction vocabulary.
 
 `with T.sme.region():` is compiled lexical ownership, never a host Python
-context manager. load(view) creates one region-local streaming vector;
+context manager. load(view) creates one region-local streaming vector.
+load(view, strided=True) permits signed element strides through the public
+vector memory primitives. Its prefix still fits one streaming word and root
+bounds are checked before ownership; raw ZA slice/bit moves remain contiguous.
 mopa(tile, A, B) selects a typed outer-product instruction, store_tile(tile, C)
 writes the clipped accumulator tile. T.dot owns a separately planned schedule.
 Validation/alias handling is outside SM. Vectors cannot escape into Python;

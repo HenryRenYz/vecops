@@ -47,11 +47,6 @@ class PreparedKernel:
   reductions: object
   transposes: object
   matmuls: object
-  packing_permutation: object | None = None
-  packing_permutation_x86: object | None = None
-  packing_groups: object = field(default_factory=dict)
-  dense_packs: object = field(default_factory=dict)
-  grouped_epilogues: frozenset = frozenset()
   grids: object = field(default_factory=dict)
   grid_regions: object = field(default_factory=dict)
   states: object = field(default_factory=dict)
@@ -61,7 +56,6 @@ class PreparedKernel:
   register_layout_decisions: object = field(default_factory=dict)
   register_programs: object = field(default_factory=dict)
   hardware: object = field(default_factory=dict)
-  sme_packing_programs: object = field(default_factory=dict)
   pass_trace: list = field(default_factory=list)
 
   def store(self, statement):

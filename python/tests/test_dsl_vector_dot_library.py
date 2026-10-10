@@ -80,20 +80,24 @@ def test_default_dot_dispatch_stages_recipe_before_vector_lowering():
   assert "cpu-expand-dot-recipes" in staged.lowered.kernel.pass_trace
   assert "staged 1 vector dot" in "\n".join(staged.lowered.kernel.diagnostics)
   assert_no_vec_mask_arrays(staged.source)
-  # Larger output rows use the streaming source recipe; packed input still
-  # requires the separate ABI-checked family.
+  # Larger rows and dense packed inputs use source recipes too. Physical
+  # packed buffers retain their separate ABI validation before decoding.
   streaming = backend.lower(dot_template(columns=19).ir, (), target="AVX512")
   assert not streaming.backend_ir.matmuls and streaming.backend_ir.states
   fallback = backend.lower(dot_template(packed=True).ir, (), target="AVX512")
-  assert fallback.backend_ir.matmuls
+  assert not fallback.backend_ir.matmuls
+  assert "packed input buffer too small" in fallback.source
+  assert "packed input must be dense" in fallback.source
 
 
-def test_automatic_small_x86_dot_uses_recipe_without_changing_sme_selection():
+def test_automatic_small_dot_uses_source_recipe_on_both_backends():
   kernel = dot_template(implementation="auto")
   x86 = CPUBackend().lower(kernel.ir, (), target="AVX512")
   arm = CPUBackend().lower(kernel.ir, (), target="SME")
   assert not x86.backend_ir.matmuls and x86.backend_ir.states
-  assert arm.backend_ir.matmuls
+  # This test includes an accumulator and epilogue, beyond the raw direct
+  # SME source family's current envelope.
+  assert not arm.backend_ir.matmuls and arm.backend_ir.states
   assert_no_vec_mask_arrays(x86.source)
 
 
@@ -186,6 +190,97 @@ def test_staged_value_helper_retains_original_read_identity():
   result = function.bind((actual,))
   assert result.args == (actual, read)
   assert I.constant(result.type.shape[0]) == 7
+
+
+def integer_template(left="uint8", right="int8"):
+  m, n, k = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.template
+  def kernel(
+    A: T.Tensor((m, k), (T.dynamic(), T.dynamic()), left),
+    B: T.Tensor((k, n), (T.dynamic(), T.dynamic()), right),
+    D: T.Tensor((1, n), (T.dynamic(), 1), "int32"),
+    C: T.Tensor((m, n), (T.dynamic(), T.dynamic()), "int32", access="output"),
+  ):
+    T.dot((A, B), C, acc=T.load(D), acc_dtype="int32", implementation="vector")
+
+  return kernel
+
+
+@pytest.mark.parametrize("types", [("uint8", "int8"), ("int8", "int8"), ("int32", "int32")])
+def test_integer_dot_uses_source_control_and_unsigned_modular_arithmetic(types):
+  artifact = CPUBackend().lower(integer_template(*types).ir, (), target="AVX512")
+  assert not artifact.backend_ir.matmuls
+  assert "ScalableTag<std::uint32_t" in artifact.source
+  assert "vecops::vec::fmadd" not in artifact.source
+  assert_no_vec_mask_arrays(artifact.source)
+
+
+def packed_dot_template(*, capacity=None, stride=1, integer=False):
+  m, n, k = 7, 19, 17
+  dtype, acc_dtype = ("int8", "int32") if integer else ("float32", "float32")
+  capacity = T.dynamic(lower=0) if capacity is None else capacity
+
+  @T.template
+  def kernel(
+    A: T.Tensor((m, k), dtype=dtype),
+    P: T.Tensor((capacity,), (stride,), dtype),
+    C: T.Tensor((m, n), dtype=acc_dtype, access="output"),
+  ):
+    b = T.packed(P, (k, n), side="B", format="dense")
+    T.dot((A, b), C, acc_dtype=acc_dtype, implementation="vector")
+
+  return kernel
+
+
+@pytest.mark.parametrize("integer", [False, True])
+def test_native_packed_source_dot_validates_abi_before_access(integer, tmp_path):
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(packed_dot_template(integer=integer), compiler=compiler)
+  dtype, output_dtype = (np.int8, np.int32) if integer else (np.float32, np.float32)
+  a = (np.arange(7 * 17).reshape(7, 17) % 7).astype(dtype)
+  b = (np.arange(17 * 19).reshape(17, 19) % 11).astype(dtype)
+  packed = b.T.copy().reshape(-1)
+  c = np.full((7, 19), 13, dtype=output_dtype)
+  assert not compiled.vector_ir.kernel.materializations
+  compiled.operator.native(a, packed, c, **compiled._core.specialization_values)
+  np.testing.assert_array_equal(c, a.astype(output_dtype) @ b.astype(output_dtype))
+  c.fill(13)
+  with pytest.raises((ValueError, RuntimeError), match="packed input buffer too small"):
+    compiled.operator.native(a, packed[:-1], c, **compiled._core.specialization_values)
+  np.testing.assert_array_equal(c, 13)
+  aliased = packed[: 7 * 19].reshape(7, 19) if not integer else None
+  if aliased is not None:
+    saved = packed.copy()
+    with pytest.raises((ValueError, RuntimeError), match="may not overlap"):
+      compiled.operator.native(a, packed, aliased, **compiled._core.specialization_values)
+    np.testing.assert_array_equal(packed, saved)
+
+
+@pytest.mark.parametrize("types", [("uint8", "int8"), ("int8", "int8"), ("int32", "int32")])
+def test_native_integer_source_dot_overflow_and_layouts(types, tmp_path):
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(integer_template(*types), compiler=compiler)
+  for m, n, k in [(7, 19, 0), (7, 1, 73), (1, 19, 73), (7, 19, 73)]:
+    for column_major in (False, True):
+      a = (
+        (((np.arange(m * k, dtype=np.int64) % 17) - 7) * (100003 if types[0] == "int32" else 1))
+        .astype(types[0])
+        .reshape(m, k)
+      )
+      b = (
+        (((np.arange(k * n, dtype=np.int64) % 13) - 6) * (100019 if types[1] == "int32" else 1))
+        .astype(types[1])
+        .reshape(k, n)
+      )
+      if column_major:
+        a, b = np.asfortranarray(a), np.asfortranarray(b)
+      seed = (np.iinfo(np.int32).max - np.arange(n, dtype=np.int64)).astype(np.int32).reshape(1, n)
+      expected = ((a.astype(np.int64) @ b.astype(np.int64)) + seed.astype(np.int64)).astype(np.int32)
+      output = np.full((m, n + 3), 17, dtype=np.int32)
+      compiled.operator.native(a, b, seed, output[:, :n], **compiled._core.specialization_values)
+      np.testing.assert_array_equal(output[:, :n], expected)
+      np.testing.assert_array_equal(output[:, n:], 17)
 
 
 @pytest.mark.parametrize("k,historical", [(0, False), (17, False), (17, True)])

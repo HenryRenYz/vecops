@@ -3097,8 +3097,11 @@ Retained artifacts:
 `/home/renyz/tmp/vecops-streaming-cache.jrgJihea`,
 `/home/ryz/tmp/vecops-library-only.vaFcSA1j/build-validation`, and
 `/home/ryz/tmp/vecops-recipe-proofs.NiwT09OZ/build-validation`.
-The latest floating-point streaming source is being validated separately in
-`/home/ryz/tmp/vecops-streaming-source.ySteACcC/build-validation`.
+The latest floating-point streaming source passed all fifteen native checks
+with clang/af3 on 920f-4 in
+`/home/ryz/tmp/vecops-streaming-source.ySteACcC/build-validation`
+(queried VL=SVL=64 bytes). The snapshot preceded only an additional frontend
+predicate-kind argument check, which does not change these numeric C++ bodies.
 
 This is not complete removal of the old operator route. Remaining required
 consumers include FP32 transformed SME packing; non-SME register-transpose
@@ -3107,3 +3110,87 @@ families; and cache/packing/swap orchestration behind `_matmul`. Public C++
 operators and frozen benchmark references are not obsolete compiler routes
 and remain intact. Production language-source changes in this checkpoint
 reduce approximately one hundred lines; tests/documentation grow separately.
+
+### Deleting the remaining native algorithm printers (2026-10-10)
+
+Following the user's explicit correctness-first removal criterion, the CPU
+matrix loop generator, its family/cache scheduler, transformed SME packing
+printer and native cache-size formulas have now been deleted. The old files
+`cpu/matmul.py`, `cpu/schedule.py`, `cpu/cpp/matmul.py`,
+`cpu/cpp/sme_packing.py` and `cpu/cpp/matmul_support.py` no longer exist.
+Non-SME transpose cache/tile traversal printers have also been removed.
+Public C++ operators/reference benchmarks are not migration routes and remain.
+
+Source algorithms now implement register/streaming dot, cache traversal,
+optional dense packing, correctly typed private K accumulators and final
+epilogues, portable physical packed-buffer construction, and register-transpose
+traversal. Generic typed value projections preserve caller DAGs; shared,
+masked, state and non-pointwise product consumers get ordinary private values
+before algorithm expansion. Physical packing-offset/size decoding, instruction
+spelling, alias/lifetime analysis and architecture state ownership remain
+compiler responsibilities, without native operator loops.
+
+This intentionally prioritizes deletion over preserving every hardware fast
+path. Raw first-sink F32/F64 SME dot uses source MOPA. More complex/narrow
+SME/AMX products use source vector leaves; generic packing is conservative.
+The attempted four-ZA raw family was not accepted: its empty secondary tiles
+exposed an insufficient correlated-root preflight proof. The retained source
+uses one ZA tile, not the rejected expansion or the deleted legacy family.
+Remaining performance work must improve these source algorithms/generic passes,
+not reintroduce private native loop printers. No whole-catalog performance
+parity is claimed by this deletion checkpoint.
+
+Regression fixes include publication of writes to borrowed owned buffers at a
+staged helper boundary, packed-memory/proof view liveness, typed vector zero
+initialization, and lexical mutable-binding tracking: an immutable captured
+state used by successive compile-time unroll iterations must not silently
+become one repeatedly overwritten native slot. Helper-local assignments do not
+mutate their caller's state merely by sharing an IR value reference.
+
+Validation for this deletion checkpoint (not a whole-catalog performance gate):
+
+- 2010 selected pure compiler/API checks passed; 1339 native/fixture-dependent
+  cases were explicitly deselected. Additional source register/hardware checks
+  passed (142 cases). This is not a claim that all native tests ran.
+- The frozen x86 default-route gate passed 22 native cases. A later gate passed
+  16 cases covering register-transpose tails/conversions, all six raw/AMX-packed
+  dtype/seed/fusion combinations, saturating scalar packing and four runtime
+  cache/history packing combinations.
+- On 920f-4 (test14), af3/BiSheng clang/private GNU14 headers, the frozen default
+  route gate passed 22 native cases in 1608.61 seconds. VL and SVL were queried
+  from the process (64/64 bytes for this run), not assumed from the CPU model.
+  The latest register/packed-window follow-up passed all 11 native cases in
+  1074.41 seconds, including guard pages, arbitrary K tails/origins, runtime
+  cache/history selection, both tensor orientations and typed conversion.
+- Standalone scalar conversion also passed GCC O3, fast-math and
+  undefined/float-cast-overflow sanitizers. Float-to-integer narrowing had
+  entered an integer-width branch before floating-domain clamping; that public
+  scalar helper is now corrected, including NaN and rounded integer endpoints.
+
+AMX A's contiguous decoder now checks the remaining physical K block before
+loading a vector; crossing it uses exact per-lane offsets. Grouped packed
+streams require a K-group-aligned origin. These are packed-memory ABI rules,
+not matrix-family selection. Closed register programs accept bounded-prefix
+stores and fixed state updates, with named zero-register padding when the
+physical x86 word exceeds the logical prefix. Shifted/partial consumers retain
+indexed legalization. Tiny measured SVE conversion gathers still use generic
+memory planning; preserving that optimization does not restore an old printer.
+
+Production language code is reduced by 3543 lines relative to eacf34e. The
+obsolete native schedule IR and two experiment-only old-switch A/B runners
+were removed; the complete source catalog, C++ reference and numerical tests
+remain available. Deleted sources can be recovered from Git history.
+
+Same-round x86 FP32 probes retained independent correctness checks. The
+256x256x256 library recipe improved from about 19.7x its C++ SIMD control to
+2.43x after the conservative cache-residency bypass; dot was about 1.28x.
+16x16x256 library was about 1.06x. These are small diagnostic samples, not
+general parity acceptance, and the x86 FP32 control is the benchmark's SIMD
+reference (public AMX Matmul has no FP32 atom). Narrow AMX/SME families and
+large cache/packing schedules still need source-recipe optimization.
+
+Artifacts: `/home/renyz/tmp/vecops-source-final.AQdNKjTb`,
+`/home/renyz/tmp/vecops-final-gate.uo3Mfg9Q`,
+`/home/ryz/tmp/vecops-source-final.9d874MJY`, and
+`/home/ryz/tmp/vecops-register-final.ejTZN9BF`. Tests ran from independent
+snapshots; the pre-existing dirty remote checkout was not overwritten.

@@ -23,7 +23,8 @@ def test_library_matmul_accepts_captured_python_cache_tile(axis):
     T.library.matmul((A, B), C, BM=BM, BN=BN, BK=BK, implementation="sme")
 
   source = CPUBackend().lower(kernel.ir, (), target="SME").source
-  assert "=vecops_dsl::matmul_blocks" in source
+  assert "dsl_recipe_dot_" in source
+  assert "matmul_blocks(" not in source
   assert "bypass cache panels" not in source
 
 

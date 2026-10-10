@@ -255,7 +255,7 @@ class ControlEmitter:
           count = ", ".join(self.scalar(v) for v in statement.view.shape)
           self.allocate_buffer(statement.view.dtype, statement.view.storage, f"vecops_dsl::checked_shape({{{count}}})")
       elif isinstance(statement, I.Pack):
-        self.pack_matrix(statement)
+        raise TypeError("packing requires the cpu-expand-packing-recipes pass")
       elif isinstance(statement, I.Assert):
         self.line(
           f"if (!({self.scalar(statement.condition)})) throw std::invalid_argument({json.dumps(statement.message)});"

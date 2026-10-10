@@ -45,8 +45,13 @@ class SMEInstructionEmitter:
       self.line(f"auto {mask} = {self.streaming_mask(tag, statement.operands[0], count)};")
       const = "const " if statement.operation.startswith("sme.load") else ""
       instruction = statement.operation.split(".")[1]
+      pointer = self.pointer(view)
+      if I.constant(view.shape[0]) == 0:
+        pointer = self.storage_pointer(view.storage)
+      elif I.constant(view.shape[0]) is None:
+        pointer = f"({self.scalar(view.shape[0])}>0 ? {pointer} : {self.storage_pointer(view.storage)})"
       self.line(
-        f"vecops::vec::sme::{instruction}<{statement.tile}>(static_cast<std::uint32_t>({self.scalar(index)}), {mask}, reinterpret_cast<{const}{unsigned}*>({self.pointer(view)}));"
+        f"vecops::vec::sme::{instruction}<{statement.tile}>(static_cast<std::uint32_t>({self.scalar(index)}), {mask}, reinterpret_cast<{const}{unsigned}*>({pointer}));"
       )
     elif statement.operation in {"sme.load_bits", "sme.store_bits"}:
       handle, view = statement.vector, statement.view
@@ -74,8 +79,18 @@ class SMEInstructionEmitter:
       tag = handle.name + "_tag"
       self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[handle.dtype]}, 0>;")
       self.line(f"auto {handle.name}_mask = {self.streaming_mask(tag, handle.dtype, handle.extent)};")
+      stride = (
+        f", vecops::vec::opt::strided({self.scalar(statement.view.strides[0])})"
+        if statement.operands == (True,)
+        else ""
+      )
+      pointer = self.pointer(statement.view)
+      if I.constant(handle.extent) == 0:
+        pointer = self.storage_pointer(statement.view.storage)
+      elif I.constant(handle.extent) is None:
+        pointer = f"({self.scalar(handle.extent)}>0 ? {pointer} : {self.storage_pointer(statement.view.storage)})"
       self.line(
-        f"auto {handle.name} = vecops::vec::load_convert({tag}{{}}, {self.pointer(statement.view)}, vecops::vec::opt::masked({handle.name}_mask));"
+        f"auto {handle.name} = vecops::vec::load_convert({tag}{{}}, {pointer}, vecops::vec::opt::masked({handle.name}_mask){stride});"
       )
     elif statement.operation == "sme.store":
       handle = statement.vector

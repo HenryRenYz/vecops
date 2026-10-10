@@ -5,7 +5,7 @@
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from ...._library.registers import pack_interleave, transpose_dwords_512, transpose_registers
+from ...._library.registers import transpose_dwords_512, transpose_registers
 from ....dsl import Vector
 from ... import ir as I
 from ...dtypes import ELEMENT_BYTES
@@ -51,12 +51,29 @@ def plan_register_programs(prepared, context):
     limit = 0
   plans = {}
   for statement in nodes(prepared.vectors.kernel.body):
+    store = isinstance(statement, I.Store)
+    candidate = store or isinstance(statement, (I.DeclareState, I.UpdateState))
+    value = statement.value if candidate else None
+    prefix = False
     if (
-      not isinstance(statement, I.Store)
-      or statement.mask is not None
-      or len(statement.destination.shape) != 1
-      or catalog.get(statement.value).family != "register_geometry"
-      or not I.same_expr(statement.destination.shape[0], statement.value.type.shape[0])
+      value is not None
+      and value.op == "value_transform"
+      and value.data == ("slice", (0,))
+      and len(value.args) == 2
+      and I.constant(value.args[1]) == 0
+    ):
+      # A bounded store may consume a prefix of a complete register DAG.
+      # Keep its arithmetic closed; predicate only the memory boundary.
+      value = value.args[0]
+      prefix = True
+    if (
+      not candidate
+      or store
+      and (statement.mask is not None or len(statement.destination.shape) != 1)
+      or catalog.get(value).family != "register_geometry"
+      or store
+      and not prefix
+      and not I.same_expr(statement.destination.shape[0], statement.value.type.shape[0])
     ):
       continue
     inputs, operations, seen = [], [], set()
@@ -79,7 +96,9 @@ def plan_register_programs(prepared, context):
           return False
       else:
         if any(
-          catalog.has(e, Trait.REGISTER_TRANSFORM | Trait.REDUCTION | Trait.STATE_REFERENCE)
+          catalog.has(e, Trait.REGISTER_TRANSFORM | Trait.REDUCTION)
+          or catalog.has(e, Trait.STATE_REFERENCE)
+          and e.op != "state_ref"
           for e in walk_unique(expression)
         ):
           return False
@@ -88,7 +107,7 @@ def plan_register_programs(prepared, context):
       operations.append(expression)
       return True
 
-    if visit(statement.value):
+    if visit(value):
       tags = {}
       for expression in operations:
         extent = I.constant(expression.type.shape[0])
@@ -112,21 +131,7 @@ def plan_register_programs(prepared, context):
           # at the architectural minimum. Retain exact generic legalization,
           # rather than emitting a tag whose type cannot be instantiated.
           continue
-      plans[id(statement)] = CPURegisterPlan(
-        RegisterProgram(tuple(inputs), tuple(operations), (statement.value,)), MappingProxyType(tags)
+      plans[id(statement) if store else id(value)] = CPURegisterPlan(
+        RegisterProgram(tuple(inputs), tuple(operations), (value,)), MappingProxyType(tags)
       )
-  groups = {}
-  # The same source program serves raw SME operands, explicit packing, and
-  # AMX's fixed spatial columns. No native VL is guessed: scalable tags retain
-  # their domain/power through the pure DAG until terminal instruction spelling.
-  graph = tuple(nodes(prepared.vectors.kernel.body))
-  packed = any(isinstance(node, I.Pack) or isinstance(node, I.Expr) and node.op == "dot" for node in graph)
-  dtypes = {node.type.dtype for node in graph if isinstance(node, I.Expr)}
-  dtypes.update(node.dtype for node in graph if isinstance(node, I.View))
-  for dtype in sorted(dtypes & {"int8", "uint8", "float16", "bfloat16"}) if packed else ():
-    count = 4 // ELEMENT_BYTES[dtype]
-    for lanes, power in ((16, 0), (None, -(count.bit_length() - 1))):
-      groups[dtype, lanes, power] = expand_register_helper(
-        pack_interleave, (Vector(dtype, N=lanes, pow=power),) * count, catalog=catalog, prefix="pack_group"
-      )
-  return replace(prepared, register_programs=MappingProxyType(plans), packing_groups=MappingProxyType(groups))
+  return replace(prepared, register_programs=MappingProxyType(plans))

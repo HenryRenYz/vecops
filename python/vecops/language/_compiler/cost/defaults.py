@@ -35,6 +35,7 @@ DEFAULT = CostProfile(
     operation_rule("abs", 1),
     CostRule(OperationCost(1, 1), (("operation", "abs"), ("implementation", "scalar")), priority=1),
     operation_rule("identity", 0),
+    operation_rule("bitreinterpret", 0),
     CostRule(
       OperationCost(1, 1, provenance="grid estimate: cycles per native vector-word MAC"),
       (("operation", "dot"), ("implementation", "grid-word-mac")),

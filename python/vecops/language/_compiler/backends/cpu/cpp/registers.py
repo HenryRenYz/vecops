@@ -13,7 +13,7 @@ from ..capabilities import CPP_TYPES
 
 class RegistersEmitter:
   def register_instruction(self, value, tag, arguments, argument_tags, *, native_bits=False):
-    if value.op == "bitcast":
+    if value.op in {"bitcast", "bitreinterpret"}:
       if native_bits:
         # SVE prefix placement can cross fixed/scalable descriptor domains.
         # Both physical values are one sizeless native word; reinterpret that
@@ -113,7 +113,14 @@ class RegistersEmitter:
         physical_tags=plan.tags,
       )
       stride = statement.destination.strides[0]
-      options = "" if I.constant(stride) == 1 else f", vecops::vec::opt::strided({self.scalar(stride)})"
+      active = self.scalar(statement.destination.shape[0])
+      extent = self.scalar(program.outputs[0].type.shape[0])
+      self.line(
+        f'if (({active}) < 0 || ({active}) > ({extent})) throw std::invalid_argument("invalid register store prefix");'
+      )
+      options = f", vecops::vec::opt::first({active})"
+      if I.constant(stride) != 1:
+        options += f", vecops::vec::opt::strided({self.scalar(stride)})"
       self.line(f"vecops::vec::store_convert({tag}{{}}, {self.pointer(statement.destination)}, {values[0]}{options});")
       return True
     finally:

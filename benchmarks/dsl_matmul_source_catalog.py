@@ -549,12 +549,6 @@ def main(argv=None):
   parser.add_argument("--cpu", type=int, default=default_cpu())
   parser.add_argument("--fusion", choices=("auto", "always", "never"), default="auto")
   parser.add_argument("--schedule-pipeline", choices=("auto", "off", "prefetch", "staged"), default="auto")
-  parser.add_argument(
-    "--runtime-quant",
-    action=argparse.BooleanOptionalAction,
-    default=None,
-    help="Explicitly enable/disable the experimental ordinary-SVE runtime-quant family; omit to keep compiler defaults",
-  )
   add_toolchain_arguments(parser)
   args = parser.parse_args(argv)
   if args.chunk_size < 1 or args.chunk_index is not None and args.chunk_index < 0:
@@ -576,8 +570,6 @@ def main(argv=None):
     raise ValueError(f"chunk index exceeds {len(chunks)} selected chunks")
   chosen = chunks if args.chunk_index is None else [chunks[args.chunk_index]]
   options = {"cpu_matmul_fusion": args.fusion, "cpu_matmul_pipeline": args.schedule_pipeline}
-  if args.runtime_quant is not None:
-    options["cpu_sve_runtime_quant"] = args.runtime_quant
   audit = audit_document(cases, all_scenarios)
   audit.update(
     pass_options=options,

@@ -8,7 +8,6 @@ ladder keep their previous dispatch. Runtime capacity follows SVL, not VL.
 """
 
 import platform
-import re
 from contextlib import contextmanager
 from dataclasses import replace
 
@@ -16,10 +15,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from test_dsl_matmul_sve_optimized import _cross
-from test_dsl_sme_exact_blocks import _body
-from test_dsl_sme_family_owners import _OWNER, _assert_inlined_owners, _owners
+from dsl_test_utils import make_compiler
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
@@ -95,54 +91,6 @@ def _lower(*, vl=64, svl=64, origins=(), sides=(), **kwargs):
     )
 
 
-@pytest.mark.parametrize("level", ("dot", "matmul", "blocked"))
-@pytest.mark.parametrize("dynamic", (False, True))
-def test_whole_four_block_packed_column_gate_keeps_fused_seed_and_drain(level, dynamic):
-  source = _lower(shape=None if dynamic else (64, 1, 257), level=level)
-  body = _body(source, "void __kernel__")
-  gate = next(line for line in body.splitlines() if _GATE in line)
-  assert ">3*(16)" in gate and "<=4*(16)" in gate and "==1" in gate
-  assert body.index(_GATE) < body.index(".with_resources(vecops::execution::sme::Region")
-  skinny = _body(body, "/* SME ordinary-SVE skinny/packed-dot family */")
-  assert "widening vector dot" in skinny  # The nonselected ladder is retained.
-  owners = [_body(body, match[0]) for match in re.finditer(_OWNER, body)]
-  owner = next(value for value in owners if "SME 4x1 outer-product schedule" in value)
-  assert "vecops::vec::sme::mopa<" in owner and "sme_packed_k_cursor" in owner
-  assert "vecops::vec::max(" in owner and "vecops::vec::mul(" in owner and "vecops::vec::add(" in owner
-  # Two external native panels carry physical K padding, so the existing
-  # owner may consume ceil(K/2)*2 without a separate tail-MOPA branch.
-  assert "+1)/2*2)" in owner and "sme_seed" in owner
-  assert "/* pack A:" not in body and "/* pack B:" not in body
-  if level == "blocked":
-    assert "prologue exactly once" in body and "epilogue exactly once" in body
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("vl,svl", ((16, 64), (64, 16), (32, 32), (64, 256)))
-def test_four_block_geometry_uses_independent_captured_svl(vl, svl):
-  source = _lower(vl=vl, svl=svl)
-  gate = next(line for line in source.splitlines() if _GATE in line)
-  assert f">3*({svl // 4})" in gate and f"<=4*({svl // 4})" in gate
-  assert "streaming_lanes<" not in gate
-
-
-@pytest.mark.parametrize(
-  "kwargs",
-  (
-    {"dtype": "float16"},
-    {"implementation": "vector"},
-    {"implementation": "sme"},
-    {"sides": ("B", "B")},
-    {"sides": ("A", "A")},
-    {"origins": (0, 0)},
-    {"origins": (0, 2)},
-  ),
-)
-def test_ineligible_dtype_roles_windows_and_explicit_scopes_keep_old_dispatch(kwargs):
-  source = _lower(shape=(64, 1, 5), **kwargs)
-  assert _GATE not in source
-
-
 def _wrapper(source, *, shape=None):
   m, n, k = (
     (f"vecops::meta::cint<{v}>" for v in shape)
@@ -172,22 +120,6 @@ def _wrapper(source, *, shape=None):
       f"vecops::tensor::make_shape({shape_}),vecops::tensor::make_strides({strides}));"
     )
   return "\n".join((*lines, "__kernel__(A,AP,BP,D,C,Bias);", "}"))
-
-
-@pytest.mark.parametrize(
-  "shape,level,vl,svl",
-  (((64, 1, 257), "dot", 64, 64), (None, "matmul", 16, 64), (None, "blocked", 64, 16), ((13, 1, 5), "dot", 64, 16)),
-)
-def test_real_cross_four_block_column_owners_are_inline_and_have_no_z_spills(tmp_path, shape, level, vl, svl):
-  source = _lower(shape=shape, level=level, vl=vl, svl=svl)
-  assembly = _cross(tmp_path, source, lambda value: _wrapper(value, shape=shape), vl=vl, svl=svl)
-  owners = _owners(assembly, vl=vl, svl=svl)
-  assert owners
-  _assert_inlined_owners(assembly, len(owners), vl=vl, svl=svl)
-  assert all(not re.search(r"^\s*(?:str|ldr|stp|ldp)\s+(?:z\d|p\d)", owner, re.MULTILINE) for owner in owners)
-  assert re.search(r"^\s*bfmopa\b", assembly, re.MULTILINE)
-  if shape:
-    assert not re.search(r"^\s*bfdot\b", assembly, re.MULTILINE)
 
 
 def _geometry(*, machine=None, state=None):

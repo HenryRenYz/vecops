@@ -68,14 +68,14 @@ class MemoryEmitter:
     if not destination.shape:
       if statement.mask is not None:
         self.opening(f"if ({self.scalar(statement.mask)})")
-      self.line(f"*{self.pointer(destination)} = static_cast<{CPP_TYPES[destination.dtype]}>({self.scalar(value)});")
+      self.line(
+        f"*{self.pointer(destination)} = {self.scalar_convert(destination.dtype, self.scalar(value), value.type.dtype)};"
+      )
       if statement.mask is not None:
         self.close()
       return
     self.check_store(statement)
     if self.register_store(statement):
-      return
-    if self.matmul_store(statement):
       return
     if self.transpose_store(statement, self.prepared.transposes.get(id(statement))):
       return
@@ -438,6 +438,11 @@ class MemoryEmitter:
       ):
         if isinstance(value, I.Expr):
           result.update(load.data.storage for load in I.loads_unique(value))
+          # Physical packed operands and memory-proof metadata carry views
+          # in their payload, not in an ordinary logical load edge.
+          from ....ir.traversal import nodes
+
+          result.update(node.storage for node in nodes(value) if isinstance(node, I.View))
       if isinstance(statement, (I.Store, I.IndexedStore)):
         result.add(statement.destination.storage)
       if isinstance(statement, I.ArchitectureCall) and statement.view is not None:

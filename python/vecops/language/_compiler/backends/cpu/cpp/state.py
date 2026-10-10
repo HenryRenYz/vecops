@@ -124,10 +124,9 @@ class StateEmitter:
         self.allocate_buffer(destination.dtype, name, f"vecops_dsl::checked_shape({{{count}}})")
       effects = tuple(replace(e, store=I.Store(destination, e.store.value)) for e in region.effects)
       proxy = replace(region, effects=effects)
-      if not self.matmul_store(I.Store(destination, statement.value)):
-        self.traverse_region(
-          proxy, lambda tags, coords, active, roots, _: self.write_effects(proxy, tags, coords, active, roots)
-        )
+      self.traverse_region(
+        proxy, lambda tags, coords, active, roots, _: self.write_effects(proxy, tags, coords, active, roots)
+      )
       if isinstance(statement, I.UpdateState):
         self.line(f"std::swap({state.name}, {destination.storage}); /* simultaneous tile state update */")
     self.chunk_cache = {}
@@ -173,7 +172,7 @@ class StateEmitter:
       result = self.vector(loaded, tag, root_shape, coords, active, axis)
       if value.type.mask:
         name = self.unique("state_predicate")
-        self.line(f"auto {name} = vecops::vec::cmpne({tag}{{}}, {result}, vecops::vec::fill({tag}{{}}, 0));")
+        self.line(f"auto {name} = vecops::vec::cmpne({tag}{{}}, {result}, vecops::vec::zeros({tag}{{}}));")
         return name
       return result
     own_coords = self.coordinates(value.type.shape, root_shape, coords)
@@ -208,7 +207,8 @@ class StateEmitter:
     # This is a correctness fallback, not an implicit Vec array/spill.
     name, lane = self.unique("state_read"), self.unique("state_lane")
     representation, fill = ("Mask", "mfill") if value.type.mask else ("Vec", "fill")
-    self.line(f"vecops::vec::{representation}<{tag}> {name} = vecops::vec::{fill}({tag}{{}}, 0);")
+    zero = f"vecops::vec::mfill({tag}{{}}, false)" if value.type.mask else f"vecops::vec::zeros({tag}{{}})"
+    self.line(f"vecops::vec::{representation}<{tag}> {name} = {zero};")
     if word:
       extent = self.scalar(value.type.shape[-1])
       register = f"{value.data.name}_r0"

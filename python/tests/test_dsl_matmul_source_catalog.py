@@ -179,8 +179,7 @@ def test_empty_list_and_verification_cannot_report_success():
     runner.verify_manifests([], [], {})
 
 
-@pytest.mark.parametrize("flag, expected", [(None, None), ("--runtime-quant", True), ("--no-runtime-quant", False)])
-def test_runtime_quant_cli_is_explicit_only_and_retained_in_manifest(monkeypatch, capsys, flag, expected):
+def test_runtime_quant_catalog_retains_original_reference_selectors(monkeypatch, capsys):
   cases = tuple(
     case
     for case in CASES
@@ -190,20 +189,15 @@ def test_runtime_quant_cli_is_explicit_only_and_retained_in_manifest(monkeypatch
   monkeypatch.setattr(runner, "load_cases", lambda **_: cases)
   monkeypatch.setattr(runner.vecops, "Compiler", lambda **_: pytest.fail("audit must not build"))
   args = ["--list", "--cohort", "family", "--native", "uint8", "--level", "dot", "matmul"]
-  if flag:
-    args.append(flag)
   assert runner.main(args) == 0
   audit = json.loads(capsys.readouterr().out)
   assert audit["selected"] == 20  # Five source registrations, both metadata modes and both levels.
   assert not audit["executed"] and audit["completed"] == 0
   options = audit["pass_options"]
-  if expected is None:
-    assert "cpu_sve_runtime_quant" not in options
-  else:
-    assert options["cpu_sve_runtime_quant"] is expected
+  assert "cpu_sve_runtime_quant" not in options
   assert options["cpu_matmul_fusion"] == "auto"
   assert options["cpu_matmul_pipeline"] == "auto"
-  # The experimental DSL flag must not rewrite the actual C++ family selectors.
+  # Migrating algorithms must not rewrite the actual C++ family selectors.
   assert {row["reference_family"] for row in audit["executions"]} == {"Automatic", "RuntimeQuantInt8"}
 
 

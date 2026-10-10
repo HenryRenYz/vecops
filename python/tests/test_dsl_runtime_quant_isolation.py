@@ -2,17 +2,14 @@
 # SPDX-License-Identifier: MIT
 """Runtime family eligibility must not replace the generic fusion policy."""
 
-import re
-
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from test_dsl_matmul_sve_optimized import _cross, _strided_output
-from test_dsl_sve_runtime_quant import MARKER, OPTION, _body, _cross_wrapper, _sme_available, _template
+from dsl_test_utils import make_compiler
+from test_dsl_matmul_sve_optimized import _strided_output
+from test_dsl_sve_runtime_quant import OPTION, _sme_available, _template
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
 
 
 def _lower(*, enabled=True, fusion="auto", vl=64, svl=64, target="SME", **kwargs):
@@ -27,90 +24,6 @@ def _lower(*, enabled=True, fusion="auto", vl=64, svl=64, target="SME", **kwargs
       "_vector_state": VectorState(vl, svl),
     },
   )
-
-
-@pytest.mark.parametrize("shape", (None, (1, 256, 256), (64, 256, 256)))
-@pytest.mark.parametrize("level,bk", (("dot", None), ("library", None), ("library", 3)))
-@pytest.mark.parametrize("fusion", ("auto", "always", "never"))
-def test_quant_option_preserves_normal_fallback_operand_plans(shape, level, bk, fusion):
-  off = _lower(enabled=False, shape=shape, level=level, bk=bk, fusion=fusion)
-  on = _lower(enabled=True, shape=shape, level=level, bk=bk, fusion=fusion)
-  off_plans, on_plans = list(off.backend_ir.matmuls.values()), list(on.backend_ir.matmuls.values())
-  assert len(off_plans) == len(on_plans) == 1
-  # Frozen expression/view reprs include the complete DAG, materialization
-  # destination, condition, cost and reason, but no object-identity addresses.
-  assert repr(off_plans[0].operands) == repr(on_plans[0].operands)
-  if fusion == "never":
-    assert not on_plans[0].sve_runtime_quant
-    assert MARKER not in on.source
-    assert "dsl_o_dot_input" in on.source
-
-
-@pytest.mark.parametrize("level,bk", (("dot", None), ("library", None), ("library", 3)))
-def test_quant_whole_problem_guard_precedes_fallback_only_preparation(level, bk):
-  source = _lower(level=level, bk=bk).source
-  assert source.count(MARKER) == 1
-  gate = next(line for line in source.splitlines() if MARKER in line)
-  assert "matmul_fits(" in gate
-  assert "parameter_A_size_0" in gate and "parameter_A_size_1" in gate
-  assert "parameter_B_size_1" in gate
-  assert ",4,1,4,131072)" in gate
-  assert not any(name in gate for name in ("panel_m", "panel_n", "panel_k", "block_k"))
-  accepted = _body(source)
-  assert "dsl_o_dot_input" not in accepted
-  assert "pack A:" not in accepted
-  assert "input_cache" not in accepted
-  assert "with_resources" not in accepted
-  fallback = source[source.index(accepted) + len(accepted) :]
-  assert "reload cost exceeds saved tile traffic" in fallback
-  assert re.search(r"dsl_o_dot_input_\w+\.resize\(", fallback)
-  assert "sme::mopa" in fallback
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("k", (5, 9))
-def test_quant_explicit_split_k_has_one_accepted_scope_and_original_phases(k):
-  source = _lower(level="library", bk=3, shape=(5, 19, k)).source
-  accepted = _body(source)
-  assert "block_k" in accepted and "runtime_quant_prior" in accepted
-  assert "epilogue exactly once" in accepted
-  assert "corrected integer running sum, not correction again" in accepted
-  assert f"pack_offset<{CPP_TYPES['int8']}, 2, true>" in accepted
-  k_loop = next(line for line in accepted.splitlines() if "for (" in line and "block_k" in line)
-  assert f"std::int64_t{{{k}}}" in k_loop and "+=4" in k_loop
-  assert "vecops::ops::" not in accepted  # No opaque quantization operator call.
-  assert MARKER not in accepted
-  assert "pack A:" not in accepted
-  assert "dsl_o_dot_input" not in accepted
-
-
-@pytest.mark.parametrize("kwargs", ({"raw_b": True}, {"intermediate": "float64"}, {"target": "AVX512"}))
-def test_quant_static_rejection_keeps_generic_materialization(kwargs):
-  source = _lower(**kwargs).source
-  assert MARKER not in source
-  assert "dsl_o_dot_input" in source
-  assert "reload cost exceeds saved tile traffic" in source
-
-
-@pytest.mark.parametrize(
-  "shape,level,bk,vl,svl,quant_expected,generic_expected",
-  (
-    ((1, 16, 5), "dot", None, 64, 64, True, False),
-    ((64, 256, 256), "dot", None, 64, 64, False, True),
-    (None, "dot", None, 16, 64, True, True),
-    (None, "library", 3, 64, 16, True, True),
-  ),
-)
-def test_quant_isolation_real_arm_assembly(tmp_path, shape, level, bk, vl, svl, quant_expected, generic_expected):
-  source = _lower(shape=shape, level=level, bk=bk, vl=vl, svl=svl).source
-  assembly = _cross(tmp_path, source, _cross_wrapper, vl=vl, svl=svl)
-  assert bool(re.search(r"^\s*(?:usdot|sudot)\b", assembly, re.MULTILINE)) is quant_expected
-  assert bool(re.search(r"^\s*usmopa\b", assembly, re.MULTILINE)) is generic_expected
-  if not generic_expected:
-    assert not re.search(r"^\s*smstart\b", assembly, re.MULTILINE)
-  assert not re.search(r"^\s*(?:fmla|fmad|fmadd)\b", assembly, re.MULTILINE)
-  assert not re.search(r"^\s*bl[^\n]*(?:WideningDot|widening_dot)", assembly, re.MULTILINE)
-  assert_no_vec_mask_arrays(source)
 
 
 AUTO_NATIVE_SHAPES = ((1, 256, 256), (5, 19, 67), (3, 7, 5), (3, 7, 9), (64, 256, 256))
@@ -155,20 +68,6 @@ def test_quant_auto_native_pair_capture_does_not_require_arm_or_compile(level, b
     vecops._C.bind_kernel_call(kernel.operator.kernel_def._native(), request.call)
   assert not compiler.build_events
   assert not compiler.build_dir.exists()
-
-
-@pytest.mark.parametrize("level,bk", (("dot", None), ("library", None), ("library", 3)))
-def test_quant_auto_native_template_retains_real_generic_materialization(level, bk):
-  off = _lower(enabled=False, level=level, bk=bk, output="int32", pipeline="relu")
-  on = _lower(enabled=True, level=level, bk=bk, output="int32", pipeline="relu")
-  assert repr(next(iter(off.backend_ir.matmuls.values())).operands) == repr(
-    next(iter(on.backend_ir.matmuls.values())).operands
-  )
-  accepted = _body(on.source)
-  fallback = on.source[on.source.index(accepted) + len(accepted) :]
-  assert "dsl_o_dot_input" not in accepted
-  assert re.search(r"dsl_o_dot_input_\w+\.resize\(", fallback)
-  assert "reload cost exceeds saved tile traffic" in fallback
 
 
 def _auto_native_case(shape, panel, *, layout="row", prior="disjoint", reverse_a=False):

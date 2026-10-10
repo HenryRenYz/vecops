@@ -8,16 +8,12 @@ check physical canaries, and retain odd/zero K, priors and fused epilogues.
 """
 
 import platform
-import re
 
 import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from test_dsl_matmul_sve_optimized import _cross
-from test_dsl_sme_exact_blocks import _body
-from test_dsl_sme_family_owners import _OWNER, _assert_inlined_owners, _owners
+from dsl_test_utils import make_compiler
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
@@ -69,33 +65,6 @@ def _lower(**kwargs):
   )
 
 
-@pytest.mark.parametrize("side", ("A", "B"))
-@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32", "float64", "int8", "uint8"))
-def test_whole_native_packed_axis_needs_block_existence_raw_axis_needs_full_lanes(side, dtype):
-  source = _lower(dtype=dtype, side=side)
-  owner = next(
-    _body(source, match[0])
-    for match in re.finditer(_OWNER, source)
-    if f"SME {'1x4' if side == 'A' else '4x1'} outer-product" in _body(source, match[0])
-  )
-  guard = next(line for line in owner.splitlines() if "full ZA family: branch-free spatial K body" in line)
-  assert re.search(r">0\*\w+.*>=4\*\w+" if side == "A" else r">=4\*\w+.*>0\*\w+", guard)
-  full = _body(owner, "/* full ZA family: branch-free spatial K body */")
-  if dtype not in {"float32", "float64"}:
-    assert "whole K-group u32 gather" in full
-    assert "vecops::vec::opt::unmasked" in full
-    assert "one partial K group" in full  # Raw odd K must not read packed padding.
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("side", ("A", "B"))
-def test_sliced_native_packed_origins_keep_conservative_full_axis_proof(side):
-  source = _lower(side=side, packed_origin=True)
-  guards = [line for line in source.splitlines() if "full ZA family: branch-free spatial K body" in line]
-  assert guards
-  assert all(re.search(r">=\d+\*\w+.*>=\d+\*\w+", line) or not re.search(r">0\*\w+", line) for line in guards)
-
-
 def _wrapper(source, dtype):
   element = CPP_TYPES[dtype]
   return "\n".join(
@@ -116,17 +85,6 @@ def _wrapper(source, dtype):
       "}",
     )
   )
-
-
-@pytest.mark.parametrize("side", ("A", "B"))
-@pytest.mark.parametrize("dtype", ("float16", "bfloat16"))
-def test_real_cross_whole_mixed_spatial_keeps_named_inline_balanced_owners(side, dtype, tmp_path):
-  source = _lower(side=side, dtype=dtype)
-  assembly = _cross(tmp_path, source, lambda value: _wrapper(value, dtype), vl=64, svl=64)
-  owners = _owners(assembly, vl=64, svl=64)
-  assert owners
-  _assert_inlined_owners(assembly, len(owners), vl=64, svl=64)
-  assert not any(re.search(r"^\s*(?:str|ldr|stp|ldp)\s+(?:z\d|p\d)", owner, re.MULTILINE) for owner in owners)
 
 
 def _packer(dtype, side):

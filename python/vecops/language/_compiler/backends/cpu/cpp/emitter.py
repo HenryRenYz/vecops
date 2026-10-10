@@ -14,9 +14,9 @@ from .control import ControlEmitter
 from .expressions import ExpressionsEmitter
 from .grid import GridEmitter
 from .hardware import HardwareEmitter
-from .matmul import MatmulEmitter
-from .matmul_support import PREAMBLE as _MATMUL_PREAMBLE
 from .memory import MemoryEmitter
+from .packed_memory import PackedMemoryEmitter
+from .packing_support import PREAMBLE as _PACKING_PREAMBLE
 from .primitives import PrimitivesEmitter
 from .printing import PrintEmitter
 from .registers import RegistersEmitter
@@ -33,7 +33,7 @@ class CPUEmitter(
   ControlEmitter,
   TransposeEmitter,
   HardwareEmitter,
-  MatmulEmitter,
+  PackedMemoryEmitter,
   GridEmitter,
   StateEmitter,
   PrimitivesEmitter,
@@ -127,6 +127,7 @@ class CPUEmitter(
 
   def generate(self):
     self.line("#include <bit>")
+    self.line('#include "vecops/util/ScalarConvert.h"')
     if (self.uses_executor or self.traces_memory) and not self.uses_workspace:
       self.line("#define VECOPS_KERNEL_EXECUTION_CONTEXT 1")
     parameters = []
@@ -225,7 +226,7 @@ class CPUEmitter(
       "// SPDX-License-Identifier: MIT\n"
       "// Generated support code is project-owned; user kernel logic retains its original terms.\n"
     )
-    return notices + headers + _PREAMBLE + _MATMUL_PREAMBLE + "\n".join(self.lines) + "\n"
+    return notices + headers + _PREAMBLE + _PACKING_PREAMBLE + "\n".join(self.lines) + "\n"
 
 
 def generate(prepared):

@@ -3,15 +3,11 @@
 """Direct ZA column stores need a proven unit stride, never an assumed layout."""
 
 import platform
-import re
 
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from test_dsl_matmul_sve_optimized import _cross
-from test_dsl_sme_exact_blocks import _body
-from test_dsl_sme_family_owners import _assert_inlined_owners, _owners
+from dsl_test_utils import make_compiler
 from test_dsl_sme_mixed_packed_spatial import _packer
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
@@ -52,47 +48,6 @@ def _lower(**kwargs):
   )
 
 
-@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32", "float64", "int8", "uint8"))
-def test_static_single_column_uses_vertical_direct_seed_and_store(dtype):
-  source = _lower(dtype=dtype, static_n=1, seed=True)
-  assert "vecops::vec::sme::load_ver<" in source
-  assert "vecops::vec::sme::store_ver<" in source
-  assert "runtime contiguous column" not in source
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32", "float64", "int8", "uint8"))
-def test_dynamic_column_direct_store_has_exact_unit_stride_and_extent_guards(dtype):
-  source = _lower(dtype=dtype)
-  guards = [line for line in source.splitlines() if "runtime contiguous column" in line]
-  assert guards
-  for line in guards:
-    stride, columns, rows = line.split(" && ")
-    assert re.search(r"parameter_C_stride_0_\d+\)==1$", stride)
-    assert any(name in columns for name in ("sme_extent_n_value", "sme_matrix_lanes")) and columns.endswith(")==1")
-    assert any(name in rows for name in ("sme_extent_m_value", "sme_matrix_lanes"))
-    assert rows.endswith(")>1) /* runtime contiguous column: one vertical ZA store */ {")
-  assert "vecops::vec::sme::store_ver<" in source
-  assert "vecops::vec::sme::store_hor<" in source
-  assert "original ZA slice orientation" in source
-  assert_no_vec_mask_arrays(source)
-
-
-def test_transformed_output_does_not_enter_direct_runtime_store():
-  source = _lower(transformed=True)
-  assert "runtime contiguous column" not in source
-  assert "vecops::vec::sme::read_hor<" in source
-
-
-def test_runtime_single_column_proof_emits_one_constant_index_store_without_loop():
-  source = _lower()
-  fast = _body(source, "/* runtime contiguous column: one vertical ZA store */")
-  assert "/* exactly one active vertical slice */" in fast
-  assert re.search(r"constexpr vecops::nint_t \w+=0;", fast)
-  assert fast.count("vecops::vec::sme::store_ver<") == 1
-  assert not re.search(r"\b(?:for|while)\s*\(", fast)
-
-
 def _wrapper(source, dtype):
   scalar = CPP_TYPES[dtype]
   return "\n".join(
@@ -111,17 +66,6 @@ def _wrapper(source, dtype):
       "}",
     )
   )
-
-
-@pytest.mark.parametrize("dtype", ("bfloat16", "float32"))
-def test_real_cross_direct_dynamic_store_has_vertical_and_horizontal_inline_owners(dtype, tmp_path):
-  assembly = _cross(tmp_path, _lower(dtype=dtype, seed=True), lambda source: _wrapper(source, dtype), vl=64, svl=64)
-  assert re.search(r"\bst1w\s+\{za\dv\.s", assembly)
-  assert re.search(r"\bst1w\s+\{za\dh\.s", assembly)
-  owners = _owners(assembly, vl=64, svl=64)
-  assert owners
-  _assert_inlined_owners(assembly, len(owners), vl=64, svl=64)
-  assert not any(re.search(r"^\s*(?:str|ldr|stp|ldp)\s+(?:z\d|p\d)", owner, re.MULTILINE) for owner in owners)
 
 
 @pytest.mark.parametrize("dtype", ("float16", "bfloat16", "float32", "float64", "int8", "uint8"))

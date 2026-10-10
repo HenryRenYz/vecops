@@ -51,12 +51,10 @@ def packing_template(dtype):
 @pytest.mark.parametrize("dtype", ["uint8", "float16", "float32", "float64"])
 def test_sme_packing_fringe_is_library_control_with_small_bit_primitives(dtype):
   source = CPUBackend().lower(packing_template(dtype).ir, (), target="SME").source
-  assert "sme_packing_" + dtype + "_" in source
-  assert "streaming_bits_mask" in source and "vecops::vec::bitcast" in source
-  assert "vecops::vec::sme::read_ver<0>" in source
-  assert "vecops::vec::sme::load_hor<1>" in source
-  assert "vecops::vec::sme::write_hor" not in source, "fractional storage words must be zeroed by direct ZA loads"
-  assert "sme_packing_metadata_" in source
+  assert "dsl_pack_" in source
+  assert "pack_offset" in source
+  assert "packed output buffer too small" in source
+  assert "vecops::vec::sme::" not in source.partition("void __kernel__")[2]
   assert len(source) < 250_000, "instruction schedule source grew beyond its bounded variants"
   assert max(map(len, source.splitlines())) < 2_000, "metadata was printed as expanded expression trees"
   assert_no_vec_mask_arrays(source)

@@ -7,6 +7,9 @@
 #include <type_traits>
 #include <numeric>
 #include <cmath>
+#include <bit>
+#include <cstdint>
+#include <limits>
 #include "CoreTypes.h"
 #include "TypeTraits.h"
 
@@ -33,11 +36,16 @@ struct DTypePromote<T, void> {
 
 } // namespace details
 
+/**
+ * Scalar numeric conversion. Integer narrowing saturates; float-to-integer
+ * conversion truncates toward zero, saturates at both endpoints and maps NaN
+ * to zero, including builds using fast-math. Use wrap_convert for low bits.
+ */
 template <typename TOut, typename TIn>
 VECOPS_INLINE constexpr TOut convert(TIn v) {
   using TPromoteIn = details::DTypePromote<TIn>::type;
   using TPromoteOut = details::DTypePromote<TOut>::type;
-  if constexpr (is_int_v<TOut> && sizeof(TOut) < sizeof(TIn)) {
+  if constexpr (is_int_v<TOut> && is_int_v<TIn> && sizeof(TOut) < sizeof(TIn)) {
     if constexpr (is_unsigned_int_v<TIn>) {
       const auto HI = TIn(std::numeric_limits<TOut>::max());
       return TOut(std::min(HI, v));
@@ -64,26 +72,18 @@ VECOPS_INLINE constexpr TOut convert(TIn v) {
     // levels. Clamping the already-converted integer is too late — the
     // UB has already produced a wrapped value.
     const auto f = static_cast<TPromoteIn>(v);
-    if (std::isnan(static_cast<double>(f))) return TOut(0);
-    if constexpr (is_unsigned_int_v<TOut>) {
-      constexpr auto hi = [] {
-        using F = TPromoteIn;
-        // Largest float exactly representable in TOut.
-        F value = F(1);
-        while (value * F(2) <= F(std::numeric_limits<TOut>::max())) {
-          value *= F(2);
-        }
-        return value - F(1) == F(std::numeric_limits<TOut>::max())
-            ? F(std::numeric_limits<TOut>::max())
-            : value - F(1);
-      }();
-      return TOut(std::min(std::max(f, TPromoteIn(0)), hi));
-    } else {
-      using F = TPromoteIn;
-      constexpr F hi = F(std::numeric_limits<TOut>::max());
-      constexpr F lo = F(std::numeric_limits<TOut>::min());
-      return TOut(std::min(std::max(f, lo), hi));
-    }
+    using Bits = std::conditional_t<sizeof(TPromoteIn) == 4, uint32_t, uint64_t>;
+    constexpr Bits sign = Bits(1) << (sizeof(Bits) * 8 - 1);
+    constexpr Bits infinity = sizeof(Bits) == 4 ? Bits(0x7f800000u) : Bits(0x7ff0000000000000ull);
+    // Bit classification survives -ffast-math; isnan alone does not.
+    if ((std::bit_cast<Bits>(f) & ~sign) > infinity) return TOut(0);
+    constexpr auto hi = TPromoteIn(std::numeric_limits<TOut>::max());
+    constexpr auto lo = TPromoteIn(std::numeric_limits<TOut>::min());
+    // Return the integer endpoint directly. Its floating representation can
+    // round outside the destination range (e.g. INT32_MAX becomes 2^31).
+    if (f >= hi) return std::numeric_limits<TOut>::max();
+    if (f <= lo) return std::numeric_limits<TOut>::min();
+    return TOut(f);
   } else {
     return TOut(TPromoteOut(TPromoteIn(v)));
   }

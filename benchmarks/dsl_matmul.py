@@ -182,7 +182,7 @@ def main():
   parser.add_argument("--max-flops", type=int, default=300_000_000, help="Skip huge cases; set 0 for the full catalog")
   parser.add_argument("--fusion", choices=["auto", "always", "never"], default="auto")
   parser.add_argument("--schedule-pipeline", choices=["auto", "off", "prefetch", "staged"], default="auto")
-  parser.add_argument("--gemv-columns", type=int, default=4, choices=range(1, 9))
+  parser.add_argument("--gemv-k-unroll", type=int, default=2, choices=(1, 2, 4))
   args = parser.parse_args()
   catalogs = {kind: catalog(dtype=KIND_TYPES[kind][2]) for kind in args.kind}
   known_shapes = {f"{m}x{n}x{k}" for entries in catalogs.values() for _, _, m, n, k in entries}
@@ -249,7 +249,7 @@ def main():
                   level,
                   {
                     "cpu_matmul_fusion": args.fusion,
-                    "cpu_gemv_columns": args.gemv_columns,
+                    "cpu_gemv_k_unroll": args.gemv_k_unroll,
                     "cpu_matmul_pipeline": args.schedule_pipeline,
                   },
                   b_layout=args.b_layout,

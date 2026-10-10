@@ -107,6 +107,7 @@ define("sqrt abs", "math", ELEMENTWISE | T.UNARY_MATH, arity=1)
 # Cast interning remains conservative until dtype/tag/rounding contracts are
 # represented completely. A memory read is not pure across writes/aliasing.
 define("cast", "conversion", T.ELEMENTWISE | T.TRANSPOSE_STREAMABLE, arity=1, keywords=("dtype",))
+define("bitreinterpret", "register_geometry", ELEMENTWISE, arity=1)
 define(
   "load",
   "memory",
@@ -119,7 +120,9 @@ define("frozen", "reference", T.REFERENCE | T.RUNTIME_SHAPE | T.UNSTABLE_EXTENT)
 define("raw symbol", "reference", T.RUNTIME_SHAPE)
 define("literal fill", "structural", ELEMENTWISE)
 define("arange", "index", T.ELEMENTWISE | T.CSE)
-define("packing_size broadcast_dim schedule_parameter", "shape", T.CSE)
+define("packing_size checked_shape broadcast_dim", "shape", T.CSE)
+define("packing_offset", "shape", T.CSE)
+define("_packing_offset", "metadata", T.NONE)
 define("lanes", "shape", T.CSE | T.POSITIVE_EXTENT)
 define("streaming_lanes", "shape", T.CSE | T.POSITIVE_EXTENT)
 define("vector_ref", "reference", T.REFERENCE | T.TRANSPOSE_STREAMABLE)
@@ -140,6 +143,7 @@ define("axis_reduce map_rows", "reduction", T.REDUCTION | T.VECTOR_BOUNDARY)
 define("region_argument", "structural", T.NONE)
 define("register_input", "structural", T.VECTOR_BOUNDARY)
 define("dtype_name itemsize static_log2", "metadata", T.NONE)
+define("cache_bytes", "metadata", T.CSE)
 define("dot", "matrix", T.VECTOR_BOUNDARY)
 define(
   "gather",
@@ -188,7 +192,8 @@ define("pipelined", "pipeline", T.NONE, keywords=("stages", "distance", "unroll"
 define("view_disjoint", "metadata", T.NONE)
 define("double_buffer", "allocation", T.NONE, keywords=("dtype",))
 define("amx.zero", "architecture", T.NONE, effects="state", keywords=("dtype",))
-define("sme.load sme.load_bits sme.read_hor sme.read_ver", "architecture", T.NONE, effects="state", keywords=("dtype",))
+define("sme.load", "architecture", T.NONE, effects="state", keywords=("dtype", "strided"))
+define("sme.load_bits sme.read_hor sme.read_ver", "architecture", T.NONE, effects="state", keywords=("dtype",))
 define("sme.mask", "architecture", T.NONE, effects="none", keywords=("dtype",))
 define("sme.store sme.store_bits sme.write_hor sme.write_ver sme.zero_za", "architecture", T.NONE, effects="state")
 define(

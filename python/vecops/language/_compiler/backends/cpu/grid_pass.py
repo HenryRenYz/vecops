@@ -11,7 +11,7 @@ from ...passes.manager import register_pass
 from .grid import plan_grid, plan_regions
 
 
-@register_pass("cpu-plan-grids", stage="cpu-memory", after=("cpu-plan-matmul",))
+@register_pass("cpu-plan-grids", stage="cpu-memory", after=("cpu-plan-transpose",))
 def plan_grids(prepared, context):
   plans, blocks = {}, []
   mode = context.options.get("cpu_grid_regions", "auto")

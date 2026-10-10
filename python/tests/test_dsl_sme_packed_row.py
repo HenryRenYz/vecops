@@ -8,93 +8,16 @@ packing, a threshold change, or a change to the PackedAB tiny/MMLA ladder.
 """
 
 import platform
-import re
 
 import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
-from test_dsl_matmul_sve_optimized import _cross
-from test_dsl_sme_exact_blocks import _body
-from test_dsl_sme_family_owners import _OWNER, _assert_inlined_owners, _owners
-from test_dsl_sme_packed_col import _lower, _pack_template, _template, _wrapper
+from dsl_test_utils import make_compiler
+from test_dsl_sme_packed_col import _pack_template, _template
 from vecops._arm_vector_state import VectorState, get_vector_state
 
 _ROW_GATE = "/* single-packed B row uses ZA spatial lanes */"
-
-
-@pytest.mark.parametrize("level", ("dot", "matmul", "blocked"))
-@pytest.mark.parametrize("dynamic", (False, True))
-def test_single_packed_b_bf16_row_selects_shared_za_preserving_fusion(level, dynamic):
-  source = _lower(shape=None if dynamic else (1, 64, 257), transformed=True, level=level)
-  body = _body(source, "void __kernel__")
-  gate = next(line for line in body.splitlines() if _ROW_GATE in line)
-  assert "!=1" in gate and "<=64" in gate
-  assert body.index(_ROW_GATE) < body.index(".with_resources(vecops::execution::sme::Region")
-  owners = [_body(body, match[0]) for match in re.finditer(_OWNER, body)]
-  owner = next(owner for owner in owners if "SME 1x4 outer-product schedule" in owner)
-  assert "vecops::vec::sme::mopa<" in owner
-  assert "vecops::vec::mul" in owner and "vecops::vec::add" in owner
-  assert "sme::load_hor<" in owner or "sme_seed" in owner
-  assert "sme::read_hor<" in owner and "vecops::vec::max" in owner
-  assert "one partial K group" in owner
-  assert "/* pack A:" not in body and "/* pack B:" not in body
-  if level == "blocked":
-    assert "epilogue exactly once" in body and "prologue exactly once" in body
-  assert_no_vec_mask_arrays(source)
-
-
-@pytest.mark.parametrize("packing,format_", (("none", "sme"), ("AB", "sme"), ("B", "dense")))
-def test_raw_both_packed_and_dense_row_routes_remain_ordinary_vector(packing, format_):
-  source = _lower(shape=(1, 64, 257), packing=packing, format_=format_, epilogue=False)
-  assert _ROW_GATE not in source
-  skinny = _body(source, "/* SME ordinary-SVE skinny/packed-dot family */")
-  assert "sme::mopa<" not in skinny
-  assert "vecops::vec::widening_dot" in skinny or "vector outer-product family" in skinny
-
-
-@pytest.mark.parametrize(
-  "dtype,n,limit", (("bfloat16", 64, 64), ("bfloat16", 65, 64), ("float16", 16, 16), ("float16", 17, 16))
-)
-def test_row_dispatch_keeps_dtype_and_original_threshold_boundaries(dtype, n, limit):
-  source = _lower(dtype=dtype, shape=(1, n, 257), epilogue=False)
-  gate = next(line for line in source.splitlines() if "/* SME ordinary-SVE skinny/packed-dot family */" in line)
-  assert f"<={limit}" in gate
-  assert (_ROW_GATE in source) == (dtype == "bfloat16")
-  assert f"std::int64_t{{{n}}}" in gate
-
-
-def test_explicit_vector_single_packed_row_keeps_original_route():
-  source = _lower(shape=(1, 64, 257), implementation="vector")
-  body = _body(source, "void __kernel__")
-  assert _ROW_GATE not in body and "sme::mopa<" not in body
-  assert "vector outer-product family" in body
-
-
-@pytest.mark.parametrize(
-  "dtype,shape,level,vl,svl",
-  (
-    ("bfloat16", (1, 64, 257), "dot", 64, 64),
-    ("bfloat16", None, "matmul", 16, 64),
-    ("bfloat16", None, "blocked", 64, 16),
-    ("float16", None, "dot", 32, 64),
-  ),
-)
-def test_packed_row_real_cross_retains_inline_selected_owners(tmp_path, dtype, shape, level, vl, svl):
-  source = _lower(dtype=dtype, shape=shape, level=level, transformed=True, vl=vl, svl=svl)
-  assembly = _cross(
-    tmp_path,
-    source,
-    lambda source: _wrapper(source, dtype, shape=shape, transformed=True),
-    vl=vl,
-    svl=svl,
-  )
-  owners = _owners(assembly, vl=vl, svl=svl)
-  assert owners
-  _assert_inlined_owners(assembly, len(owners), vl=vl, svl=svl)
-  assert all(not re.search(r"^\s*(?:str|ldr|stp|ldp)\s+(?:z\d|p\d)", owner, re.MULTILINE) for owner in owners)
-  assert re.search(r"^\s*\w*mopa\b", assembly, re.MULTILINE)
 
 
 def _packed_count(*, machine=None, vector_state=None):

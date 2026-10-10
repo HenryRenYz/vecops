@@ -45,8 +45,9 @@ def test_projection_ab_only_changes_dsl_packing_request(monkeypatch, mode, packi
   assert cpp.ir.canonical() == before
   assert cpp.ir.source == ROOT / "benchmarks/dsl_matmul_source_reference.cpp"
   backend = CPUBackend().lower(variant.ir, (), target="SME", options={"_vector_state": VectorState(32, 64)})
-  assert backend.backend_ir.matmuls
-  assert all(plan.options.packing == "AB" for plan in backend.backend_ir.matmuls.values())
+  assert not backend.backend_ir.matmuls
+  assert "packed-layout recipe" in "\n".join(backend.kernel.diagnostics)
+  assert "dsl_recipe_dot_" in backend.source
   assert_no_vec_mask_arrays(backend.source)
 
 

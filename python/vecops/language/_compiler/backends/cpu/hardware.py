@@ -39,6 +39,14 @@ def preflight(region, catalog=None):
   def require(condition, active, message):
     checks.append((I.binary("or", I.Expr(I.ScalarType("bool"), "not", (active,)), condition), message))
 
+  def shape_interval(view, axis, bounds):
+    root = view.region.axes[axis] if view.region is not None else None
+    if root is not None and view.region.clipped[root]:
+      requested = bound(view.region.widths[root], bounds)[1]
+      upper = I.binary("min", I.binary("max", I.literal(0), requested), view.region.root_shape[root])
+      return I.literal(0), upper
+    return bound(view.shape[axis], bounds)
+
   def memory(statement, bounds, active, *, hint=False):
     view = statement.view
     if view is None:
@@ -80,17 +88,8 @@ def preflight(region, catalog=None):
       # Prefetch does not consume a vector/tile, but its C++ pointer must
       # still be formed within the proven storage region.
       return
-    shape_bounds = []
-    for axis, shape in enumerate(view.shape):
-      root = view.region.axes[axis] if view.region is not None else None
-      if root is not None and view.region.clipped[root]:
-        # Requested width, unlike min(stop, extent)-min(start, extent),
-        # retains affine cancellation and gives a useful tail upper bound.
-        requested = bound(view.region.widths[root], bounds)[1]
-        upper = I.binary("min", I.binary("max", I.literal(0), requested), view.region.root_shape[root])
-        shape_bounds.append((I.literal(0), upper))
-      else:
-        shape_bounds.append(bound(shape, bounds))
+    # Requested width retains correlation at a fully clipped/empty fringe.
+    shape_bounds = [shape_interval(view, axis, bounds) for axis in range(len(view.shape))]
     if region.kind == "sme":
       # Numeric memory conversion may consume/produce several storage words
       # while retaining one compute vector. Raw ZA moves use storage width.
@@ -126,11 +125,12 @@ def preflight(region, catalog=None):
           for pair in shape_bounds
         ]
       lanes = I.Expr(I.ScalarType("int64"), "streaming_lanes", data=word_dtype)
-      require(
-        I.binary("eq", expand_definitions(view.strides[-1], definitions), I.literal(1)),
-        active,
-        "SME operand must have unit column stride",
-      )
+      if not (statement.operation == "sme.load" and statement.operands == (True,)):
+        require(
+          I.binary("eq", expand_definitions(view.strides[-1], definitions), I.literal(1)),
+          active,
+          "SME operand must have unit column stride",
+        )
       for lower, upper in shape_bounds:
         require(
           I.binary("and", I.binary("ge", lower, I.literal(0)), I.binary("le", upper, lanes)),
@@ -217,7 +217,11 @@ def preflight(region, catalog=None):
         if statement.vector is not None:
           vector = statement.vector
           lanes = I.Expr(I.ScalarType("int64"), "streaming_lanes", data=vector.dtype)
-          lower, upper = bound(vector.extent, bounds)
+          lower, upper = (
+            shape_interval(statement.view, 0, bounds)
+            if statement.operation == "sme.load" and I.same_expr(vector.extent, statement.view.shape[0])
+            else bound(vector.extent, bounds)
+          )
           require(
             I.binary("and", I.binary("ge", lower, I.literal(0)), I.binary("le", upper, lanes)),
             active,

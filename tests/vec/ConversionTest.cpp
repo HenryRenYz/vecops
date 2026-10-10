@@ -20,6 +20,22 @@
 
 namespace vec = vecops::vec;
 
+TEST(VecScalarConversionTest, FloatingNarrowingClampsBeforeIntegerConversion) {
+  EXPECT_EQ(::vecops::convert<int8_t>(300.0f), int8_t{127});
+  EXPECT_EQ(::vecops::convert<int8_t>(-300.0f), int8_t{-128});
+  EXPECT_EQ(::vecops::convert<int8_t>(1e30f), int8_t{127});
+  EXPECT_EQ(::vecops::convert<uint8_t>(-1e30f), uint8_t{0});
+  EXPECT_EQ(::vecops::convert<uint8_t>(1e30f), uint8_t{255});
+  EXPECT_EQ(::vecops::convert<int32_t>(2147483648.0f), std::numeric_limits<int32_t>::max());
+  EXPECT_EQ(::vecops::convert<uint32_t>(4294967296.0f), std::numeric_limits<uint32_t>::max());
+  EXPECT_EQ(::vecops::convert<int64_t>(0x1p63), std::numeric_limits<int64_t>::max());
+  EXPECT_EQ(::vecops::convert<uint64_t>(0x1p64), std::numeric_limits<uint64_t>::max());
+  EXPECT_EQ(::vecops::convert<int8_t>(std::numeric_limits<float>::quiet_NaN()), int8_t{0});
+  EXPECT_EQ(::vecops::convert<int8_t>(std::numeric_limits<float>::infinity()), int8_t{127});
+  EXPECT_EQ(::vecops::convert<int8_t>(-std::numeric_limits<float>::infinity()), int8_t{-128});
+  EXPECT_EQ(::vecops::convert<int8_t>(-2.75f), int8_t{-2});
+}
+
 namespace {
 
 float subnormal_f32_from_bits(uint32_t bits) {

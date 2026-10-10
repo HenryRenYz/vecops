@@ -6,12 +6,9 @@ import pytest
 import vecops.language as T
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.backends.cpu.planning import prepare
 from vecops.language._compiler.cost import estimate
 from vecops.language._compiler.frontend.parser import lower
 from vecops.language._compiler.ir.traversal import nodes, walk
-from vecops.language._compiler.lowering.tile_to_vector import lower_kernel
-from vecops.language._compiler.pipeline import cpu_vector_pipeline, kernel_pipeline
 
 
 @T.func
@@ -26,10 +23,15 @@ def expensive_tail(x):
 
 def plans(template, policy="auto", **options):
   options = {"cpu_matmul_fusion": policy, **options}
-  kernel = kernel_pipeline(options=options).run(lower(template.ir))
-  vectors = lower_kernel(kernel, manager=cpu_vector_pipeline(options=options))
-  prepared = prepare(vectors)
-  return tuple(prepared.matmuls.values())
+  return CPUBackend().lower(template.ir, (), target="AVX512", options=options)
+
+
+def caches(artifact):
+  return [
+    statement
+    for statement in nodes(artifact.kernel.body)
+    if isinstance(statement, I.Store) and statement.destination.storage.endswith("_input_cache")
+  ]
 
 
 @pytest.mark.parametrize(
@@ -66,7 +68,7 @@ def test_reload_cost_across_helper_calls(columns, expensive, materialized):
   assert cost >= (16 if expensive else 2)
 
 
-def test_packed_b_tail_produced_outside_mc_loop():
+def test_expensive_packed_b_tail_is_materialized_before_cache_traversal():
   @T.template
   def kernel(
     A: T.Tensor((4096, 33), dtype="float32"),
@@ -75,11 +77,12 @@ def test_packed_b_tail_produced_outside_mc_loop():
   ):
     T.library.matmul((A, expensive_tail(T.load(B))), C, packing="B", BM=16, BN=32)
 
-  (plan,) = plans(kernel)
-  assert plan.operands[1].materialization is None
-  assert "outside MC" in plan.operands[1].reason
-  (never,) = plans(kernel, "never")
-  assert never.operands[1].materialization is not None
+  artifact = plans(kernel)
+  assert any(statement.destination.storage.endswith("_1_input_cache") for statement in caches(artifact))
+  assert not artifact.backend_ir.matmuls
+  assert "packed-layout recipe" in "\n".join(artifact.kernel.diagnostics)
+  assert not caches(plans(kernel, "always"))
+  assert caches(plans(kernel, "never"))
 
 
 def test_dynamic_reload_cost_remains_runtime_predicate():
@@ -93,17 +96,18 @@ def test_dynamic_reload_cost_remains_runtime_predicate():
   ):
     T.dot((expensive_tail(T.load(A)), B), C)
 
-  (plan,) = plans(kernel)
-  operand = plan.operands[0]
-  assert operand.materialization is not None
-  assert I.constant(operand.condition) is None
-  (always,) = plans(kernel, "always")
-  assert always.operands[0].materialization is None
-  (tuned,) = plans(kernel, cpu_gemv_columns=8)
-  assert tuned.vector_columns == 8
+  artifact = plans(kernel)
+  assert caches(artifact)
+  conditions = [
+    statement.value
+    for statement in nodes(artifact.kernel.body)
+    if isinstance(statement, I.Assign) and statement.target.endswith("_cache_enabled")
+  ]
+  assert conditions and all(I.constant(value) is None for value in conditions)
+  assert not caches(plans(kernel, "always"))
   for invalid in (0, 9, True):
-    with pytest.raises(ValueError, match="cpu_gemv_columns"):
-      plans(kernel, cpu_gemv_columns=invalid)
+    with pytest.raises(ValueError, match="cpu_gemv_k_unroll"):
+      plans(kernel, cpu_gemv_k_unroll=invalid)
 
 
 def test_load_conversion_participates_in_recompute_cost():
@@ -115,11 +119,9 @@ def test_load_conversion_participates_in_recompute_cost():
   ):
     T.dot((T.load(A, dtype="bfloat16"), B), C)
 
-  (plan,) = plans(kernel)
-  assert plan.operands[0].operation_cost == 1
-  assert plan.operands[0].materialization is not None
-  assert plan.operands[1].operation_cost == 0
-  assert plan.operands[1].materialization is None
+  artifact = plans(kernel)
+  assert [statement.destination.storage.rsplit("_", 3)[-3] for statement in caches(artifact)] == ["0"]
+  assert "vecops::vec::load_convert(" in artifact.source
 
 
 def test_layernorm_statistics_not_recomputed_in_dot_operand():
@@ -132,11 +134,12 @@ def test_layernorm_statistics_not_recomputed_in_dot_operand():
     a = affine(T.library.layernorm(T.load(A)))
     T.library.matmul((a, B), C, packing="A")
 
-  (plan,) = plans(kernel)
-  assert any(e.op in {"mul", "add", "sub"} for e in walk(plan.operands[0].expression))
-  assert not any(
-    e.op.startswith("reduce_") or e.op in {"axis_reduce", "normalize"} for e in walk(plan.operands[0].expression)
-  )
+  artifact = plans(kernel, "never")
+  assert not artifact.backend_ir.matmuls
+  cached = caches(artifact)
+  assert cached
+  assert any(e.op in {"mul", "add", "sub"} for e in walk(cached[0].value))
+  assert not any(e.op == "normalize" for e in walk(cached[0].value))
 
 
 def test_dynamic_packing_bypass_uses_gemv_recompute_policy():
@@ -150,10 +153,18 @@ def test_dynamic_packing_bypass_uses_gemv_recompute_policy():
   ):
     T.library.matmul((expensive_tail(T.load(A)), expensive_tail(T.load(B))), C)
 
-  (plan,) = plans(kernel)
+  artifact = plans(kernel)
+  original = lower(kernel.ir)
+  product = next(
+    value
+    for statement in nodes(original.body)
+    if isinstance(statement, I.Store)
+    for value in walk(statement.value)
+    if value.op == "dot"
+  )
 
   def evaluate(e, m, n):
-    for dimension, value in zip(plan.expression.type.shape, (m, n)):
+    for dimension, value in zip(product.type.shape, (m, n)):
       if I.same_expr(e, dimension):
         return value
     if e.op == "literal":
@@ -163,11 +174,14 @@ def test_dynamic_packing_bypass_uses_gemv_recompute_policy():
     a, b = (evaluate(arg, m, n) for arg in e.args)
     return {"and": lambda: a and b, "gt": lambda: a > b, "add": lambda: a + b, "floordiv": lambda: a // b}[e.op]()
 
-  a, b = plan.operands
-  assert a.materialization is not None and b.materialization is not None
-  assert evaluate(a.condition, 1, 256) is True
-  assert evaluate(b.condition, 1, 256) is False
-  assert evaluate(a.condition, 256, 1) is False
-  assert evaluate(b.condition, 256, 1) is True
-  assert evaluate(a.condition, 256, 64) is False
-  assert evaluate(b.condition, 256, 64) is False
+  conditions = [
+    statement.value
+    for statement in nodes(artifact.kernel.body)
+    if isinstance(statement, I.Assign) and statement.target.endswith("_cache_enabled")
+  ]
+  assert len(conditions) == 2
+  a, b = conditions
+  assert evaluate(a, 1, 256) is True
+  assert evaluate(b, 1, 256) is False
+  assert evaluate(a, 256, 1) is False
+  assert evaluate(b, 256, 1) is True

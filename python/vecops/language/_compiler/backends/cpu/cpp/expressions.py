@@ -11,6 +11,12 @@ from ..capabilities import CPP_TYPES
 
 
 class ExpressionsEmitter:
+  def scalar_convert(self, dtype, expression, source_dtype=None):
+    """Use the public scalar counterpart of vector conversion semantics."""
+    if dtype == source_dtype or dtype == "bool" or getattr(self, "hardware_scope", None) is not None:
+      return f"static_cast<{CPP_TYPES[dtype]}>({expression})"
+    return f"vecops::convert<{CPP_TYPES[dtype]}>({expression})"
+
   def scalar_has_statements(self, value):
     """Whether a scalar expression needs structured statements, not just text."""
     if (
@@ -58,6 +64,15 @@ class ExpressionsEmitter:
     return result
 
   def scalar(self, value):
+    if value.op == "cache_bytes":
+      field = {"L1": "l1d_bytes", "L2": "l2_bytes", "L3": "l3_bytes", "LLC": "llc_bytes"}[value.data]
+      text = f"vecops::platform::cache_info().{field}"
+      return f"(vecops::platform::cache_info().l3_present ? {text} : 0)" if value.data == "L3" else text
+    if value.op == "bitreinterpret":
+      source = value.args[0]
+      return f"std::bit_cast<{CPP_TYPES[value.type.dtype]}>(static_cast<{CPP_TYPES[source.type.dtype]}>({self.scalar(source)}))"
+    if value.op == "checked_shape":
+      return "vecops_dsl::checked_shape({" + ", ".join(self.scalar(v) for v in value.args) + "})"
     if value.op == "worker_capacity":
       return "dsl_workspace.parallelism()"
     if value.op == "view_disjoint":
@@ -74,10 +89,15 @@ class ExpressionsEmitter:
     if value.op == "element_at":
       return self.element_at(value)
     if value.op == "packing_size":
-      from .matmul import FORMATS
+      from .packed_memory import FORMATS
 
       dtype, format_ = value.data
       return f"vecops_dsl::pack_size<{CPP_TYPES[dtype]}, {FORMATS[format_]}>({', '.join(self.scalar(v) for v in value.args)})"
+    if value.op == "packing_offset":
+      from .packed_memory import FORMATS
+
+      dtype, format_, side = value.data
+      return f"vecops_dsl::pack_offset<{CPP_TYPES[dtype]}, {FORMATS[format_]}, {'true' if side == 'B' else 'false'}>({', '.join(self.scalar(v) for v in value.args)})"
     if value.op == "streaming_lanes":
       return f"vecops::vec::sme::streaming_lanes<{CPP_TYPES[value.data]}>()"
     if value.op == "literal":
@@ -118,7 +138,7 @@ class ExpressionsEmitter:
       view = value.data
 
       def loaded():
-        return f"static_cast<{CPP_TYPES[value.type.dtype]}>({self.pointer(view)}[0])"
+        return self.scalar_convert(value.type.dtype, f"{self.pointer(view)}[0]", view.dtype)
 
       if value.args:
         condition, other = value.args
@@ -178,7 +198,7 @@ class ExpressionsEmitter:
       cpp = CPP_TYPES[value.type.dtype]
       return f"static_cast<{cpp}>(vecops_dsl::{value.op}({', '.join(f'static_cast<{cpp}>({a})' for a in arguments)}))"
     if value.op == "cast":
-      return f"static_cast<{CPP_TYPES[value.type.dtype]}>({arguments[0]})"
+      return self.scalar_convert(value.type.dtype, arguments[0], value.args[0].type.dtype)
     if implementation.scalar_kind == "prefix":
       operator = implementation.scalar_spelling
       return f"({operator}({arguments[0]}))"

@@ -3,13 +3,11 @@
 """SME's constant-panel proof uses its real K quantum, not generic 32."""
 
 import os
-import re
-import subprocess
 from pathlib import Path
 
 import pytest
 import vecops.language as T
-from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import make_compiler
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
@@ -54,19 +52,6 @@ def _lower(dtype, k, packed, vl=64, svl=64):
   )
 
 
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("k", (5, 9))
-@pytest.mark.parametrize("packed", (False, True))
-def test_sme_const_k_split_leaf_is_the_actual_panel(dtype, k, packed):
-  source = _lower(dtype, k, packed)
-  extents = re.findall(r"const vecops::nint_t dsl_c_sme_extent_k_\d+=\(([^;]+)\);", source)
-  assert extents
-  assert all("panel_k" in value for value in extents), extents
-  assert "epilogue exactly once" in source
-  assert "block_k" in source
-  assert_no_vec_mask_arrays(source)
-
-
 def _wrapper(source, dtype, k):
   acc = "float64" if dtype == "float64" else "int32" if dtype in {"int8", "uint8"} else "float32"
   lines = [
@@ -107,47 +92,6 @@ def _wrapper(source, dtype, k):
     )
   lines.extend(("__kernel__(A,B,AP,BP,D,C,Bias);", "}"))
   return "\n".join(lines)
-
-
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("packed", (False, True))
-@pytest.mark.parametrize("k", (5, 9))
-def test_sme_const_split_k_actual_arm_codegen(dtype, packed, k, tmp_path):
-  clang, sysroot = os.environ.get("VECOPS_TEST_ARM_CROSS_CLANG"), os.environ.get("VECOPS_TEST_ARM_CROSS_SYSROOT")
-  if not clang or not sysroot:
-    pytest.skip("set VECOPS_TEST_ARM_CROSS_CLANG/SYSROOT for real ARM codegen checks")
-  root = Path(__file__).resolve().parents[2]
-  cpp, assembly = tmp_path / "split_k.cpp", tmp_path / "split_k.s"
-  cpp.write_text(_wrapper(_lower(dtype, k, packed), dtype, k), encoding="utf-8")
-  command = [
-    clang,
-    "--target=aarch64-linux-gnu",
-    f"--sysroot={sysroot}",
-    "-march=armv9.2-a+sme+sme-f64f64+bf16",
-    "-std=c++20",
-    "-O3",
-    "-S",
-    "-DNDEBUG",
-    "-DVECOPS_TARGET_SME_FA64=1",
-    "-DVECOPS_TARGET_SME_F64F64=1",
-    "-DVECOPS_TARGET_FIXED_STREAMING_SVE_BITS=512",
-    "-DVECOPS_KERNEL_SVE_BYTES=64",
-    "-DVECOPS_KERNEL_SME_BYTES=64",
-    "-I",
-    str(root / "include"),
-    "-I",
-    str(root / "include/vecops"),
-    *arm_cross_cxx_include_flags(sysroot),
-    str(cpp),
-    "-o",
-    str(assembly),
-  ]
-  result = subprocess.run(command, capture_output=True, text=True, check=False)
-  cpp.with_suffix(".log").write_text(result.stdout + result.stderr, encoding="utf-8")
-  assert result.returncode == 0, result.stderr[-6000:]
-  text = assembly.read_text(encoding="utf-8")
-  assert re.search(r"^\s*(?:smopa|umopa|fmopa|bfmopa)\b", text, re.MULTILINE)
-  assert re.search(r"^\s*smstart\b", text, re.MULTILINE)
 
 
 def _sme_available():

@@ -40,10 +40,26 @@ def test_register_bitcast_types_are_not_retagged():
   program = register_transpose(8, 16, 4, dtype="float32")
   assert all(value.type.dtype == "float32" for value in program.inputs)
   assert any(
-    value.op == "bitcast" and value.type.dtype == "uint32" and value.args[0].type.dtype == "float32"
+    value.op == "bitreinterpret" and value.type.dtype == "uint32" and value.args[0].type.dtype == "float32"
     for value in program.operations
   )
   assert all(value.type.dtype == "float32" for value in program.outputs)
+
+
+@pytest.mark.parametrize("shape", [(), (3, 7)])
+def test_equal_width_bitcast_retains_scalar_or_tile_geometry(shape):
+  @T.template
+  def kernel(A: T.Tensor(shape, dtype="int32"), O: T.Tensor(shape, dtype="uint32", access="output")):
+    T.store(O, T.bitcast(T.load(A), "uint32"))
+
+  artifact = CPUBackend().lower(kernel.ir, (), target="AVX512")
+  from vecops.language._compiler.ir.traversal import nodes
+
+  value = next(v for v in nodes(artifact.kernel.body) if isinstance(v, I.Expr) and v.op == "bitreinterpret")
+  data = np.full(shape, -1, dtype=np.int32)
+  interpreter = Interpreter(I.KernelIR(I.Block(), {}, {}), {"A": data})
+  np.testing.assert_array_equal(interpreter.value(value), data.view(np.uint32))
+  assert "bit_cast" in artifact.source or "vecops::vec::bitcast" in artifact.source
 
 
 @pytest.mark.parametrize("vl", [16, 32, 64, 128])
@@ -75,13 +91,12 @@ def test_debug_lower_name_is_preserved():
 
 @pytest.mark.parametrize("reduce", [False, True])
 def test_nonmatrix_kernels_do_not_prepare_matrix_packing_recipes(monkeypatch, reduce):
-  from vecops.language._compiler.backends.cpu import matmul
+  from vecops.language._compiler.backends.cpu import recipes
 
   def unexpected(*args, **kwargs):
     pytest.fail("a nonmatrix kernel staged an unrelated matrix packing algorithm")
 
-  monkeypatch.setattr(matmul, "register_transpose", unexpected)
-  monkeypatch.setattr(matmul, "x86_dword_transpose", unexpected)
+  monkeypatch.setattr(recipes, "expand_helper", unexpected)
   extent = 1 if reduce else 16
 
   @T.template
@@ -93,21 +108,20 @@ def test_nonmatrix_kernels_do_not_prepare_matrix_packing_recipes(monkeypatch, re
       T.store(C, value)
 
   prepared = CPUBackend().lower(kernel.ir, (), target="AVX512").backend_ir
-  assert prepared.packing_permutation is None
-  assert prepared.packing_permutation_x86 is None
+  assert not prepared.matmuls
 
 
-def test_products_share_one_prepared_packing_network(monkeypatch):
-  from vecops.language._compiler.backends.cpu import matmul
+def test_products_stage_source_algorithms_without_native_packing_networks(monkeypatch):
+  from vecops.language._compiler.backends.cpu import recipes
 
   calls = []
-  original = matmul.register_transpose
+  original = recipes.expand_helper
 
   def tracked(*args, **kwargs):
-    calls.append(args)
+    calls.append(args[0].__name__)
     return original(*args, **kwargs)
 
-  monkeypatch.setattr(matmul, "register_transpose", tracked)
+  monkeypatch.setattr(recipes, "expand_helper", tracked)
 
   @T.template
   def kernel(
@@ -120,10 +134,8 @@ def test_products_share_one_prepared_packing_network(monkeypatch):
     T.library.matmul((T.load(B), T.load(A)), D, implementation="vector")
 
   prepared = CPUBackend().lower(kernel.ir, (), target="AVX512").backend_ir
-  assert len(prepared.matmuls) == 2
-  assert calls == [(16, 16, 4)]
-  assert prepared.packing_permutation is not None
-  assert prepared.packing_permutation_x86 is not None
+  assert not prepared.matmuls
+  assert calls == ["blocked_dot_into", "blocked_dot_into"]
 
 
 @pytest.mark.parametrize("dtype,count", [("uint8", 4), ("int8", 4), ("float16", 2), ("bfloat16", 2)])

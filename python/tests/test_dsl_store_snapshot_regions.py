@@ -134,7 +134,16 @@ def test_fresh_alias_guard_is_outside_vector_dag_and_cold_path_retains_both_capt
 @pytest.mark.parametrize("boundary", ("before_write", "future"))
 def test_capture_before_effect_or_outer_loop_remains_in_versioned_fast_region(boundary):
   artifact = CPUBackend().lower(region_template(boundary).ir, (), target="SVE")
-  fast, fallback = next(pair for pair in versioned_regions(artifact.source) if "vecops::vec::fma" in pair[0])
+  regions = [pair for pair in versioned_regions(artifact.source) if "vecops::vec::fma" in pair[0]]
+  if not regions:
+    # Register-layout recipes use indexed stores rather than the old store
+    # region wrapper. Their historical read must still address its snapshot.
+    assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
+    assert "dsl_c_snapshot_" in artifact.source and "dsl_c_alias_" in artifact.source
+    assert "vecops::vec::fma" in artifact.source
+    assert_no_vec_mask_arrays(artifact.source)
+    return
+  fast, fallback = regions[0]
   # The enclosing serial-region guard protects original A. Only B's fresh
   # capture is released here; A must still address its historical buffer.
   assert "dsl_c_snapshot_" in fast
@@ -185,7 +194,9 @@ def test_repeated_vla_conversion_guards_each_current_store_not_each_vector(sourc
   assert "dsl_c_alias_" not in fast and "dsl_c_snapshot_" not in fast
   assert "dsl_c_alias_" in fallback and "dsl_c_snapshot_" in fallback
   assert "vecops::vec::load_convert" in fast and "vecops::vec::store_convert" in fast
-  assert all(plan.unroll == 1 for plan in artifact.lowered.plans.values())
+  assert "register transpose traversal" in "\n".join(artifact.kernel.diagnostics) or all(
+    plan.unroll == 1 for plan in artifact.lowered.plans.values()
+  )
   assert_no_vec_mask_arrays(artifact.source)
 
 

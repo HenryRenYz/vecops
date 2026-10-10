@@ -107,6 +107,13 @@ idiomatic remedy is to widen *once* and stay wide:
 
 ## Pitfalls and FAQ
 
+`vecops::convert<TOut>(scalar)` saturates integer narrowing. Floating-to-integer
+conversion clamps before converting, truncates toward zero, and maps NaN to
+zero; infinities and rounded floating representations of integer endpoints
+cannot trigger an out-of-range integer cast. NaN classification is bit-based
+and remains valid with fast-math. This scalar contract is separate from an
+ISA's native vector conversion behavior for exceptional floating inputs.
+
 **They are storage types; scalar math is f32 math.** `a * b + c` on
 wrappers narrows after every step — three roundings, not one. Fine for
 glue code; do not accumulate in it (especially `bfloat16_t`, whose 7-bit

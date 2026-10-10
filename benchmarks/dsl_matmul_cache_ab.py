@@ -59,10 +59,9 @@ def diagnostic_profiles(*, packed_ab_bypass=False):
 
 
 def profile_options(label):
-  # Keep the original blocked diagnostic control even after the narrow packed
-  # traversal becomes the production default. Explicit cache tiles and dot do
-  # not use this option, so they retain the same generated leaf.
-  return {"cpu_sme_packed_ab_cache_bypass": label == _BYPASS_LABEL}
+  # Explicit blocks select blocked probes; automatic blocks use the source
+  # recipe's residency decision. No retired compiler policy is toggled.
+  return {}
 
 
 def balanced_order(round_):

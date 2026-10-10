@@ -61,7 +61,7 @@ def test_dtype_shapes_and_layouts(compiler, ad, cd, compute):
         c = c[::-1]
       k.operator.native(x, c, **k._core.specialization_values)
       np.testing.assert_array_equal(c, x.astype(dtype(compute)).astype(dtype(cd)).T)
-  assert any(isinstance(region, TransposePlan) for region in k.vector_ir.regions)
+  assert "register transpose traversal" in "\n".join(k.kernel_ir.diagnostics)
   assert "local_interleave" in k.generated_source
   assert "vecops::ops::" not in k.generated_source
   assert not re.search(r"std::(?:array|vector)\s*<\s*vecops::vec::(?:Vec|Mask)", k.generated_source)
@@ -230,10 +230,9 @@ def test_memory_pass_registration_and_layout_plans():
 
   artifact = CPUBackend().lower(two_outputs.ir, ())
   plans = [region for region in artifact.lowered.regions if isinstance(region, TransposePlan)]
-  assert len(plans) >= 2
-  assert all(plan.dense_destination for plan in plans)
-  assert any(network.dtype == "float16" for plan in plans for _, network in plan.variants)
-  assert artifact.source.count("/* register layout transpose */") >= 2
+  assert not plans
+  assert "staged 2 register transpose traversal" in "\n".join(artifact.kernel.diagnostics)
+  assert "dsl_layout_" in artifact.source
   with pytest.raises(ValueError, match="multiple of 16"):
     CPUBackend().lower(two_outputs.ir, (), options={"cpu_transpose_cache_block": 7})
 

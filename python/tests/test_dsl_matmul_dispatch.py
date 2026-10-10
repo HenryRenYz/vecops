@@ -36,21 +36,11 @@ def _template(kind, implementation):
 
 
 def _assert_packed_auto_route(source, architecture):
-  if architecture == "arm":
-    # Auto can choose an ordinary-SVE MMLA leaf *before* its SME fallback.
-    # Both packed SME operands already have zero-filled K padding, unlike
-    # raw SME operands. A separate raw partial-K branch is not required.
-    if "/* ordinary-SVE PackedDot MMLA */" in source:
-      assert "/* MMLA two complete K groups */" in source
-      assert "/* MMLA odd group: no second-group read */" in source
-      assert "sve::mmla(" in source
-    elif "sme::mopa<" in source:
-      assert "sme_packed_k_cursor" in source
-      assert "sme_packed_k_step" in source
-    else:
-      assert "vecops::vec::widening_dot(" in source, "unsupported matrix geometry must retain the vector fallback"
-  elif architecture == "x86":
-    assert "full K: unmasked load/convert" in source, "AMX auto must retain its unmasked full-K route"
+  assert "dsl_recipe_dot_" in source
+  assert "pack_offset<" in source
+  assert "packed input buffer too small" in source
+  assert "ops::Matmul" not in source
+  assert "ordinary-SVE PackedDot MMLA" not in source
 
 
 @pytest.mark.parametrize("kind", ["bf16", "mixed"])

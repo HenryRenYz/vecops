@@ -45,7 +45,7 @@ def test_anonymous_factory_codegen_preserves_each_runtime_dimension():
     )
   }
   assert "pack_size<float, 0>(" + entry["A.size(0)"] + ", " + entry["A.size(1)"] + ")" in source
-  assert "((" + entry["P.size(0)"] + "))" in source
+  assert "checked_shape({" + entry["P.size(0)"] + "})" in source
   assert len(entry.values()) == len(set(entry.values()))
   assert all(source.count(expression) == 1 for expression in entry)
   # Fresh factory/capture identity must preserve both the anonymous-symbol

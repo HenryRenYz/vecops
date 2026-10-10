@@ -165,7 +165,14 @@ class HardwareFrontend:
           I.literal(size),
         )
       handle = I.SMEVector(self.unique("streaming_vector"), dtype, extent, region)
-      self.block.statements.append(I.ArchitectureCall(operation, view=args[0], vector=handle))
+      strided = (
+        I.constant(self.value(kwargs.get("strided", I.literal(False)), node)) if operation == "sme.load" else False
+      )
+      if type(strided) is not bool:
+        self.error(node, "SME strided load option must be a compile-time bool")
+      self.block.statements.append(
+        I.ArchitectureCall(operation, view=args[0], vector=handle, operands=(True,) if strided else ())
+      )
       return handle
     if operation == "sme.mopa":
       if len(args) != 3 or any(not isinstance(v, I.SMEVector) or v.region != region for v in args[1:]):

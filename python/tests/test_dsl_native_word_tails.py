@@ -126,7 +126,7 @@ def test_native_tail_fragments_keep_full_groups_and_bank_lane_tree(source, compu
   assert "/* native-word masked remainder */" in artifact.source
   assert "vecops::vec::concat(" in artifact.source
   assert "vecops::vec::mwhilelt(" in artifact.source
-  assert "float{0}" in artifact.source or "double{0}" in artifact.source
+  assert "vecops::vec::zeros(" in artifact.source
   assert_no_vec_mask_arrays(artifact.source)
 
 

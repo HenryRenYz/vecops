@@ -86,6 +86,7 @@ class HelperFrontend:
     defaults = dict(zip(positional[len(positional) - len(body.tree.args.defaults) :], body.tree.args.defaults))
     defaults.update({a.arg: v for a, v in zip(body.tree.args.kwonlyargs, body.tree.args.kw_defaults) if v is not None})
     previous_env, previous_body = self.env, self.body
+    previous_mutable_names, self.mutable_names = self.mutable_names, set()
     self.env = dict(body.environment)
     self.env.update(bound)
     self.body = body
@@ -115,6 +116,7 @@ class HelperFrontend:
       self.helper_scopes.pop()
       self.helper_depth -= 1
       self.env, self.body = previous_env, previous_body
+      self.mutable_names = previous_mutable_names
 
   def helper_exit_region(self, body, node):
     parent = self.block
@@ -295,6 +297,17 @@ def expand_helper(function, arguments, *, catalog, prefix, keyword_arguments=Non
   call = ast.Call(func=ast.Name(id=function.__name__, ctx=ast.Load()), args=[], keywords=[])
   with use_catalog(catalog):
     value = frontend.helper(body, call, arguments=arguments, keyword_arguments=keyword_arguments)
+    # A staged helper may borrow an owned caller buffer. Promotion is local
+    # to this isolated frontend; publish those writes before returning its
+    # statements, while leaving purely local/result values lazy.
+    from ..ir.traversal import nodes
+
+    borrowed = {
+      v.storage for v in nodes((arguments, tuple((keyword_arguments or {}).values()))) if isinstance(v, I.View)
+    }
+    for storage in tuple(frontend.promoted):
+      if storage in borrowed:
+        frontend.materialize(storage)
   if hardware_kind is not None:
     frontend.validate_hardware_body(frontend.block, hardware_kind, call)
   return value, frontend.block.statements

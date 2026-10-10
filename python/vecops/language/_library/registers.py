@@ -13,6 +13,15 @@ _UNSIGNED_BITS = ("uint8", "uint16", "uint32", "uint64")
 
 
 @T.func
+def _transpose_pair(left, right, stage_dtype, dtype):
+  a_bits = T.bitcast(left, stage_dtype)
+  b_bits = T.bitcast(right, stage_dtype)
+  lower = T.bitcast(T.local_interleave_lower(a_bits, b_bits), dtype)
+  upper = T.bitcast(T.local_interleave_upper(a_bits, b_bits), dtype)
+  return (lower, upper)
+
+
+@T.func
 def pack_interleave(values):
   """Interleave grouped-K streams, preserving exact storage payload bits.
 
@@ -43,34 +52,28 @@ def _transpose_square(values):
       stage_dtype = _UNSIGNED_BITS[T.static_log2(element_bytes * span)]
       for start in T.unroll(0, lanes, span * 2):
         for offset in T.unroll(span):
-          a = T.bitcast(values[start + offset], stage_dtype)
-          b = T.bitcast(values[start + span + offset], stage_dtype)
-          lower = T.bitcast(T.local_interleave_lower(a, b), dtype)
-          upper = T.bitcast(T.local_interleave_upper(a, b), dtype)
-          next_values = next_values + (lower, upper)
+          next_values = next_values + _transpose_pair(
+            values[start + offset], values[start + span + offset], stage_dtype, dtype
+          )
       values = next_values
       span = span * 2
     return values
   half = lanes // 2
   low = ()
   for row in T.unroll(lanes):
-    part = T.lower_half(values[row])
-    low = low + (part,)
+    low = low + (T.lower_half(values[row]),)
   high = ()
   for row in T.unroll(lanes):
-    part = T.upper_half(values[row])
-    high = high + (part,)
+    high = high + (T.upper_half(values[row]),)
   tl = _transpose_square(low[:half])
   bl = _transpose_square(low[half:])
   tr = _transpose_square(high[:half])
   br = _transpose_square(high[half:])
   outputs = ()
   for column in T.unroll(half):
-    joined = T.concat(tl[column], bl[column])
-    outputs = outputs + (joined,)
+    outputs = outputs + (T.concat(tl[column], bl[column]),)
   for column in T.unroll(half):
-    joined = T.concat(tr[column], br[column])
-    outputs = outputs + (joined,)
+    outputs = outputs + (T.concat(tr[column], br[column]),)
   return outputs
 
 
@@ -84,13 +87,11 @@ def transpose_registers(values):
     return _transpose_square(values)
   low = ()
   for row in T.unroll(rows):
-    part = T.lower_half(values[row])
-    low = low + (part,)
+    low = low + (T.lower_half(values[row]),)
   lower = _transpose_square(low)
   high = ()
   for row in T.unroll(rows):
-    part = T.upper_half(values[row])
-    high = high + (part,)
+    high = high + (T.upper_half(values[row]),)
   upper = _transpose_square(high)
   return lower + upper
 

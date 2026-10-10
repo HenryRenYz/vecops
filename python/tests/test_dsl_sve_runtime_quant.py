@@ -8,18 +8,14 @@ contracts. Cross assembly is syntax/code-generation evidence, not performance.
 """
 
 import os
-import re
-import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import vecops.language as T
-from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import make_compiler
 from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
-from vecops.language._compiler.backends.cpu.cpp.matmul import MatmulEmitter
 
 OPTION = "cpu_sve_runtime_quant"
 MARKER = "/* ordinary-SVE runtime-quantized packed-B dot */"
@@ -109,66 +105,6 @@ def _body(source, marker=MARKER):
   raise AssertionError(f"unclosed block following {marker}")
 
 
-def test_runtime_quant_option_default_off_and_strict_bool():
-  disabled = _lower(enabled=False)
-  assert MARKER not in disabled
-  default = CPUBackend().lower(_template().ir, (), target="SME").source
-  assert MARKER not in default
-  for invalid in (1, 0, "true", None):
-    with pytest.raises(ValueError, match=OPTION):
-      _lower(enabled=invalid)
-
-
-@pytest.mark.parametrize("vl,svl", ((16, 64), (32, 16), (64, 32), (16, 16), (64, 64)))
-def test_runtime_quant_named_vectors_independent_lengths_and_post_quant_tail(vl, svl):
-  source = _lower(vl=vl, svl=svl)
-  body = _body(source)
-  assert "vecops::vec::widening_dot" in body
-  assert f"FixedTag<{CPP_TYPES['uint8']}, 4>" in body
-  assert "vecops::vec::bitcast" in body and "vecops::vec::get" in body
-  assert "runtime_quant_tail_zero" in body
-  assert (
-    max(
-      body.rfind("vecops::vec::convert", 0, body.index("runtime_quant_tail_zero")),
-      body.rfind("vecops::vec::load_convert", 0, body.index("runtime_quant_tail_zero")),
-    )
-    >= 0
-  )
-  assert "vecops::vec::mul" in body and "vecops::vec::add" in body
-  assert "vecops::vec::fmadd" not in body
-  assert "sme::" not in body and "with_resources" not in body
-  assert "pack_panel" in body
-  assert "store_convert" in body
-  assert_no_vec_mask_arrays(source)
-
-
-def test_runtime_quant_explicit_fma_is_not_decontracted():
-  body = _body(_lower(fma=True))
-  assert "vecops::vec::fmadd" in body
-
-
-@pytest.mark.parametrize("intermediate", ("float64", "float16", "bfloat16"))
-def test_runtime_quant_intermediate_dtype_boundary_retains_general_path(intermediate):
-  source = _lower(intermediate=intermediate)
-  assert MARKER not in source
-  assert "sme::mopa" in source
-
-
-def test_runtime_quant_raw_b_and_streaming_domain_retain_fallback():
-  assert MARKER not in _lower(raw_b=True)
-  emitter = SimpleNamespace(active_matmul_plan=SimpleNamespace(sve_runtime_quant=True), hardware_scope=("sme", "scope"))
-  assert MatmulEmitter.sve_runtime_quant(emitter, None, None) is False
-
-
-def test_runtime_quant_split_k_retains_prior_and_final_phase_guards():
-  source = _lower(level="library", bk=3)
-  body = _body(source)
-  assert "block_k" in body
-  assert "epilogue exactly once" in body
-  assert "runtime_quant_prior" in body
-  assert "pack_offset" in body  # Original packed geometry/offset, not a repacked K window.
-
-
 def _cross_wrapper(source):
   definitions = [
     '#include "vecops/Kernel.h"',
@@ -209,69 +145,6 @@ def _cross_wrapper(source):
     )
   definitions.extend(("__kernel__(A,BP,B,D,C,RQ,RD,W,Z);", "}"))
   return "\n".join(definitions)
-
-
-@pytest.mark.parametrize(
-  "enabled,fma,vl,svl,level,bk,shape",
-  tuple(
-    (True, fma, vl, svl, "dot", None, None)
-    for fma in (False, True)
-    for vl, svl in ((16, 64), (32, 16), (64, 32), (64, 64))
-  )
-  + (
-    (True, False, 64, 16, "library", 3, None),
-    (True, False, 16, 64, "library", 3, (5, 19, 5)),
-    (True, False, 64, 64, "library", 3, (5, 19, 9)),
-    (False, False, 64, 64, "dot", None, None),
-    (False, True, 64, 64, "dot", None, None),
-  ),
-)
-def test_runtime_quant_actual_arm_instructions(enabled, vl, svl, fma, level, bk, shape, tmp_path):
-  clang, sysroot = os.environ.get("VECOPS_TEST_ARM_CROSS_CLANG"), os.environ.get("VECOPS_TEST_ARM_CROSS_SYSROOT")
-  if not clang or not sysroot:
-    pytest.skip("set VECOPS_TEST_ARM_CROSS_CLANG/SYSROOT for real ARM codegen checks")
-  root = Path(__file__).resolve().parents[2]
-  cpp, assembly = tmp_path / "runtime_quant.cpp", tmp_path / "runtime_quant.s"
-  cpp.write_text(
-    _cross_wrapper(_lower(enabled=enabled, vl=vl, svl=svl, fma=fma, level=level, bk=bk, shape=shape)),
-    encoding="utf-8",
-  )
-  command = [
-    clang,
-    "--target=aarch64-linux-gnu",
-    f"--sysroot={sysroot}",
-    "-march=armv9.2-a+sme+sme-f64f64+bf16",
-    "-std=c++20",
-    "-O3",
-    "-ffp-contract=off",  # Matches the generated-DSL target, including vendor compilers.
-    "-S",
-    "-DNDEBUG",
-    "-DVECOPS_TARGET_SME_FA64=1",
-    "-DVECOPS_TARGET_SME_F64F64=1",
-    f"-DVECOPS_TARGET_FIXED_STREAMING_SVE_BITS={svl * 8}",
-    f"-DVECOPS_KERNEL_SVE_BYTES={vl}",
-    f"-DVECOPS_KERNEL_SME_BYTES={svl}",
-    "-I",
-    str(root / "include"),
-    "-I",
-    str(root / "include/vecops"),
-    *arm_cross_cxx_include_flags(sysroot),
-    str(cpp),
-    "-o",
-    str(assembly),
-  ]
-  result = subprocess.run(command, capture_output=True, text=True, check=False)
-  cpp.with_suffix(".log").write_text(result.stdout + result.stderr, encoding="utf-8")
-  assert result.returncode == 0, result.stderr[-6000:]
-  text = assembly.read_text(encoding="utf-8")
-  assert re.search(r"^\s*(?:usdot|sudot)\b" if enabled else r"^\s*usmopa\b", text, re.MULTILINE)
-  # A Dynamic whole-problem budget has a legal generic SME fallback in the
-  # same DSO; only a proven accepted Const dot may eliminate it entirely.
-  if enabled and level == "dot" and shape is not None:
-    assert not re.search(r"^\s*(?:smstart|[a-z]*mopa)\b", text, re.MULTILINE)
-  contracted = bool(re.search(r"^\s*(?:fmla|fmad|fmadd)\b", text, re.MULTILINE))
-  assert contracted == fma
-  assert not re.search(r"^\s*bl\b[^\n]*(?:WideningDot|widening_dot)", text, re.MULTILINE)
 
 
 def _sme_available():

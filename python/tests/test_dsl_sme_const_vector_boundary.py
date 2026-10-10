@@ -19,7 +19,6 @@ from test_dsl_arm_vector_state_native import (
   native_arm,
 )
 from vecops._arm_vector_state import VectorState
-from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
 
 def const_decode_template(packed, *, svl_bytes, explicit_strides=False):
@@ -40,26 +39,6 @@ def const_decode_template(packed, *, svl_bytes, explicit_strides=False):
     T.store(C, T.dot((a, T.load(B)), C, implementation="sme"))
 
   return kernel, packed_size
-
-
-@pytest.mark.parametrize("packed", (False, True))
-@pytest.mark.parametrize("explicit_strides", (False, True))
-def test_const_decode_boundary_uses_streaming_geometry_and_named_vectors(packed, explicit_strides):
-  template, _ = const_decode_template(packed, svl_bytes=64, explicit_strides=explicit_strides)
-  source = (
-    CPUBackend()
-    .lower(
-      template.ir,
-      (),
-      target="SME",
-      options={"_vector_state": VectorState(16, 64), "cpu_matmul_pipeline": "off"},
-    )
-    .source
-  )
-  assert "SME 1x4 outer-product schedule" in source
-  assert "sme::mopa" in source
-  assert "ScalableTag" in source
-  assert_no_vec_mask_arrays(source)
 
 
 @native_arm

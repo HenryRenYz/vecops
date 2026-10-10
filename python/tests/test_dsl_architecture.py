@@ -97,7 +97,10 @@ def test_builtin_loading_is_idempotent_and_order_stable():
     "plan-computation-reuse",
     "fuse-reductions",
     "fuse-reduction-elementwise",
+    "cpu-stage-matrix-values",
     "cpu-expand-dot-recipes",
+    "cpu-expand-packing-recipes",
+    "cpu-expand-layout-recipes",
     "fuse-elementwise",
     "fuse-axis-folds",
     "fuse-loop-regions",
@@ -216,7 +219,7 @@ def test_memory_pipeline_is_frozen_before_user_passes():
     CPUBackend().lower(kernel.ir, ())
     assert calls == []
     CPUBackend().lower(kernel.ir, ())
-    assert calls == [1]
+    assert calls == [0]  # Layout control was already expanded from DSL.
   finally:
     P.unregister_pass(registrar)
     if any(spec.name == name for spec in P.registered_passes(stage="cpu-memory")):

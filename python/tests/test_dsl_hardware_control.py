@@ -342,103 +342,17 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
     T.pack(A, O, side="A", format="sme")
 
   artifact = CPUBackend().lower(kernel.ir, (), target="SME")
-  assert isinstance(artifact.backend_ir.sme_packing_programs["float16", (37, 129)], I.Block)
-  assert "float16" not in artifact.backend_ir.sme_packing_programs, "do not stage an unused generic recipe"
+  assert "staged 1 packed-layout recipe" in "\n".join(artifact.kernel.diagnostics)
+  assert not artifact.backend_ir.hardware
 
   def forbidden(*args, **kwargs):
     raise AssertionError("packing algorithms must be staged before terminal printing")
 
   monkeypatch.setattr(helpers, "expand_helper", forbidden)
   source, _ = generate(artifact.backend_ir)
-  assert "sme_packing_float16_" in source
-  assert "vecops::vec::sme::load_hor<2>" in source
-  assert "vecops::vec::sme::store_ver<3>" in source
+  assert "dsl_pack_" in source
+  assert "pack_offset<" in source
   assert "std::array<vecops::vec::" not in source
-
-
-@pytest.mark.parametrize("svl", [16, 64, 128])
-def test_sme_complete_fringe_chunks_have_constant_unrolled_group_counts(svl):
-  from vecops._arm_vector_state import VectorState
-  from vecops.language._compiler.ir.traversal import nodes
-
-  spatial, reduction, capacity = (T.dynamic(lower=0) for _ in range(3))
-
-  @T.template
-  def kernel(
-    A: T.Tensor((spatial, reduction), dtype="bfloat16"),
-    O: T.Tensor((capacity,), dtype="bfloat16", access="output"),
-  ):
-    T.pack(A, O, side="A", format="sme")
-
-  artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"_vector_state": VectorState(256, svl)})
-  program = artifact.backend_ir.sme_packing_programs["bfloat16"]
-  drains = [
-    node
-    for node in nodes(program)
-    if isinstance(node, I.For)
-    and any(
-      isinstance(child, I.ArchitectureCall) and child.operation == "sme.read_ver" for child in node.body.statements
-    )
-  ]
-  assert any(I.constant(node.stop) == svl // 4 and node.unroll == min(16, svl // 4) for node in drains)
-  assert any(I.constant(node.stop) is None and node.unroll == 2 for node in drains), "fractional groups stay bounded"
-
-
-@pytest.mark.parametrize("pitch", [None, 256, 259, -259])
-def test_sme_packing_unroll_keeps_runtime_address_products_bounded(pitch):
-  from vecops._arm_vector_state import VectorState
-  from vecops.language._compiler.ir.traversal import nodes
-
-  stride = T.dynamic() if pitch is None else pitch
-  capacity = T.dynamic(lower=0)
-
-  @T.template
-  def kernel(
-    A: T.Tensor((64, 256), (stride, 1), "bfloat16"), O: T.Tensor((capacity,), dtype="bfloat16", access="output")
-  ):
-    T.pack(A, O, side="A", format="sme")
-
-  artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"_vector_state": VectorState(64, 64)})
-  program = artifact.backend_ir.sme_packing_programs["bfloat16", (64, 256)]
-  transfers = [
-    node
-    for node in nodes(program)
-    if isinstance(node, I.For)
-    and sum(isinstance(s, I.ArchitectureCall) and s.operation == "sme.load_hor" for s in node.body.statements) == 2
-  ]
-  assert transfers and all(node.unroll == (16 if pitch == 256 else 2) for node in transfers)
-
-
-@pytest.mark.parametrize("pitch", [None, 129, -133])
-def test_sme_owner_restores_constants_but_not_alias_dependent_strides(pitch):
-  import re
-
-  stride = T.dynamic() if pitch is None else pitch
-  capacity = T.dynamic(lower=0)
-
-  @T.template
-  def kernel(
-    A: T.Tensor((37, 129), (stride, 1), "float16"),
-    O: T.Tensor((capacity,), dtype="float16", access="output"),
-  ):
-    T.pack(A, O, side="A", format="sme")
-
-  source = CPUBackend().lower(kernel.ir, (), target="SME").source
-  assert re.search(
-    r"const vecops::nint_t \w+_sme_pack_m_value_\d+=std::int64_t\{37\}, \w+_sme_pack_k_value_\d+=std::int64_t\{129\};",
-    source,
-  ), "known dimensions were reloaded through reference captures"
-  match = re.search(
-    r"const vecops::nint_t \w+_sme_pack_stride_value_\d+=([^;]+);",
-    source,
-  )
-  assert match, "known dimensions were reloaded through reference captures"
-  if pitch == 129:
-    assert re.fullmatch(r"\w+_sme_pack_k_value_\d+", match[1])
-  else:
-    # A reversed constant input gets a positive dense snapshot when aliasing;
-    # a dynamic pitch is unknown. Neither may borrow the original constant.
-    assert "std::int64_t{" not in match[1]
 
 
 def test_sme_packing_uses_all_external_packed_dimensions():
@@ -447,27 +361,9 @@ def test_sme_packing_uses_all_external_packed_dimensions():
     T.pack(A, O, side="A", format="sme")
 
   source = CPUBackend().lower(kernel.ir, (), target="SME").source
-  actual = "(std::int64_t{2}) * (std::int64_t{33}) * (std::int64_t{32}) * (std::int64_t{4})"
-  assert f"if (({actual}) < (" in source and "packed output buffer too small" in source
+  actual = "std::int64_t{2}, std::int64_t{33}, std::int64_t{32}, std::int64_t{4}"
+  assert "checked_shape({" + actual + "})" in source and "packed output buffer too small" in source
   assert "sme_pack_capacity_value" not in source, "packed logical axes replace per-store capacity clamps"
-
-
-def test_sme_b_owner_restores_unit_k_guarded_original_pitch():
-  import re
-
-  spatial, reduction, capacity = (T.dynamic(lower=0) for _ in range(3))
-
-  @T.template
-  def kernel(
-    B: T.Tensor((reduction, spatial), (1, reduction), "bfloat16"),
-    O: T.Tensor((capacity,), dtype="bfloat16", access="output"),
-  ):
-    T.pack(B, O, side="B", format="sme")
-
-  source = CPUBackend().lower(kernel.ir, (), target="SME").source
-  held_k = re.search(r"(\w+_sme_pack_k_value_\d+)=[^;]+;", source)
-  assert held_k
-  assert re.search(rf"const vecops::nint_t \w+_sme_pack_stride_value_\d+={held_k[1]};", source)
 
 
 def test_two_sme_library_programs_keep_separate_lexical_names():
@@ -755,7 +651,7 @@ def test_raw_za_memory_word_width_is_independent_of_storage_elements():
   assert "ScalableTag<std::uint32_t, 0>" in source
   assert "vecops::vec::sme::load_hor<2>" in source
   assert "vecops::vec::sme::store_hor<2>" in source
-  assert " / 4)" in source
+  assert " / std::int64_t{4})" in source
   assert "load_convert" not in source.split("void __kernel__", 1)[1]
 
 

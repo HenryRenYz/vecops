@@ -32,7 +32,7 @@ def scalar(expression, environment):
         raise ValueError("nonintegral virtual subword extent")
       return native // divisor
     return native * (1 << power)
-  if expression.op in ("symbol", "local", "frozen", "raw", "schedule_parameter"):
+  if expression.op in ("symbol", "local", "frozen", "raw"):
     name = expression.data
     if name in environment:
       return environment[name]

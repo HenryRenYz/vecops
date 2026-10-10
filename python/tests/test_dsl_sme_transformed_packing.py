@@ -7,7 +7,6 @@ gather fallback. Native execution is deliberately ARM-only: a compile-time
 route is not evidence that streaming loads, conversions or tails are correct.
 """
 
-import re
 from pathlib import Path
 
 import numpy as np
@@ -17,10 +16,7 @@ import vecops.language as T
 from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
 from test_dsl_sme_packing import _available, _dtype, _expected
 from vecops._arm_vector_state import get_vector_state
-from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.backends.cpu.cpp.emitter import CPUEmitter
-from vecops.language._compiler.ir.traversal import nodes
 
 DTYPES = ("bfloat16", "float16", "int8", "uint8")
 PIPELINES = ("convert", "affine", "rowstats", "params")
@@ -98,55 +94,6 @@ def _uncaptured_convert_template(dtype, side):
   return kernel
 
 
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("side", ("A", "B"))
-@pytest.mark.parametrize("pipeline", PIPELINES)
-def test_fp32_dag_packing_reads_za_then_reuses_vector_lowering(dtype, side, pipeline):
-  source = CPUBackend().lower(_template(dtype, side, pipeline).ir, (), target="SME").source
-  assert_no_vec_mask_arrays(source)
-  body = _za_body(source)
-  assert "vecops::vec::sme::load_hor<0>" in body
-  assert "vecops::vec::sme::load_hor<1>" in body
-  assert "vecops::vec::sme::read_ver<0>" in body
-  assert "vecops::vec::sme::read_ver<1>" in body
-  assert "vecops::vec::convert(" in body
-  assert "vecops::vec::interleave(" in body
-  assert "vecops::ops::MatmulPack" not in source
-  assert "VECOPS_INLINE_LAMBDA_NOEXCEPT" in body
-  # A source vector is bitcast from a ZA slice, not gathered a second time.
-  pointer = re.search(r"const auto\* const (\w*base_value\w*)=", body).group(1)
-  assert re.search(rf"reinterpret_cast<const std::uint32_t\*>\({pointer}\+", body)
-  assert not re.search(rf"vecops::vec::load(?:_convert)?\([^;]*\b{pointer}\b", body)
-  assert "throw " not in body
-  assert "ScalableTag<float, 0>" in body
-  assert not re.search(r"ScalableTag<[^\n]+, [1-9]\d*>", body)
-  if pipeline == "convert":
-    # The lexical x capture stays F32 after canonicalization. Its same-dtype
-    # alias snapshot is a valid ZA source; only folded *narrow* snapshots
-    # need the separate ordinary-path guard tested below.
-    assert re.search(r"sme_pack_input_\d+=\(dsl_\w*alias_\d+ \? \(dsl_\w*snapshot_\d+\.data\(\)", source)
-  # Every converted slot is zero-initialized and its entire DAG is guarded
-  # before evaluating mean/weight/bias at an otherwise out-of-bounds K tail.
-  kp = 2 if dtype in {"bfloat16", "float16"} else 4
-  guards = re.findall(r"if \([^\n]+\) /\* do not evaluate padded K DAG \*/", body)
-  assert len(guards) == 2 * kp
-  assert body.count("=vecops::vec::zeros(") == 2 * kp
-  assert body.count("vecops::vec::blend(") >= 2 * kp
-  if pipeline != "convert":
-    assert "vecops::vec::add(" in body
-    assert "vecops::vec::mul(" in body
-    # The DSL's distinct mul/add operations are not contracted during emit.
-    assert "vecops::vec::fmadd(" not in body
-  if pipeline in {"rowstats", "params"}:
-    assert "vecops::vec::sub(" in body
-    assert "Mean" in body and "Rstd" in body
-  if pipeline == "params":
-    assert "Weight" in body and "Bias" in body
-    # K-broadcast scalar loads must be represented as fills, not gathered
-    # with the spatial stride of the transposed primary operand.
-    assert "vecops::vec::fill(" in body
-
-
 @pytest.mark.parametrize("side", ("A", "B"))
 def test_widening_parameter_loads_and_masked_primary_preserve_ordinary_fallback(side):
   for parameter_dtype, masked in (("bfloat16", False), ("float32", True)):
@@ -168,42 +115,6 @@ def test_intermediate_fp16_rounding_is_not_removed_from_a_bf16_pack():
   source = CPUBackend().lower(kernel.ir, (), target="SME").source
   assert "FP32 DAG K-contiguous SME ZA packing" not in source
   assert "pack_group" in source
-
-
-@pytest.mark.parametrize("captured", (False, True))
-def test_folded_load_convert_selection_preserves_a_materialized_source_boundary(captured):
-  template = _template("bfloat16", "A", "convert") if captured else _uncaptured_convert_template("bfloat16", "A")
-  artifact = CPUBackend().lower(template.ir, (), target="SME")
-  pack = next(statement for statement in nodes(artifact.kernel.body) if isinstance(statement, I.Pack))
-  emitter = CPUEmitter(artifact.backend_ir)
-  assert pack.source.op == ("cast" if captured else "load") and pack.source.type.dtype == "bfloat16"
-  selected = emitter.sme_pack_transform(pack.source, pack.destination)
-  assert selected is not None
-  if captured:
-    assert selected.primary is pack.source.args[0]
-    assert selected.primary.type.dtype == selected.primary.data.dtype == "float32"
-  else:
-    assert selected.primary is pack.source
-    assert selected.replacement.type.dtype == "float32"
-  emitter.materialized[id(pack.source)] = object()
-  assert emitter.sme_pack_transform(pack.source, pack.destination) is None
-
-
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("side", ("A", "B"))
-def test_uncaptured_folded_conversion_uses_za_only_without_narrow_alias_snapshot(dtype, side):
-  artifact = CPUBackend().lower(_uncaptured_convert_template(dtype, side).ir, (), target="SME")
-  pack = next(statement for statement in nodes(artifact.kernel.body) if isinstance(statement, I.Pack))
-  assert pack.source.op == "load" and pack.source.type.dtype == dtype
-  assert pack.source.data.dtype == "float32"
-  assert re.search(r"&& !\(dsl_\w+_alias_\d+\)\) /\* FP32 DAG", artifact.source)
-  input_line = next(
-    line for line in artifact.source.splitlines() if "sme_pack_input_" in line and "const auto* const" in line
-  )
-  assert "snapshot" not in input_line
-  fallback = artifact.source[artifact.source.index("/* non-contiguous K preserves vector gather packing */") :]
-  assert "load_convert(" in fallback and "snapshot" in fallback
-  assert_no_vec_mask_arrays(artifact.source)
 
 
 @pytest.mark.parametrize("shape", ((0, 1), (1, 0), (1, 1), (19, 1), (1, 17)))

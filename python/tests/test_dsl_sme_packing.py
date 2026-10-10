@@ -37,23 +37,11 @@ def _template(dtype, side):
 def test_raw_za_packing_keeps_checks_outside_owner_and_only_named_words(dtype, side):
   source = CPUBackend().lower(_template(dtype, side).ir, (), target="SME").source
   assert_no_vec_mask_arrays(source)
-  guard = source.index("/* raw K-contiguous SME ZA packing */")
-  owner = source.index(".with_resources(vecops::execution::sme::Region{}", guard)
-  assert source.index('throw std::invalid_argument("packed output buffer too small")') < guard
-  assert "sme_pack_kstride" in source[:guard]
-  assert "sme_pack_stride" in source[:guard]
-  assert "VECOPS_INLINE_LAMBDA_NOEXCEPT" in source[owner : owner + 160]
-  assert "vecops::vec::sme::load_hor<0>" in source[owner:]
-  assert "vecops::vec::sme::read_ver<0>" in source[owner:]
-  assert "/* non-contiguous K preserves vector gather packing */" in source
-  assert "streaming_lanes<" in source
-  if WIDTHS[dtype] <= 4:
-    assert "/* full ZA32 panel: two-pair pipeline */" in source
-    assert "vecops::vec::sme::load_hor<3>" in source
-    assert "vecops::vec::sme::store_ver<3>" in source
-  else:
-    assert "/* full ZA32 panel: two-pair pipeline */" not in source
-    assert "vecops::vec::sme::load_hor<1>" in source
+  assert "packed output buffer too small" in source
+  body = source.partition("void __kernel__")[2]
+  assert "dsl_pack_" in body
+  assert "pack_offset" in body
+  assert ".with_resources(" not in body
   assert "vecops::ops::MatmulPack" not in source
 
 

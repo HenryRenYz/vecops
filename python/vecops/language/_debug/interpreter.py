@@ -114,6 +114,9 @@ class Interpreter:
       return {"add": np.sum, "min": np.min, "max": np.max}[operation](args[0], axis=axis)
     if op in ("cast", "convert"):
       return np.asarray(args[0], dtype=self.dtype(expression.type.dtype))
+    if op == "bitreinterpret":
+      source = expression.args[0]
+      return np.asarray(self.value(source), dtype=self.dtype(source.type.dtype)).view(self.dtype(expression.type.dtype))
     if op == "bitcast":
       return np.asarray(args[0]).view(self.dtype(expression.type.dtype))
     if op in ("lower", "upper"):

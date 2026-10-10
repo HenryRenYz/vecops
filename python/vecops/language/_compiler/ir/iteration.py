@@ -130,10 +130,6 @@ def domain(loop):
     return domain(loop.loop)
   if isinstance(loop, AxisFold):
     return loop.domain
-  from .schedule import ScheduleLoop
-
-  if isinstance(loop, ScheduleLoop):
-    return loop.domain
   return None
 
 
@@ -154,8 +150,8 @@ def contract(loop):
   """Common legality contract, not permission to reassociate every loop.
 
   Prefix loops are ordered; worker/team collectives are synchronization
-  boundaries, not iterations in this interface. ScheduleLoop is the backend
-  specialization of the same domain/recurrence contract.
+  boundaries, not iterations in this interface. Backend recipes expand into
+  these same ordinary loop domains before target legalization.
   """
   logical = domain(loop)
   if logical is None:
@@ -166,17 +162,6 @@ def contract(loop):
     )
   if isinstance(loop, I.Grid):
     return IterationContract(logical, LoopSchedule(1), "grid", frozenset(), ordered=False, task_parallel=True)
-  from .schedule import ScheduleLoop
-
-  if isinstance(loop, ScheduleLoop):
-    return IterationContract(
-      logical,
-      loop.schedule,
-      "scheduled",
-      frozenset(),
-      (loop.recurrence,) if loop.recurrence else (),
-      bool(loop.recurrence),
-    )
   from .pipeline import PipelineFor
 
   if isinstance(loop, (PipelineFor, I.UnrolledFor)):
