@@ -268,8 +268,10 @@ class PrimitivesEmitter:
       else None
     )
     complete = len(shape) == 1 and I.same_expr(shape[0], value.type.shape[0]) and tuple(coords) == ("0",)
-    if plan is not None and complete and (
-      self.fixed_tag_lanes.get(tag) == extent or capacity is not None and capacity >= extent
+    if (
+      plan is not None
+      and complete
+      and (self.fixed_tag_lanes.get(tag) == extent or capacity is not None and capacity >= extent)
     ):
       # Closed fixed state updates use the same instruction program as stores.
       # Partial/multi-piece consumers retain exact indexed legalization.
