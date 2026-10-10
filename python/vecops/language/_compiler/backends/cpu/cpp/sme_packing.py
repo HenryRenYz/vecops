@@ -109,7 +109,7 @@ class SMEPackingEmitter:
       or saved[0].dtype != view.dtype  # This owner is guarded by !alias.
       or I.same_expr(saved[0].strides[s_axis], view.strides[s_axis])
     )
-    if raw and self.sme_packing_program(packed) is not None:
+    if raw:
       singleton_snapshot = (
         saved is not None and saved[0].dtype == view.dtype and I.same_expr(saved[0].strides[k_axis], view.shape[s_axis])
       )
@@ -128,8 +128,7 @@ class SMEPackingEmitter:
         own_stride = held_k
       self.line(f"const vecops::nint_t {held_stride}={own_stride};")
     else:
-      # Production families stay unchanged until the whole library driver
-      # passes its performance gate, including the transformed-input route.
+      # Converted inputs retain their own checked snapshot representation.
       own_stride = self.owner_integer(view.strides[s_axis], row_step) if unchanged_stride else row_step
       self.line(
         f"const vecops::nint_t {held_stride}={own_stride}, "
@@ -344,192 +343,16 @@ class SMEPackingEmitter:
     self.line("#endif")
 
   def sme_raw_pack_body(self, packed, base, stride, spatial, logical_k):
+    """Bind the checked packed ABI to the single source-parsed DSL recipe."""
     program = self.sme_packing_program(packed)
-    if program is not None:
-      self.hardware_program(
-        program,
-        metadata={
-          "sme_packing.m": spatial,
-          "sme_packing.k": logical_k,
-          "sme_packing.pitch": stride,
-        },
-        pointers={"sme_packing_input": base, "sme_packing_output": self.pointer(packed.view)},
-      )
-      return
-    width = ELEMENT_BYTES[packed.view.dtype]
-    bits = f"std::uint{width * 8}_t"
-    tag = self.matrix_tag(f"uint{width * 8}")
-    lanes, panel, chunk, output = (
-      self.unique(name) for name in ("sme_pack_lanes", "sme_pack_panel", "sme_pack_chunk", "sme_pack_output")
+    if program is None:
+      raise RuntimeError("missing prepared SME raw packing program")
+    self.hardware_program(
+      program,
+      metadata={
+        "sme_packing.m": spatial,
+        "sme_packing.k": logical_k,
+        "sme_packing.pitch": stride,
+      },
+      pointers={"sme_packing_input": base, "sme_packing_output": self.pointer(packed.view)},
     )
-    kp = max(1, 4 // width)
-    self.line(f"const vecops::nint_t {lanes}=vecops::vec::sme::streaming_lanes<{bits}>();")
-    self.line(
-      f"const vecops::nint_t {panel}=2*vecops::vec::sme::streaming_lanes<{'std::uint64_t' if width == 8 else 'std::uint32_t'}>();"
-    )
-    self.line(f"const vecops::nint_t {chunk}=({lanes}/{kp})*{kp};")
-    self.line(f"auto* {output}=reinterpret_cast<{bits}*>({self.pointer(packed.view)});")
-    origin, kb = self.unique("sme_pack_panel_origin"), self.unique("sme_pack_k_origin")
-    self.opening(f"for (vecops::nint_t {origin}=0; {origin}<({spatial}); {origin}+={panel})")
-    self.line(f"vecops::nint_t {kb}=0;")
-    if width <= 4:
-      self.opening(f"if (({spatial})-{origin}>={panel}) /* full ZA32 panel: two-pair pipeline */")
-      self.sme_pack_full_words(base, stride, logical_k, origin, chunk, output, bits, kb)
-      self.close()
-    self.opening(f"for (; ({logical_k})-{kb}>={chunk}; {kb}+={chunk})")
-    self.sme_pack_fringe(base, stride, spatial, origin, kb, chunk, lanes, panel, tag, output, width, kp)
-    self.close()
-    self.opening(f"if ({kb}<({logical_k})) /* one masked K chunk */")
-    self.sme_pack_fringe(
-      base,
-      stride,
-      spatial,
-      origin,
-      kb,
-      f"({logical_k})-{kb}",
-      lanes,
-      panel,
-      tag,
-      output,
-      width,
-      kp,
-    )
-    self.close()
-    self.close()
-
-  def sme_pack_full_words(self, base, stride, logical_k, origin, chunk, output, bits, consumed):
-    tag = self.matrix_tag("uint32")
-    lanes, pg, chunks, words = (
-      self.unique(name) for name in ("sme_pack_words", "sme_pack_all", "sme_pack_chunks", "sme_pack_word_output")
-    )
-    self.line(f"const vecops::nint_t {lanes}=vecops::vec::sme::streaming_lanes<std::uint32_t>();")
-    self.line(f"const auto {pg}=vecops::vec::mtrue({tag}{{}});")
-    self.line(f"const vecops::nint_t {chunks}=({logical_k})/{chunk};")
-    self.opening(f"if ({chunks}>0) /* pipeline prime */")
-    self.line(f"auto* {words}=reinterpret_cast<std::uint32_t*>({output});")
-
-    def transfer(load_base, kb, store_base=None, prefetch=None):
-      row = self.unique("sme_pack_word_row")
-      self.opening(f"for (vecops::nint_t {row}=0; {row}<{lanes}; ++{row})")
-      for tile in (0, 1):
-        pointer = f"({base}+(({origin})+{tile}*{lanes}+{row})*({stride})+({kb}))"
-        if prefetch is not None:
-          self.opening(f"if ({prefetch})")
-          self.line(f"__builtin_prefetch({pointer}+4*{chunk},0,3);")
-          self.close()
-        self.line(
-          f"vecops::vec::sme::load_hor<{load_base + tile}>(static_cast<std::uint32_t>({row}),"
-          f"{pg},reinterpret_cast<const std::uint32_t*>({pointer}));"
-        )
-      if store_base is not None:
-        for tile in (0, 1):
-          self.line(
-            f"vecops::vec::sme::store_ver<{store_base + tile}>(static_cast<std::uint32_t>({row}),{pg},{words});"
-          )
-          self.line(f"{words}+={lanes};")
-      self.close()
-
-    transfer(0, "0", prefetch=f"{chunks}>4")
-    index = self.unique("sme_pack_chunk_index")
-    self.opening(f"for (vecops::nint_t {index}=1; {index}<{chunks}; ++{index})")
-    self.opening(f"if ({index}&1)")
-    transfer(2, f"{index}*{chunk}", 0, f"{chunks}-{index}>4")
-    self.close()
-    self.opening("else")
-    transfer(0, f"{index}*{chunk}", 2, f"{chunks}-{index}>4")
-    self.close()
-    self.close()
-    self.opening(f"if ({chunks}&1) /* pipeline drain */")
-    self.sme_pack_drain_words(0, pg, lanes, words)
-    self.close()
-    self.opening("else")
-    self.sme_pack_drain_words(2, pg, lanes, words)
-    self.close()
-    self.line(f"{output}=reinterpret_cast<{bits}*>({words});")
-    self.line(f"{consumed}={chunks}*{chunk};")
-    self.close()
-
-  def sme_pack_drain_words(self, base, pg, lanes, output):
-    group = self.unique("sme_pack_word_group")
-    self.opening(f"for (vecops::nint_t {group}=0; {group}<{lanes}; ++{group})")
-    for tile in (0, 1):
-      self.line(f"vecops::vec::sme::store_ver<{base + tile}>(static_cast<std::uint32_t>({group}),{pg},{output});")
-      self.line(f"{output}+={lanes};")
-    self.close()
-
-  def sme_pack_fringe(self, base, stride, spatial, origin, kb, active_k, lanes, panel, tag, output, width, kp):
-    active, pg, load_pg = (
-      self.unique(name) for name in ("sme_pack_active_rows", "sme_pack_rows_mask", "sme_pack_k_mask")
-    )
-    self.line(
-      f"const vecops::nint_t {active}=std::min<vecops::nint_t>({lanes},std::min<vecops::nint_t>({panel},({spatial})-{origin}));"
-    )
-    self.line(f"const auto {pg}=vecops::vec::mwhilelt({tag}{{}},0,{active});")
-    self.line(f"const auto {load_pg}=vecops::vec::mwhilelt({tag}{{}},0,({active_k}));")
-
-    def stage(tile, active_rows, offset):
-      row = self.unique("sme_pack_row")
-      self.opening(f"for (vecops::nint_t {row}=0; {row}<({active_rows}); ++{row})")
-      pointer = f"{base}+(({origin})+({offset})+{row})*({stride})+({kb})"
-      self.line(
-        f"vecops::vec::sme::load_hor<{tile}>(static_cast<std::uint32_t>({row}),{load_pg},"
-        f"reinterpret_cast<const std::uint{width * 8}_t*>({pointer}));"
-      )
-      self.close()
-
-    stage(0, active, "0")
-    if width >= 4:
-      active2, pg2 = self.unique("sme_pack_active_rows"), self.unique("sme_pack_rows_mask")
-      self.line(
-        f"const vecops::nint_t {active2}=std::max<vecops::nint_t>(0,std::min<vecops::nint_t>({lanes},({spatial})-{origin}-{lanes}));"
-      )
-      self.line(f"const auto {pg2}=vecops::vec::mwhilelt({tag}{{}},0,{active2});")
-      stage(1, active2, lanes)
-    group = self.unique("sme_pack_k_group")
-    self.opening(f"for (vecops::nint_t {group}=0; {group}<(({active_k})+{kp - 1})/{kp}; ++{group})")
-    if width >= 4:
-      for tile, mask in ((0, pg), (1, pg2)):
-        value = self.unique("sme_pack_column")
-        self.line(
-          f"const auto {value}=vecops::vec::sme::read_ver<{tile}>({tag}{{}},static_cast<std::uint32_t>({group}),{mask});"
-        )
-        self.line(f"vecops::vec::store({tag}{{}},{output},{value});")
-        self.line(f"{output}+={lanes};")
-    else:
-      values = []
-      for column in range(kp):
-        value = self.unique("sme_pack_column")
-        self.line(
-          f"const auto {value}=vecops::vec::sme::read_ver<0>({tag}{{}},static_cast<std::uint32_t>({group}*{kp}+{column}),{pg});"
-        )
-        values.append(value)
-      self.sme_pack_zip_words(tag, values, output, lanes, width)
-    self.close()
-
-  def sme_pack_zip_words(self, tag, values, output, lanes, width):
-    # Extract each native word directly from the public interleave expression.
-    # No multi-word Vec variable/array is emitted; on SVE these expressions
-    # become ZIP1/ZIP2 without a tuple round-trip. local_interleave_* instead
-    # zips inside 16-byte blocks and would corrupt panels at larger SVLs.
-    def zip_word(own_tag, first, second, index):
-      pair = f"vecops::vec::Twice<{own_tag}>"
-      return f"vecops::vec::get_word<{index}>({pair}{{}},vecops::vec::interleave({pair}{{}},{first},{second}))"
-
-    if width == 2:
-      for index in (0, 1):
-        value = self.unique("sme_pack_zip")
-        self.line(f"const auto {value}={zip_word(tag, values[0], values[1], index)};")
-        self.line(f"vecops::vec::store({tag}{{}},{output},{value});")
-        self.line(f"{output}+={lanes};")
-      return
-    pair_tag = self.matrix_tag("uint16")
-    pairs = []
-    for first, second in ((values[0], values[1]), (values[2], values[3])):
-      pair = self.unique("sme_pack_pair")
-      self.line(f"const auto {pair}=vecops::vec::bitcast({pair_tag}{{}},{tag}{{}},{zip_word(tag, first, second, 0)});")
-      pairs.append(pair)
-    for index in (0, 1):
-      value = self.unique("sme_pack_quad")
-      self.line(f"const auto {value}={zip_word(pair_tag, pairs[0], pairs[1], index)};")
-      self.line(f"vecops::vec::store({pair_tag}{{}},reinterpret_cast<std::uint16_t*>({output}),{value});")
-      self.line(f"{output}+={lanes};")

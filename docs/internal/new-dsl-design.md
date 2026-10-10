@@ -3051,3 +3051,59 @@ The raw/FP32-transform packing printer, vector/SME/AMX matrix families and
 cache/packing traversal printer still have required consumers. Their removal,
 the complete migration and net production-code reduction remain outstanding;
 `cpu_sme_packing_dsl` remains off by default until its full gate passes.
+
+### Removing verified migration routes (2026-10-10)
+
+The user's updated acceptance criterion permits removing old algorithm routes
+before performance parity. Correctness remains required. This supersedes the
+historical performance-gated defaults above; it is not evidence that every
+new algorithm is already as fast as public C++.
+
+Raw K-contiguous SME packing and all simple SME transpose schedules now always
+stage their source-parsed helpers. Their duplicate terminal C++ loop generators
+have been deleted, along with `cpu_sme_packing_dsl` and
+`cpu_transpose_sme_dsl`. Metadata simplification specializes only captured SVL;
+exact integer equality facts stay within their proven branch and remove full
+prefix masks without changing sibling/fringe handling. Tests inspect executable
+IR schedules and signed offsets rather than obsolete C++ identifier spelling.
+
+Unpacked, unblocked floating-point vector dots now expand to source-level
+register/streaming recipes. The opt-in `cpu_vector_dot_dsl` gate is removed.
+K-contiguous B and column GEMV use ordinary K reductions. The outer-product
+family retains four named vector accumulators. A pure staged value helper
+projects the already captured epilogue onto each current register row, binds
+actual prefix/tag geometry and retains original read identities. It has no
+runtime callback or C++ closure. The original arithmetic/conversion DAG remains
+visible, including prologues/epilogues originating in nested helpers.
+
+Operand recomputation uses the shared continuous DAG cost policy. Conditional
+private caches allocate/fill only on their selected branch; a small lazy value
+reference prevents uninitialized reads or eager execution of both producers.
+The same terminal scalar-choice primitive serves existing materializations,
+instead of duplicating their branch emission. Scalar accumulators use ordinary
+scalar-to-tile broadcasting.
+
+Validation so far: 445 scoped pure checks and 262 extended control/state/
+reducer/register/transpose/matmul checks in a frozen x86 snapshot; fifteen
+x86 native dot checks,
+including dynamic/empty/zero-K shapes, signed strides, historical captures,
+broadcast epilogues and actual overlapping buffers. Both runtime operand-cache
+choices are exercised (19 and 257 output columns). On 920f-4, clang/af3/private
+GNU14 headers, thirteen raw-pack/transpose native checks passed, followed by
+eight static-transpose/raw-pack checks after metadata simplification. Geometry
+was queried from the process, not supplied by a CPU-model constant.
+
+Retained artifacts:
+`/home/renyz/tmp/vecops-streaming-cache.jrgJihea`,
+`/home/ryz/tmp/vecops-library-only.vaFcSA1j/build-validation`, and
+`/home/ryz/tmp/vecops-recipe-proofs.NiwT09OZ/build-validation`.
+The latest floating-point streaming source is being validated separately in
+`/home/ryz/tmp/vecops-streaming-source.ySteACcC/build-validation`.
+
+This is not complete removal of the old operator route. Remaining required
+consumers include FP32 transformed SME packing; non-SME register-transpose
+traversal; packed/integer and hardware-native vector fallbacks; SME/AMX matrix
+families; and cache/packing/swap orchestration behind `_matmul`. Public C++
+operators and frozen benchmark references are not obsolete compiler routes
+and remain intact. Production language-source changes in this checkpoint
+reduce approximately one hundred lines; tests/documentation grow separately.

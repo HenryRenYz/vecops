@@ -341,7 +341,7 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
   def kernel(A: T.Tensor((37, 129), dtype="float16"), O: T.Tensor((capacity,), dtype="float16", access="output")):
     T.pack(A, O, side="A", format="sme")
 
-  artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True})
+  artifact = CPUBackend().lower(kernel.ir, (), target="SME")
   assert isinstance(artifact.backend_ir.sme_packing_programs["float16", (37, 129)], I.Block)
   assert "float16" not in artifact.backend_ir.sme_packing_programs, "do not stage an unused generic recipe"
 
@@ -370,9 +370,7 @@ def test_sme_complete_fringe_chunks_have_constant_unrolled_group_counts(svl):
   ):
     T.pack(A, O, side="A", format="sme")
 
-  artifact = CPUBackend().lower(
-    kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True, "_vector_state": VectorState(256, svl)}
-  )
+  artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"_vector_state": VectorState(256, svl)})
   program = artifact.backend_ir.sme_packing_programs["bfloat16"]
   drains = [
     node
@@ -400,9 +398,7 @@ def test_sme_packing_unroll_keeps_runtime_address_products_bounded(pitch):
   ):
     T.pack(A, O, side="A", format="sme")
 
-  artifact = CPUBackend().lower(
-    kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True, "_vector_state": VectorState(64, 64)}
-  )
+  artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"_vector_state": VectorState(64, 64)})
   program = artifact.backend_ir.sme_packing_programs["bfloat16", (64, 256)]
   transfers = [
     node
@@ -427,7 +423,7 @@ def test_sme_owner_restores_constants_but_not_alias_dependent_strides(pitch):
   ):
     T.pack(A, O, side="A", format="sme")
 
-  source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
+  source = CPUBackend().lower(kernel.ir, (), target="SME").source
   assert re.search(
     r"const vecops::nint_t \w+_sme_pack_m_value_\d+=std::int64_t\{37\}, \w+_sme_pack_k_value_\d+=std::int64_t\{129\};",
     source,
@@ -450,7 +446,7 @@ def test_sme_packing_uses_all_external_packed_dimensions():
   def kernel(A: T.Tensor((37, 129), dtype="uint8"), O: T.Tensor((2, 33, 32, 4), dtype="uint8", access="output")):
     T.pack(A, O, side="A", format="sme")
 
-  source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
+  source = CPUBackend().lower(kernel.ir, (), target="SME").source
   actual = "(std::int64_t{2}) * (std::int64_t{33}) * (std::int64_t{32}) * (std::int64_t{4})"
   assert f"if (({actual}) < (" in source and "packed output buffer too small" in source
   assert "sme_pack_capacity_value" not in source, "packed logical axes replace per-store capacity clamps"
@@ -468,7 +464,7 @@ def test_sme_b_owner_restores_unit_k_guarded_original_pitch():
   ):
     T.pack(B, O, side="B", format="sme")
 
-  source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
+  source = CPUBackend().lower(kernel.ir, (), target="SME").source
   held_k = re.search(r"(\w+_sme_pack_k_value_\d+)=[^;]+;", source)
   assert held_k
   assert re.search(rf"const vecops::nint_t \w+_sme_pack_stride_value_\d+={held_k[1]};", source)
@@ -486,7 +482,7 @@ def test_two_sme_library_programs_keep_separate_lexical_names():
       T.copy(T.transpose(A), C, implementation="sme")
       T.copy(T.transpose(B), D, implementation="sme")
 
-  source = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_transpose_sme_dsl": True}).source
+  source = CPUBackend().lower(kernel.ir, (), target="SME").source
   assert source.count(".with_resources(") == 1
   assert source.count("/* library instruction program */ {") == 2
 
@@ -540,7 +536,7 @@ def test_native_sme_dsl_full_word_packing(dtype, side, tmp_path):
     T.pack(A, O, side=side, format="sme")
 
   compiler = make_compiler(target="Native", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
-  compiled = T.compile(kernel, compiler=compiler, pass_options={"cpu_sme_packing_dsl": True})
+  compiled = T.compile(kernel, compiler=compiler)
   data = ((np.arange(spatial * k) % 13) / (4 if dtype.startswith("float") else 1)).astype(dtype).reshape(spatial, k)
   output = np.empty(capacity, dtype=dtype)
   compiled.operator.native(data if side == "A" else data.T, output, **compiled._core.specialization_values)
@@ -637,7 +633,7 @@ def test_automatic_transpose_stages_dsl_before_cpp_emission(monkeypatch):
   def kernel(A: T.Tensor((m, n), dtype="float16"), C: T.Tensor((n, m), dtype="float32", access="output")):
     T.transpose_copy(A, C, compute_dtype="float32", implementation="sme")
 
-  artifact = CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_transpose_sme_dsl": True})
+  artifact = CPUBackend().lower(kernel.ir, (), target="SME")
   plans = tuple(artifact.backend_ir.transposes.values())
   assert len(plans) == 1 and isinstance(plans[0].sme_program, I.Block)
 
@@ -677,7 +673,6 @@ def test_automatic_sme_dsl_preserves_pair_and_static_schedules(size, input_dtype
     target="SME",
     options={
       "_vector_state": VectorState(64, 64),
-      "cpu_transpose_sme_dsl": True,
       "cpu_transpose_sme_const_half_output": static,
       "cpu_transpose_sme_const_half_full_input": static,
     },

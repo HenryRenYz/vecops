@@ -305,10 +305,7 @@ def plan_matmul(prepared, context):
 
   visit(prepared.vectors.kernel.body)
   packing_programs = {}
-  staged_packing = context.options.get("cpu_sme_packing_dsl", False)
-  if type(staged_packing) is not bool:
-    raise TypeError("cpu_sme_packing_dsl must be bool")
-  if staged_packing:
+  if plans or dense_packs:
     from ...._library.sme_packing import pack_raw
     from ...dtypes import ELEMENT_BYTES
     from ...frontend.helpers import expand_helper

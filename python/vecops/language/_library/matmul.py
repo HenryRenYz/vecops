@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: MIT
 """Composable matrix algorithms built from ordinary value/control primitives.
 
-These recipes are not yet the default dot dispatcher. Backend selection,
-packing and cache traversal remain separately gated while codegen/performance
-equivalence is established. No C++ spelling or native operator is embedded.
+Small register-eligible vector dots use these recipes by default. Hardware
+families and cache traversal are still being migrated. No C++ spelling or
+native operator is embedded in the source algorithms.
 """
 
 from .. import dsl as T
@@ -47,13 +47,15 @@ def _vector_row_update(value, columns, a, row, k, dtype):
 @T.func
 def _vector_row_store(value, output, row, column, width, epilogue):
   if epilogue is not None:
-    value = epilogue(value, row, column)
+    transformed = epilogue(value, row, column)
+  else:
+    transformed = value
   # SIMD induction carries the bounded register extent through indexed-memory
   # canonicalization. A generic tile store otherwise groups multiple words
   # and reconstructs a clipped one-word state in its wider tail traversal.
   region = output[row, column : column + width]
   for indices in T.simd(region.shape[0], vector=T.Vector(value.dtype), unroll=1):
-    T.scatter(region, indices, value)
+    T.scatter(region, indices, transformed)
 
 
 @T.func
@@ -112,7 +114,36 @@ def _vector_dot_core(inputs, output, *, acc=None, acc_dtype="float32", epilogue=
 
 
 @T.func
-def vector_dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, unroll=2):
+def _vector_inner_dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, unroll=2):
+  """K-vectorized inner products for column GEMV/K-contiguous B layouts.
+
+  Reduction, conversion and input transforms use the ordinary reducer
+  pipeline. No scheduler-specific vector reduction is generated in C++.
+  """
+  a, b = inputs
+  a, b = T.as_value(a), T.as_value(b)
+  initial = None if acc is None else T.broadcast_to(T.cast(T.as_value(acc), acc_dtype), output.shape)
+  for row in T.serial(a.shape[0], unroll=1):
+    for column in T.serial(b.shape[1], unroll=1):
+      product = T.reduce_add(T.cast(a[row, :], acc_dtype) * T.cast(b[:, column], acc_dtype), unroll=unroll)
+      if initial is not None:
+        product = product + T.element_at(initial, (row, column))
+      value = T.as_vector(T.full((1,), product, dtype=acc_dtype), T.Vector(acc_dtype, N=1))
+      _vector_row_store(value, output, row, column, 1, epilogue)
+
+
+@T.func
+def _vector_dispatch(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, unroll=2, prefer_k=False):
+  a, b = inputs
+  a, b = T.as_value(a), T.as_value(b)
+  if prefer_k or b.shape[1] == 1:
+    _vector_inner_dot_into((a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll)
+  else:
+    _vector_dot_core((a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll)
+
+
+@T.func
+def vector_dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, unroll=2, prefer_k=False):
   """Version the streaming leaf under whole-producer disjointness proofs.
 
   A proven disjoint branch avoids repeated loop-level alias preservation.
@@ -122,11 +153,15 @@ def vector_dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=N
   a, b = inputs
   if acc is None:
     if T.view_disjoint(a, output) and T.view_disjoint(b, output):
-      _vector_dot_core((a, b), output, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll)
+      _vector_dispatch((a, b), output, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll, prefer_k=prefer_k)
     else:
-      _vector_dot_core((a, b), output, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll)
+      _vector_dispatch((a, b), output, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll, prefer_k=prefer_k)
   else:
     if T.view_disjoint(a, output) and T.view_disjoint(b, output) and T.view_disjoint(acc, output):
-      _vector_dot_core((a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll)
+      _vector_dispatch(
+        (a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll, prefer_k=prefer_k
+      )
     else:
-      _vector_dot_core((a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll)
+      _vector_dispatch(
+        (a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue, unroll=unroll, prefer_k=prefer_k
+      )

@@ -17,8 +17,11 @@ from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_array
 from test_dsl_arm_vector_state_native import PR_SME_SET_VL, PR_SVE_SET_VL
 from test_dsl_arm_vector_state_native import arm_vector_control as _arm_vector_control
 from test_dsl_transpose_sme_metadata import cross_wrapper
+from transpose_recipe_utils import assert_static_pairs, normalized_calls, static_schedule, transpose_plan
 from vecops._arm_vector_state import VectorState
+from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
+from vecops.language._compiler.ir.traversal import nodes
 
 OPTION = "cpu_transpose_sme_const_half_output"
 INPUT_OPTION = "cpu_transpose_sme_const_half_full_input"
@@ -74,31 +77,11 @@ def full_output(source):
 @pytest.mark.parametrize("vl,svl", ((16, 16), (64, 16), (16, 32), (16, 64), (64, 64)))
 @pytest.mark.parametrize("pitch", (64, -64, 131))
 def test_static_half_output_is_named_bounded_independent_addresses(vl, svl, pitch):
-  code = lower(template(pitch=pitch), vl=vl, svl=svl).source
-  body = full_output(code)
-  columns = svl // 4
-  assert "for (" not in body and "+=" not in body and "opt::first" not in body
-  assert "vecops::vec::load(" not in code and "experimental Z-load" not in code
-  assert re.findall(r"read_ver<0>\([^\n]+std::uint32_t\{(\d+)\}", body) == list(map(str, range(columns)))
-  assert re.findall(r"output_origin_\d+ \+ std::int64_t\{(-?\d+)\}", body) == [
-    str(column * pitch) for column in range(columns)
-  ]
-  operations = [line for line in body.splitlines() if "read_ver<0>" in line or "store_convert(" in line]
-  assert ["read" if "read_ver" in line else "store" for line in operations] == [
-    kind for _ in range(columns // 2) for kind in ("read", "read", "store", "store")
-  ]
-  fallback = code[code.index(FRINGE) :]
-  # The dynamic-width plan has one cold slice loop, not a second paired
-  # slice loop. Require its actual loop to be rolled rather than assuming
-  # the number of static/dynamic plan alternatives.
-  column_loops = re.findall(
-    r"#pragma clang loop unroll\(disable\)\n(?:\s*#[^\n]*\n)*\s*for \([^\n]*dsl_c_za_col", fallback
-  )
-  assert len(column_loops) == 1
-  assert "opt::first" in fallback and "load_hor<0>" in code
-  assert "/* overlapping operands */" in code and "/* unsupported strides: preserve gather/scatter */" in code
-  assert re.search(rf"active_m_\d+ == \w+ && \w+ == \w+ && \w+ == {columns}\)", code)
-  assert_no_vec_mask_arrays(code)
+  artifact = lower(template(pitch=pitch), vl=vl, svl=svl)
+  assert_static_pairs(artifact, "sme.read_ver", svl // 4, pitch)
+  source = artifact.source
+  assert "/* overlapping operands */" in source and "/* unsupported strides: preserve gather/scatter */" in source
+  assert_no_vec_mask_arrays(source)
 
 
 @pytest.mark.parametrize("svl", (None, 0, True, 8, 15, 17, 128, 256, 272))
@@ -110,13 +93,14 @@ def test_unknown_or_over_budget_svl_keeps_exact_old_source(svl):
 @pytest.mark.parametrize("svl", (16, 32, 64))
 def test_constant_geometry_retains_original_paired_input_and_cold_loops(svl):
   kernel = template(pitch=63, shape=(63, 129))
-  old, new = (lower(kernel, svl=svl, enabled=flag).source for flag in (False, True))
-  assert re.findall(r"[^\n]*load_hor<0>[^\n]*", old) == re.findall(r"[^\n]*load_hor<0>[^\n]*", new)
-  fringe = new[new.index(FRINGE) :]
-  loops = re.findall(r"#pragma clang loop unroll\(disable\)\n(?:\s*#[^\n]*\n)*\s*for \([^\n]*dsl_c_za_col", fringe)
-  assert len(loops) == 2  # One original paired loop and its original singleton fringe.
-  assert "opt::first" in fringe and MARKER not in old
-  assert_no_vec_mask_arrays(new)
+  before, after = (lower(kernel, svl=svl, enabled=flag) for flag in (False, True))
+  old_calls = normalized_calls(before, "sme.load_hor")
+  new_calls = normalized_calls(after, "sme.load_hor")
+  assert old_calls == new_calls and new_calls
+  branch = static_schedule(after, "sme.read_ver")
+  assert all(n.unroll == 1 for n in nodes(branch.otherwise) if isinstance(n, I.For))
+  assert transpose_plan(before).sme_const_half_output_columns is None
+  assert_no_vec_mask_arrays(after.source)
 
 
 @pytest.mark.parametrize(
@@ -158,14 +142,12 @@ def test_explicit_output_disable_and_boolean_contract_with_original_input_schedu
 @pytest.mark.parametrize("scope,batch", ((True, False), (False, True)))
 def test_existing_owner_and_batch_use_local_origins(scope, batch):
   kernel = template(scope=scope, batch=batch)
-  code = lower(kernel, vl=16, svl=64).source
+  artifact = lower(kernel, vl=16, svl=64)
+  code = artifact.source
   previous = lower(kernel, vl=16, svl=64, enabled=False).source
-  # T.grid emits serial and parallel alternatives. Do not mistake those
-  # original two owners for nesting created by this output candidate.
   assert code.count(".with_resources(") == previous.count(".with_resources(") == (2 if batch else 1)
-  assert code.count(MARKER) == (2 if batch else 1)
-  assert "dsl_c_parameter_" not in full_output(code)
-  assert "transpose_target_base_" in full_output(code)
+  assert code.count("/* library instruction program */") == (2 if batch else 1)
+  assert_static_pairs(artifact, "sme.read_ver", 16, 64)
   assert "#define VECOPS_SVE_INLINE_MATH_SPECIALS 1" in code
   assert_no_vec_mask_arrays(code)
 
@@ -176,8 +158,7 @@ def test_cost_profile_cannot_supply_streaming_geometry_or_choose_x86():
     lower(kernel, svl=None, cpu_cost_target="SME").source
     == lower(kernel, svl=None, enabled=False, cpu_cost_target="SME").source
   )
-  code = lower(kernel, target="AVX512", cpu_cost_target="SME").source
-  assert MARKER not in code
+  assert transpose_plan(lower(kernel, target="AVX512", cpu_cost_target="SME")).sme_const_half_output_columns is None
 
 
 @pytest.mark.parametrize("enabled", (False, True))

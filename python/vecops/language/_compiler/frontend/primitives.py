@@ -158,6 +158,11 @@ class PrimitivesFrontend:
       elif len(args) != 2:
         self.error(node, "reshape/broadcast_to expects a value and shape")
       value = args[0]
+      if operation == "broadcast_to" and isinstance(value, I.Expr) and isinstance(value.type, I.ScalarType):
+        shape = self.shape(args[1], node)
+        for extent in shape:
+          self.block.statements.append(I.Assert(I.binary("ge", extent, I.literal(0)), "negative value extent"))
+        return I.Expr(I.TileType(value.type.dtype, shape), "fill", (value,))
       if not isinstance(value, I.Expr) or not isinstance(value.type, I.TileType):
         if operation == "broadcast_to":
           self.error(node, "broadcast_to expects a tile value")

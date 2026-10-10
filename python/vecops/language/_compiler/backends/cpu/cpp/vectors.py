@@ -13,6 +13,23 @@ from ..capabilities import CPP_TYPES
 
 
 class VectorsEmitter:
+  def conditional_vector(self, typ, tag, condition, true_value, false_value):
+    """Bind a lazy scalar choice without evaluating the inactive read/DAG."""
+    name = self.unique("reused")
+    previous_cache = self.chunk_cache
+    representation = "Mask" if typ.mask else "Vec"
+    self.line(f"vecops::vec::{representation}<{tag}> {name};")
+    self.chunk_cache = dict(previous_cache)
+    self.opening(f"if ({condition})")
+    self.line(f"{name} = {true_value()};")
+    self.close()
+    self.chunk_cache = dict(previous_cache)
+    self.opening("else")
+    self.line(f"{name} = {false_value()};")
+    self.close()
+    self.chunk_cache = previous_cache
+    return name
+
   @contextmanager
   def pointwise_layout(self, region, groups, *, full):
     """Keep a private memory permutation within exactly one complete body."""
@@ -48,24 +65,27 @@ class VectorsEmitter:
     if cached is not None:
       view, condition = cached
       # Keep recomputation inside the false arm, not eagerly before selection.
-      name = self.unique("reused")
-      previous_cache = self.chunk_cache
-      self.chunk_cache = dict(previous_cache)
-      representation = "Mask" if value.type.mask else "Vec"
-      self.line(f"vecops::vec::{representation}<{tag}> {name};")
-      self.opening(f"if ({condition})")
       load = I.Expr(I.TileType(view.dtype, view.shape), "load", data=view)
-      result = self.vector(load, tag, root_shape, coords, active, axis)
-      self.line(f"{name} = {result};")
-      self.close()
-      self.chunk_cache = dict(previous_cache)
-      self.opening("else")
-      result = self.vector(value, tag, root_shape, coords, active, axis)
-      self.line(f"{name} = {result};")
-      self.close()
-      # Branch-local intermediates cannot be referenced by later consumers.
-      self.chunk_cache = previous_cache
+      name = self.conditional_vector(
+        value.type,
+        tag,
+        condition,
+        lambda: self.vector(load, tag, root_shape, coords, active, axis),
+        lambda: self.vector(value, tag, root_shape, coords, active, axis),
+      )
       self.materialized[id(value)] = cached
+      self.chunk_cache[key] = name
+      return name
+    if value.op == "cached_value":
+      view, condition = value.data
+      load = I.Expr(value.type, "load", data=view)
+      name = self.conditional_vector(
+        value.type,
+        tag,
+        self.scalar(condition),
+        lambda: self.vector(load, tag, root_shape, coords, active, axis),
+        lambda: self.vector(value.args[0], tag, root_shape, coords, active, axis),
+      )
       self.chunk_cache[key] = name
       return name
     dtype = value.type.dtype

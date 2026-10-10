@@ -7,7 +7,49 @@ its snapshot/materialization rather than inventing a later read. Nonlocal,
 masked and arithmetic values deliberately keep ordinary vector legalization.
 """
 
+from dataclasses import replace
+
 from .. import ir as I
+
+
+def pointwise_row_projection(value, boundary, reference, row, column, extent, catalog):
+  """Project a pointwise caller DAG onto a register row without new reads.
+
+  Shape-changing/stateful boundaries are deliberately rejected. Loads retain
+  their original identity behind ordinary value windows, so the standard alias
+  planner still resolves historical captures. A singleton axis broadcasts
+  from zero; it must not advance with the destination's induction variables.
+  """
+  from ..operations import Trait
+
+  memo = {}
+
+  def visit(value):
+    if value is boundary:
+      return reference
+    if isinstance(value.type, I.ScalarType):
+      return value
+    if id(value) in memo:
+      return memo[id(value)]
+    shape = value.type.shape
+    if not 1 <= len(shape) <= 2:
+      raise TypeError("pointwise row projection requires rank-one/two operands")
+    width = I.literal(1) if I.constant(shape[-1]) == 1 else extent
+    typ = I.VectorType(value.type.dtype, (width,), value.type.mask, reference.type.tag)
+    if catalog.has(value, Trait.MEMORY_READ):
+      if value.op != "load":
+        raise TypeError("opaque memory projection is unsupported")
+      starts = ((I.literal(0) if I.constant(shape[0]) == 1 else row),) if len(shape) == 2 else ()
+      starts += (I.literal(0) if I.constant(shape[-1]) == 1 else column,)
+      result = I.Expr(typ, "value_transform", (value, *starts), ("slice", (len(shape) - 1,)))
+    elif catalog.has(value, Trait.ELEMENTWISE):
+      result = replace(value, type=typ, args=tuple(visit(a) for a in value.args))
+    else:
+      raise TypeError("non-pointwise projection boundary")
+    memo[id(value)] = result
+    return result
+
+  return visit(value)
 
 
 def scalar_memory_projection(value, indices, *, blocked=()):

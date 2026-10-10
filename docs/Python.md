@@ -1294,14 +1294,14 @@ it can be asserted before ownership, not used as throwing work within SM.
 Nested clipped views retain exact root coordinates separately from requested
 affine partitions. Losing an affine ownership proof still prevents grid/loop
 fusion, while exact bounds can remain usable for safe instruction traversal.
-`cpu_transpose_sme_dsl=True` experimentally stages the same source-parsed
-driver during CPU memory planning, including paired/static-conversion cases. Terminal
-printing only binds its virtual memory boundary; it never invokes the frontend.
-The default remains the measured existing driver until paired ARM acceptance.
-`cpu_sme_packing_dsl=True` similarly stages the K-contiguous raw packing
-algorithm (panel traversal, ping-pong ZA pairs, zero-padded K/spatial fringes).
-Both experimental switches remain off by default pending paired ARM acceptance;
-they are migration gates, not permanent duplicate implementations.
+Automatic SME transposes always stage the source-parsed driver during CPU
+memory planning, including paired/static-conversion cases. K-contiguous raw
+SME packing likewise uses its single DSL recipe (panel traversal, ping-pong
+ZA pairs, zero-padded K/spatial fringes). Terminal printing only binds checked
+memory boundaries; it never invokes the frontend. The former
+`cpu_transpose_sme_dsl` / `cpu_sme_packing_dsl` migration switches and their
+duplicate native loop generators have been removed. Performance tuning now
+applies to these recipes rather than selecting an obsolete implementation.
 Likewise `cpu_amx_shared_cache_dispatch=True` enables the experimental shared
 dynamic cache driver; its smaller source is not itself performance acceptance.
 The default retains the original family-dependent automatic packing policy.
@@ -2020,6 +2020,16 @@ replicates source lane zero rather than advancing through inactive lanes.
 An exact unit-step `T.simd` scatter into a known nonzero-stride rank-one view
 can become a bounded vector store without requiring a `unique=True` hint.
 Arbitrary/permuted indices and unknown or zero strides retain their indexed
-semantics and checks. The experimental streaming vector matrix recipe uses
-this ordinary SIMD path for writeback, not a matmul-specific emitter shortcut.
-It remains gated until all relevant shape/dtype/fusion performance gates pass.
+semantics and checks. Unpacked, unblocked floating-point vector dots now use
+source-parsed register or streaming helpers by default, including K-vectorized
+inner products for column GEMV/K-contiguous B. Other hardware, packed and
+cache-blocked families are still being migrated. Their epilogues are projected
+from the captured caller DAG into the current vector, not implemented as host
+callbacks or native closures. Cost-based operand caches use lazy reads: an
+inactive cache branch never loads uninitialized private memory or evaluates
+both arithmetic alternatives.
+
+`broadcast_to` also accepts scalar expressions, filling the requested logical
+shape with the scalar's dtype. This covers scalar initial accumulators without
+inventing a synthetic rank-one tensor. Vector hints/prefix geometry are
+retained when a staged value helper binds its caller's captured DAG.

@@ -17,8 +17,11 @@ from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_array
 from test_dsl_arm_vector_state_native import PR_SME_SET_VL, PR_SVE_SET_VL
 from test_dsl_arm_vector_state_native import arm_vector_control as _arm_vector_control
 from test_dsl_transpose_sme_metadata import cross_wrapper
+from transpose_recipe_utils import assert_static_pairs, static_schedule, transpose_plan
 from vecops._arm_vector_state import VectorState
+from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
+from vecops.language._compiler.ir.traversal import nodes
 
 OPTION = "cpu_transpose_sme_const_half_full_input"
 OUTPUT_OPTION = "cpu_transpose_sme_const_half_output"
@@ -77,38 +80,22 @@ def full_input(code):
 @pytest.mark.parametrize("vl,svl", ((16, 16), (64, 16), (16, 32), (16, 64), (64, 64)))
 @pytest.mark.parametrize("source_pitch,output_pitch", ((131, 64), (-131, -64)))
 def test_named_pairs_use_captured_streaming_rows_and_constant_signed_addresses(vl, svl, source_pitch, output_pitch):
-  code = lower(template(source_pitch=source_pitch, output_pitch=output_pitch), vl=vl, svl=svl).source
-  body = full_input(code)
-  rows = svl // 4
-  assert "for (" not in body and "+=" not in body and "opt::first" not in body
-  assert "load_convert(" not in body and "load_hor<0>" not in body
-  assert re.findall(r"write_hor<0>\(std::uint32_t\{(\d+)\}", body) == list(map(str, range(rows)))
-  assert re.findall(r"input_origin_\d+ \+ std::int64_t\{(-?\d+)\}", body) == [
-    str(row * source_pitch) for row in range(rows)
-  ]
-  operations = [line for line in body.splitlines() if "vecops::vec::load(" in line or "write_hor<0>" in line]
-  assert ["load" if "vecops::vec::load(" in line else "write" for line in operations] == [
-    kind for _ in range(rows // 2) for kind in ("load", "load", "write", "write")
-  ]
-  assert re.search(rf"active_m_\d+ == \w+ && \w+ == \w+ && \w+ == {rows}\) {re.escape(MARKER)}", code)
-  assert "transpose_source_base_" in body and "dsl_c_parameter_" not in body
-  assert "/* overlapping operands */" in code and "/* unsupported strides: preserve gather/scatter */" in code
-  assert_no_vec_mask_arrays(code)
+  artifact = lower(template(source_pitch=source_pitch, output_pitch=output_pitch), vl=vl, svl=svl)
+  assert_static_pairs(artifact, "sme.load", svl // 4, source_pitch)
+  assert_no_vec_mask_arrays(artifact.source)
 
 
 @pytest.mark.parametrize("shape", (None, (63, 129)))
 @pytest.mark.parametrize("source_pitch,output_pitch", ((131, 64), (-131, -64)))
 def test_original_typed_input_and_output_fringe_are_retained(shape, source_pitch, output_pitch):
   kernel = template(source_pitch=source_pitch, output_pitch=output_pitch, shape=shape)
-  before, after = (lower(kernel, enabled=flag).source for flag in (False, True))
-  old_loads = [line.strip() for line in re.findall(r"[^\n]*load_hor<0>[^\n]*", before)]
-  new_loads = [line.strip() for line in re.findall(r"[^\n]*load_hor<0>[^\n]*", after)]
-  assert old_loads == new_loads and old_loads
-  tail = after[after.index(FRINGE) :]
-  assert "load_hor<0>" in tail and "opt::first" in tail
-  assert "/* full ZA output: constant F32-to-F16 addresses */" in before
-  assert "/* full ZA output: constant F32-to-F16 addresses */" in after
-  assert_no_vec_mask_arrays(after)
+  before, after = (lower(kernel, enabled=flag) for flag in (False, True))
+  branch = static_schedule(after, "sme.load")
+  operations = [node.operation for node in nodes(branch.otherwise) if isinstance(node, I.ArchitectureCall)]
+  assert "sme.load_hor" in operations
+  assert transpose_plan(before).sme_const_half_output_columns is not None
+  assert transpose_plan(after).sme_const_half_output_columns is not None
+  assert_no_vec_mask_arrays(after.source)
 
 
 @pytest.mark.parametrize("svl", (None, 0, True, 8, 15, 17, 128, 256, 272))
@@ -143,7 +130,7 @@ def test_default_boolean_and_independent_output_option_contract():
     kernel.ir, (), target="SME", options={"_vector_state": VectorState(16, 64), OUTPUT_OPTION: True}
   )
   assert default.source == lower(kernel, vl=16, enabled=True).source
-  assert MARKER in lower(kernel, vl=16, output=False).source
+  assert transpose_plan(lower(kernel, vl=16, output=False)).sme_const_half_full_input_rows == 16
   for value in (None, 0, 1, "true"):
     with pytest.raises(TypeError, match=OPTION + " must be bool"):
       lower(kernel, enabled=value)
@@ -155,13 +142,17 @@ def test_cost_profile_and_elementwise_expression_do_not_establish_input_legality
     lower(kernel, svl=None, cpu_cost_target="SME").source
     == lower(kernel, svl=None, enabled=False, cpu_cost_target="SME").source
   )
-  assert MARKER not in lower(kernel, target="AVX512", cpu_cost_target="SME").source
-  assert MARKER not in lower(template(transformed=True)).source
+  assert transpose_plan(lower(kernel, target="AVX512", cpu_cost_target="SME")).sme_const_half_full_input_rows is None
+  assert all(
+    plan.sme_const_half_full_input_rows is None
+    for plan in lower(template(transformed=True)).backend_ir.transposes.values()
+  )
 
 
 @pytest.mark.parametrize("source_pitch,output_pitch", ((131, 64), (-131, -64)))
 def test_historical_capture_protects_full_input_path_with_original_snapshot_guard(source_pitch, output_pitch):
-  code = lower(template(source_pitch=source_pitch, output_pitch=output_pitch, capture=True)).source
+  artifact = lower(template(source_pitch=source_pitch, output_pitch=output_pitch, capture=True))
+  code = artifact.source
   aliases = re.findall(r"const bool (dsl_c_alias_\d+) = ([^\n]+);", code)
   snapshots = re.findall(r"Buffer<float> (dsl_c_snapshot_\d+);", code)
   assert len(aliases) == len(snapshots) == 2
@@ -174,8 +165,9 @@ def test_historical_capture_protects_full_input_path_with_original_snapshot_guar
   copied = code[renewal : code.index(f"if ({output_alias}) /* overlapping operands */", renewal)]
   loads = [line for line in copied.splitlines() if "vecops::vec::load_convert(" in line]
   assert loads and all(saved_snapshot + ".data()" in line and saved_alias + " ?" in line for line in loads)
-  assert code.index(f"if ({output_alias}) /* overlapping operands */") < code.index(MARKER)
+  assert code.index(f"if ({output_alias}) /* overlapping operands */") < code.index("/* library instruction program */")
   assert output_snapshot + ".data()" in code[code.index("/* overlapping operands */", renewal) :]
+  assert_static_pairs(artifact, "sme.load", 16, source_pitch)
   assert_no_vec_mask_arrays(code)
 
 

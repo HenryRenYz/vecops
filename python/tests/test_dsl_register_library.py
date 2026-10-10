@@ -116,8 +116,8 @@ def test_products_share_one_prepared_packing_network(monkeypatch):
     C: T.Tensor((4, 4), dtype="float32", access="output"),
     D: T.Tensor((4, 4), dtype="float32", access="output"),
   ):
-    T.dot((T.load(A), T.load(B)), C, implementation="vector")
-    T.dot((T.load(B), T.load(A)), D, implementation="vector")
+    T.library.matmul((T.load(A), T.load(B)), C, implementation="vector")
+    T.library.matmul((T.load(B), T.load(A)), D, implementation="vector")
 
   prepared = CPUBackend().lower(kernel.ir, (), target="AVX512").backend_ir
   assert len(prepared.matmuls) == 2

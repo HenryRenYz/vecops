@@ -211,10 +211,6 @@ def main():
   parser.add_argument("--side", nargs="+", default=["A", "B"], choices=("A", "B"))
   parser.add_argument("--implementation", default="auto")
   parser.add_argument(
-    "--dsl-sme", action="store_true", help="Stage the experimental general SME transpose library driver"
-  )
-  parser.add_argument("--dsl-pack", action="store_true", help="Stage the experimental SME packing library driver")
-  parser.add_argument(
     "--shared-amx-cache", action="store_true", help="Measure the experimental shared AMX cache driver"
   )
   parser.add_argument("--target", default="Native")
@@ -300,12 +296,7 @@ def main():
   if not cases:
     parser.error("no original benchmark metadata selected")
   if args.emit:
-    selected = {
-      "transpose": ("cpu_transpose_sme_dsl", args.dsl_sme),
-      "packing": ("cpu_sme_packing_dsl", args.dsl_pack),
-      "matmul": ("cpu_amx_shared_cache_dispatch", args.shared_amx_cache),
-    }[args.operator]
-    options = {selected[0]: True} if selected[1] else None
+    options = {"cpu_amx_shared_cache_dispatch": True} if args.operator == "matmul" and args.shared_amx_cache else None
     records = []
     for case in cases:
       declaration, _ = prototype(case)

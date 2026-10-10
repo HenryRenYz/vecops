@@ -335,6 +335,12 @@ class Frontend(
         return self.helper(scope[0], node)
       if isinstance(function, Body):
         return self.helper(function, node)
+      from .helpers import ValueFunction
+
+      if isinstance(function, ValueFunction):
+        if node.keywords:
+          self.error(node, "staged value helpers require positional arguments")
+        return function.bind(tuple(self.value(self.expression(a), node) for a in node.args))
       if function in (Vector, ExecutionLayout):
 
         def descriptor_value(value):

@@ -395,14 +395,16 @@ def branch_bounds(condition, bounds, *, taken=True):
   return result
 
 
-def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constants=None):
+def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constants=None, _equalities=()):
   """Simplify integer addresses in a validated immutable structured region.
 
   This is an induction-domain optimization, not an operator-name pattern.
   It retains SSA references, execution order and payload types. An explicitly
   captured SVL may specialize native lengths; unknown/cross-target geometry
   retains native queries. Only literal SSA definitions are propagated, never
-  expanded runtime queries. Branch ranges stay lexical.
+  expanded runtime queries. Branch ranges and exact integer equality facts
+  stay lexical. A full clipped extent proved equal to a native width need not
+  reconstruct a tail mask at each instruction in that branch.
   Scopes have separate DAG memoization because an expression can be shared
   between loops with different induction domains.
   """
@@ -412,11 +414,42 @@ def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constan
   ):
     raise ValueError("captured streaming length must be a power of two between 16 and 256 bytes")
   constants = {} if _constants is None else dict(_constants)
+  equalities = tuple(_equalities)
   memo = {}
 
-  def nested(body, ranges, *, shadow=None):
+  def nested(body, ranges, *, shadow=None, facts=()):
     inherited = {name: value for name, value in constants.items() if name != shadow}
-    return simplify_loop_metadata(body, ranges, streaming_bytes=streaming_bytes, _constants=inherited)
+    known = tuple(pair for pair in equalities if shadow is None or not affine_contains(pair[0], {shadow}, {}))
+    return simplify_loop_metadata(
+      body, ranges, streaming_bytes=streaming_bytes, _constants=inherited, _equalities=(*known, *facts)
+    )
+
+  def edge_equalities(condition, taken=True):
+    from ..ir.traversal import walk_unique
+    from ..operations import current
+
+    if condition.op == "not":
+      return edge_equalities(condition.args[0], not taken)
+    if condition.op == ("and" if taken else "or"):
+      return tuple(pair for arg in condition.args for pair in edge_equalities(arg, taken))
+    if condition.op != ("eq" if taken else "ne"):
+      return ()
+    for expression, literal in (condition.args, condition.args[::-1]):
+      if (
+        type(I.constant(literal)) is int
+        and isinstance(expression.type, I.ScalarType)
+        and expression.type.dtype.startswith("int")
+        and isinstance(literal.type, I.ScalarType)
+        and literal.type.dtype.startswith("int")
+        and all(
+          isinstance(value.type, I.ScalarType)
+          and value.type.dtype in {"bool", "int32", "int64"}
+          and current().get(value).effects == "none"
+          for value in walk_unique(expression)
+        )
+      ):
+        return ((expression, I.literal(I.constant(literal), expression.type.dtype)),)
+    return ()
 
   def visit(value):
     if isinstance(value, I.For):
@@ -441,8 +474,10 @@ def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constan
       return replace(
         value,
         condition=condition,
-        body=nested(value.body, branch_bounds(condition, bounds)),
-        otherwise=nested(value.otherwise, branch_bounds(condition, bounds, taken=False)),
+        body=nested(value.body, branch_bounds(condition, bounds), facts=edge_equalities(condition)),
+        otherwise=nested(
+          value.otherwise, branch_bounds(condition, bounds, taken=False), facts=edge_equalities(condition, False)
+        ),
       )
     if isinstance(value, I.Assign):
       changed = replace(value, value=visit(value.value))
@@ -464,9 +499,11 @@ def simplify_loop_metadata(block, bounds=None, *, streaming_bytes=None, _constan
             from ..dtypes import ELEMENT_BYTES
 
             changed = I.literal(streaming_bytes // ELEMENT_BYTES[changed.data])
-        memo[id(value)] = (
-          canonical_integer(simplify_ordered(changed, bounds)) if isinstance(changed, I.Expr) else changed
-        )
+        if isinstance(changed, I.Expr):
+          changed = canonical_integer(simplify_ordered(changed, bounds))
+          if isinstance(changed.type, I.ScalarType) and changed.type.dtype.startswith("int"):
+            changed = next((literal for expression, literal in equalities if I.same_expr(changed, expression)), changed)
+        memo[id(value)] = changed
       return memo[id(value)]
     return value
 

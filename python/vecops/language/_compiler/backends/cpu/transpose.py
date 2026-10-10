@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
 
 from ... import ir as I
-from ...analysis.affine import simplify_loop_metadata
+from ...analysis.affine import bind_instruction_metadata, simplify_loop_metadata
 from ...dtypes import ELEMENT_BYTES
 from ...frontend.helpers import expand_helper
 from ...ir.traversal import walk
@@ -308,10 +308,7 @@ def plan_transpose(statement, options=None):
       constant_half_full_input_rows(compute, destination, options) if simple and static_input else None
     ),
   )
-  staged = options.get("cpu_transpose_sme_dsl", False)
-  if not isinstance(staged, bool):
-    raise TypeError("cpu_transpose_sme_dsl must be bool")
-  if staged and simple:
+  if simple:
     from ....sme import _transpose_scheduled_matrix
 
     dynamic_unroll = options.get("cpu_transpose_sme_dynamic_unroll", False)
@@ -363,7 +360,15 @@ def plan_transpose(statement, options=None):
       },
       hardware_kind="sme",
     )
-    plan = replace(plan, sme_program=simplify_loop_metadata(I.Block(body)))
+    streaming_bytes = None if environment is None else environment.vector_state.sme_bytes
+    if type(streaming_bytes) is not int or not 16 <= streaming_bytes <= 256 or streaming_bytes & (streaming_bytes - 1):
+      streaming_bytes = None
+    plan = replace(
+      plan,
+      sme_program=bind_instruction_metadata(
+        simplify_loop_metadata(I.Block(body), streaming_bytes=streaming_bytes), prefix="sme_library_metadata"
+      ),
+    )
   return plan
 
 

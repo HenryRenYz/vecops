@@ -49,7 +49,7 @@ def test_vector_dot_uses_standard_register_state_and_fma_not_opaque_matmul():
   assert_no_vec_mask_arrays(source)
 
 
-def dot_template(*, columns=8, k=17, historical=False, packed=False, affine=True):
+def dot_template(*, columns=8, k=17, historical=False, packed=False, affine=True, implementation="vector"):
   @T.template
   def kernel(
     A: T.Tensor((4, k), dtype="float32", access="inout"),
@@ -66,35 +66,135 @@ def dot_template(*, columns=8, k=17, historical=False, packed=False, affine=True
       b = T.pack(B, side="B", format="dense")
     else:
       b = T.load(B)
-    result = T.dot((a, b), C, acc=T.load(D), acc_dtype="float32", implementation="vector")
+    result = T.dot((a, b), C, acc=T.load(D), acc_dtype="float32", implementation=implementation)
     T.store(C, T.max(result * 0.5 + 1, 0))
 
   return kernel
 
 
-def test_opt_in_dot_dispatch_stages_recipe_before_vector_lowering():
+def test_default_dot_dispatch_stages_recipe_before_vector_lowering():
   backend = CPUBackend()
-  legacy = backend.lower(dot_template().ir, (), target="AVX512")
-  assert legacy.backend_ir.matmuls
-  staged = backend.lower(dot_template().ir, (), target="AVX512", options={"cpu_vector_dot_dsl": True})
+  staged = backend.lower(dot_template().ir, (), target="AVX512")
   assert not staged.backend_ir.matmuls
   assert staged.backend_ir.states and all(plan.pieces for plan in staged.backend_ir.states.values())
   assert "cpu-expand-dot-recipes" in staged.lowered.kernel.pass_trace
   assert "staged 1 vector dot" in "\n".join(staged.lowered.kernel.diagnostics)
   assert_no_vec_mask_arrays(staged.source)
-  # An unmeasured geometry or packed input keeps the existing family.
-  for kernel in (dot_template(columns=19), dot_template(packed=True)):
-    fallback = backend.lower(kernel.ir, (), target="AVX512", options={"cpu_vector_dot_dsl": True})
-    assert fallback.backend_ir.matmuls
+  # Larger output rows use the streaming source recipe; packed input still
+  # requires the separate ABI-checked family.
+  streaming = backend.lower(dot_template(columns=19).ir, (), target="AVX512")
+  assert not streaming.backend_ir.matmuls and streaming.backend_ir.states
+  fallback = backend.lower(dot_template(packed=True).ir, (), target="AVX512")
+  assert fallback.backend_ir.matmuls
+
+
+def test_automatic_small_x86_dot_uses_recipe_without_changing_sme_selection():
+  kernel = dot_template(implementation="auto")
+  x86 = CPUBackend().lower(kernel.ir, (), target="AVX512")
+  arm = CPUBackend().lower(kernel.ir, (), target="SME")
+  assert not x86.backend_ir.matmuls and x86.backend_ir.states
+  assert arm.backend_ir.matmuls
+  assert_no_vec_mask_arrays(x86.source)
+
+
+def streaming_template(*, historical=False, scalar_seed=False):
+  m, n, k = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.func
+  def affine(value):
+    return value * 2 + 1
+
+  @T.func
+  def finish(value, bias):
+    return T.max(value * 0.5 + bias, 0)
+
+  @T.template
+  def kernel(
+    A: T.Tensor((m, k), (T.dynamic(), T.dynamic()), "float32", access="inout"),
+    B: T.Tensor((k, n), (T.dynamic(), T.dynamic()), "float32"),
+    D: T.Tensor((1, n), (T.dynamic(), 1), "float32"),
+    C: T.Tensor((m, n), (T.dynamic(), T.dynamic()), "float32", access="output"),
+  ):
+    a = affine(T.load(A))
+    if historical:
+      T.store(A, 99)
+    seed = 2.0 if scalar_seed else T.load(D)
+    result = T.dot((a, T.load(B)), C, acc=seed, implementation="vector")
+    T.store(C, finish(result, T.load(D)))
+
+  return kernel
+
+
+@pytest.mark.parametrize("historical,scalar_seed", [(False, False), (True, False), (False, True)])
+def test_streaming_dot_has_source_control_and_fused_value_helper(historical, scalar_seed):
+  artifact = CPUBackend().lower(
+    streaming_template(historical=historical, scalar_seed=scalar_seed).ir, (), target="AVX512"
+  )
+  assert not artifact.backend_ir.matmuls
+  assert artifact.backend_ir.states and all(plan.pieces for plan in artifact.backend_ir.states.values())
+  assert "vecops::vec::fmadd" in artifact.source
+  assert "private scalar scratch" not in "\n".join(artifact.lowered.kernel.diagnostics)
+  assert_no_vec_mask_arrays(artifact.source)
+
+
+@pytest.mark.parametrize("historical,scalar_seed", [(False, False), (True, False), (False, True)])
+def test_native_streaming_dot_strides_aliases_and_broadcast_epilogue(historical, scalar_seed, tmp_path):
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(streaming_template(historical=historical, scalar_seed=scalar_seed), compiler=compiler)
+  for m, n, k in [(0, 19, 17), (7, 0, 17), (7, 19, 0), (1, 1, 17), (3, 8, 17), (7, 19, 17), (7, 257, 17)]:
+    for reverse in (False, True):
+      a = (np.arange(m * k, dtype=np.float32).reshape(m, k) % 7) / 16
+      b = (np.arange(k * n, dtype=np.float32).reshape(k, n) % 11) / 16
+      if reverse:
+        a, b = a[::-1, ::-1], b[::-1, ::-1]
+      bias = np.arange(n, dtype=np.float32).reshape(1, n) / 16
+      expected = np.maximum(((a * 2 + 1) @ b + (2.0 if scalar_seed else bias)) * 0.5 + bias, 0)
+      raw = np.full((m + 2, n + 3), -17, dtype=np.float32)
+      output = raw[1 : m + 1, 1 : n + 1]
+      if reverse:
+        output = output[::-1, ::-1]
+      compiled.operator.native(a, b, bias, output, **compiled._core.specialization_values)
+      np.testing.assert_array_equal(output, expected)
+      np.testing.assert_array_equal(raw[[0, -1]], -17)
+      np.testing.assert_array_equal(raw[:, [0, -1]], -17)
+      if historical:
+        np.testing.assert_array_equal(a, np.full(a.shape, 99, np.float32))
+  if not historical:
+    # Whole producer snapshots must survive a writeback through another ABI
+    # parameter, including a broadcast epilogue that aliases the first row.
+    for aliased_bias in (False, True):
+      a = (np.arange(7 * 23, dtype=np.float32).reshape(7, 23) % 7) / 16
+      b = (np.arange(23 * 19, dtype=np.float32).reshape(23, 19) % 11) / 16
+      output = a[:, :19]
+      bias = output[:1] if aliased_bias else np.arange(19, dtype=np.float32).reshape(1, 19) / 16
+      seed = 2.0 if scalar_seed else bias.copy()
+      expected = np.maximum(((a.copy() * 2 + 1) @ b + seed) * 0.5 + bias.copy(), 0)
+      compiled.operator.native(a, b, bias, output, **compiled._core.specialization_values)
+      np.testing.assert_array_equal(output, expected)
+
+
+def test_staged_value_helper_retains_original_read_identity():
+  from vecops.language._compiler import ir as I
+  from vecops.language._compiler.frontend.helpers import ValueFunction
+
+  extent = I.Expr(I.ScalarType("int64"), "region_argument")
+  parameter = I.Expr(I.VectorType("float32", (extent,)), "region_argument")
+  view = I.View("original", "float32", (I.literal(1),), (I.literal(1),), I.literal(0))
+  read = I.Expr(I.TileType("float32", view.shape), "load", data=view)
+  function = ValueFunction((parameter,), I.binary("add", parameter, read))
+  actual = I.Expr(I.VectorType("float32", (I.literal(7),)), "register_input")
+  result = function.bind((actual,))
+  assert result.args == (actual, read)
+  assert I.constant(result.type.shape[0]) == 7
 
 
 @pytest.mark.parametrize("k,historical", [(0, False), (17, False), (17, True)])
-def test_native_dot_recipe_dispatch_broadcast_seed_and_history(k, historical, tmp_path):
+@pytest.mark.parametrize("implementation", ["auto", "vector"])
+def test_native_dot_recipe_dispatch_broadcast_seed_and_history(k, historical, implementation, tmp_path):
   compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
-  compiled = T.compile(
-    dot_template(k=k, historical=historical), compiler=compiler, pass_options={"cpu_vector_dot_dsl": True}
-  )
-  assert "vector outer-product family" not in compiled.generated_source
+  compiled = T.compile(dot_template(k=k, historical=historical, implementation=implementation), compiler=compiler)
+  if implementation == "vector" or os.uname().machine.lower() in {"x86_64", "amd64"}:
+    assert "vector outer-product family" not in compiled.generated_source
   a = np.arange(4 * k, dtype=np.float32).reshape(4, k) / 16
   b = np.arange(k * 8, dtype=np.float32).reshape(k, 8) / 16
   seed = np.arange(8, dtype=np.float32).reshape(1, 8) / 16
@@ -149,7 +249,6 @@ def test_vector_dot_arm_cross_has_register_fma_loop(vl, affine, staged, tmp_path
     options={
       "cpu_ordered_loop_unroll": True,
       "cpu_state_vector_reuse": True,
-      "cpu_vector_dot_dsl": staged,
       "_vector_state": VectorState(vl, None),
     },
   )

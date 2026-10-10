@@ -124,6 +124,7 @@ define("lanes", "shape", T.CSE | T.POSITIVE_EXTENT)
 define("streaming_lanes", "shape", T.CSE | T.POSITIVE_EXTENT)
 define("vector_ref", "reference", T.REFERENCE | T.TRANSPOSE_STREAMABLE)
 define("state_ref", "reference", T.STATE_REFERENCE | T.VECTOR_BOUNDARY, effects="read")
+define("cached_value", "reference", T.REFERENCE | T.VECTOR_BOUNDARY)
 define("grid", "control", T.NONE, effects="state", keywords=("schedule", "chunk", "parallel"))
 define("wordwise_math", "math", ELEMENTWISE)
 for name in ("add", "min", "max"):

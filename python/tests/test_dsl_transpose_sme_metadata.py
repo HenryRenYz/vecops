@@ -122,9 +122,11 @@ def test_transpose_owner_snapshots_exact_geometry_before_za_loops(source, output
   reads = [line for line in loops.splitlines() if "load_hor<" in line or "load_convert(" in line]
   writes = [line for line in loops.splitlines() if "store_ver<" in line or "store_convert(" in line]
   assert reads and writes
-  assert all("transpose_source_base_" in line for line in reads)
-  assert all("transpose_target_base_" in line for line in writes)
-  assert "vecops::vec::sme::streaming_lanes" in body
+  input_pointer = re.search(r"auto\* const (\w+) = dsl_c_transpose_source_base_\d+;", body)[1]
+  output_pointer = re.search(r"auto\* const (\w+) = dsl_c_transpose_target_base_\d+;", body)[1]
+  assert all(input_pointer in line for line in reads)
+  assert all(output_pointer in line for line in writes)
+  assert f"std::int64_t{{{svl // (8 if compute == 'float64' else 4)}}}" in body
   assert "vecops_dsl::vector_size" not in body  # Never substitute ordinary VL.
   assert "/* overlapping operands */" in artifact.source
   assert "/* unsupported strides: preserve gather/scatter */" in artifact.source

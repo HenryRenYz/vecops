@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
-"""Compare the source-level FMA recipe with the existing vector dot family.
+"""Compare direct source-level FMA helpers with automatic DSL dot dispatch.
 
 Both generated sources use one frozen package/SDK, explicit vector lowering,
 identical inputs and epilogues. This is not a matrix-instruction benchmark or
@@ -117,7 +117,7 @@ def main():
         kernel = T.compile(
           make_template(T, recipe_function, shape, dtype, pipeline, recipe=recipe, streaming=args.streaming),
           compiler=compiler,
-          pass_options={"cpu_ordered_loop_unroll": recipe, "cpu_state_vector_reuse": recipe},
+          pass_options={"cpu_ordered_loop_unroll": True, "cpu_state_vector_reuse": True},
         )
         source = kernel.generated_source
         digest = hashlib.sha256(source.encode()).hexdigest()
@@ -165,11 +165,11 @@ def main():
         "sources": sources,
         "repeat": repeats,
         "median_ns": medians,
-        "recipe_over_legacy": medians[1] / medians[0],
+        "helper_over_dispatch": medians[1] / medians[0],
         "raw": raw,
       }
       rows.append(row)
-      print(shape, dtype, pipeline, row["recipe_over_legacy"], flush=True)
+      print(shape, dtype, pipeline, row["helper_over_dispatch"], flush=True)
   (output / "results.json").write_text(
     json.dumps(
       {

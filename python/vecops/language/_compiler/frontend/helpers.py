@@ -3,10 +3,65 @@
 """Source-parsed T.func binding, typed results and lexical helper exits."""
 
 import ast
+from dataclasses import dataclass, fields, replace
 
 from .. import ir as I
 from ..operations import Trait
 from .control import helper_returns
+
+
+@dataclass(frozen=True)
+class ValueFunction:
+  """Compiler-staged pure value helper, with no executable host callback.
+
+  This bridges a caller's already captured DAG into a source-parsed library
+  algorithm. Substitution retains untouched read identities and binds formal
+  shape variables to actual vector prefixes. It does not print native code.
+  """
+
+  parameters: tuple
+  result: I.Expr
+
+  def bind(self, arguments):
+    if len(arguments) != len(self.parameters):
+      raise TypeError("value helper argument count mismatch")
+    replacements = {}
+    for parameter, argument in zip(self.parameters, arguments):
+      if not isinstance(argument, I.Expr) or parameter.type.dtype != argument.type.dtype:
+        raise TypeError("value helper argument dtype mismatch")
+      replacements[id(parameter)] = argument
+      if isinstance(parameter.type, I.TileType):
+        if (
+          not isinstance(argument.type, I.TileType)
+          or parameter.type.mask != argument.type.mask
+          or len(parameter.type.shape) != len(argument.type.shape)
+        ):
+          raise TypeError("value helper argument rank mismatch")
+        replacements.update((id(a), b) for a, b in zip(parameter.type.shape, argument.type.shape))
+        if isinstance(parameter.type, I.VectorType) and isinstance(argument.type, I.VectorType):
+          replacements[id(parameter.type.tag)] = argument.type.tag
+      elif not isinstance(argument.type, I.ScalarType):
+        raise TypeError("value helper requires a scalar argument")
+    memo = {}
+
+    def visit(value):
+      if id(value) in replacements:
+        return replacements[id(value)]
+      if isinstance(value, tuple):
+        changed = tuple(map(visit, value))
+        return value if all(a is b for a, b in zip(changed, value)) else changed
+      if isinstance(value, I.Node):
+        if id(value) not in memo:
+          changes = {field.name: visit(getattr(value, field.name)) for field in fields(value)}
+          memo[id(value)] = (
+            value
+            if all(changed is getattr(value, name) for name, changed in changes.items())
+            else replace(value, **changes)
+          )
+        return memo[id(value)]
+      return value
+
+    return visit(self.result)
 
 
 class HelperFrontend:

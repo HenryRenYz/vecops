@@ -50,9 +50,7 @@ def packing_template(dtype):
 
 @pytest.mark.parametrize("dtype", ["uint8", "float16", "float32", "float64"])
 def test_sme_packing_fringe_is_library_control_with_small_bit_primitives(dtype):
-  source = (
-    CPUBackend().lower(packing_template(dtype).ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
-  )
+  source = CPUBackend().lower(packing_template(dtype).ir, (), target="SME").source
   assert "sme_packing_" + dtype + "_" in source
   assert "streaming_bits_mask" in source and "vecops::vec::bitcast" in source
   assert "vecops::vec::sme::read_ver<0>" in source
@@ -306,7 +304,7 @@ def test_native_sme_library_pack_bits_pitches_tails_and_empty(dtype, side, const
     T.pack(A, O, side=side, format="sme")
 
   compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
-  compiled = T.compile(kernel, compiler=compiler, pass_options={"cpu_sme_packing_dsl": True})
+  compiled = T.compile(kernel, compiler=compiler)
   assert "sme_packing_metadata_" + dtype in compiled.generated_source
   bits_dtype = np.dtype(f"uint{size * 8}")
   cases = (
@@ -359,9 +357,7 @@ def test_sme_packing_arm_cross_codegen(dtype, svl, tmp_path):
   if not clang or not sysroot:
     pytest.skip("set VECOPS_TEST_ARM_CROSS_CLANG/SYSROOT for real FA64 codegen")
   root = Path(__file__).resolve().parents[2]
-  source = (
-    CPUBackend().lower(packing_template(dtype).ir, (), target="SME", options={"cpu_sme_packing_dsl": True}).source
-  )
+  source = CPUBackend().lower(packing_template(dtype).ir, (), target="SME").source
   element = CPP_TYPES[dtype]
   wrapper = (
     '#include "vecops/Kernel.h"\n'

@@ -67,6 +67,37 @@ def test_disjunction_and_floating_comparison_do_not_invent_integer_facts():
   assert branch_bounds(I.binary("lt", floating, I.literal(4.0)), bounds) is bounds
 
 
+@pytest.mark.parametrize("operation", ("eq", "ne"))
+def test_exact_clipped_extent_facts_are_branch_local(operation):
+  extent = I.binary("max", I.literal(0), I.binary("min", I.literal(16), local("length")))
+  condition = I.binary(operation, extent, I.literal(16))
+  payload = I.Block([I.Assign("active", extent)])
+  optimized = simplify_loop_metadata(I.Block([I.If(condition, payload, payload), I.Assign("after", extent)]))
+  branch, after = optimized.statements
+  selected, other = (branch.body, branch.otherwise) if operation == "eq" else (branch.otherwise, branch.body)
+  assert I.constant(selected.statements[0].value) == 16
+  assert I.constant(other.statements[0].value) is None
+  assert I.constant(after.value) is None
+
+
+def test_exact_equality_does_not_fold_floating_or_disjunctive_payloads():
+  value = I.Expr(I.ScalarType("float32"), "local", data="value")
+  condition = I.binary("eq", value, I.literal(1.0))
+  result = simplify_loop_metadata(I.Block([I.If(condition, I.Block([I.Assign("copy", value)]), I.Block([]))]))
+  assert result.statements[0].body.statements[0].value.op == "local"
+  width = I.binary("min", local("n"), I.literal(16))
+  condition = I.binary("or", I.binary("eq", width, I.literal(16)), I.binary("eq", local("flag"), I.literal(1)))
+  result = simplify_loop_metadata(I.Block([I.If(condition, I.Block([I.Assign("copy", width)]), I.Block([]))]))
+  assert I.constant(result.statements[0].body.statements[0].value) is None
+
+
+def test_exact_equality_does_not_substitute_an_opaque_integer_read():
+  read = I.Expr(I.ScalarType("int64"), "unknown_read")
+  condition = I.binary("eq", read, I.literal(16))
+  result = simplify_loop_metadata(I.Block([I.If(condition, I.Block([I.Assign("copy", read)]), I.Block([]))]))
+  assert result.statements[0].body.statements[0].value.op == "unknown_read"
+
+
 def test_branch_and_loop_scopes_do_not_capture_outer_literal_bindings():
   program = I.Block(
     [
