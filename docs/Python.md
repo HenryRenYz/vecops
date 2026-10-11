@@ -1925,6 +1925,31 @@ accumulators and pointwise producer/epilogue DAGs. Packing and fringes remain
 source algorithms; the terminal instruction printer owns no matrix/cache loop.
 Raw first-sink FP32/FP64 SME products retain strided reads and masked direct ZA
 stores; more general products preserve captured reads through private staging.
+SME native operands use the public panel-major packed layout, constructed by
+ZA storage-word transposes from logical producers. Complete spatial panels with K-contiguous raw views skip the intermediate
+dense copy; transformed, spatial-fringe or other-stride producers first
+materialize their logical domain. Private storage rounds K to complete
+streaming chunks for bounded access proofs; MOPA consumes only the logical
+K groups, and no producer is evaluated at a padded index. Checked external
+SME packed A/B and AMX packed A/B are read directly when K contains complete instruction groups.
+Fractional K still decodes and zero-pads privately, so external padding is not
+a numerical promise. SME I16/I64 retains its separate four-halfword layout:
+the public I16 packed ABI uses two halfwords per dword and is not compatible.
+The default resident library Matmul leaf preserves these direct-input paths;
+explicit cache phases use logical slices and preserve the initializer/epilogue
+once across all K phases. Native epilogues project over a whole logical row,
+letting ordinary vector legalization share layout checks and batch vector
+words instead of rebuilding a one-word scatter traversal for every word.
+SME callbacks snapshot invariant pointers and integer metadata into local SSA
+values after preflight, so instruction memory clobbers do not reload captured
+descriptors inside K loops. Buffers may resize before ownership; their addresses
+are never cached across region invocations. Default cache panels reuse multiple
+register tiles within an L2 budget; explicit BM/BN/BK values remain exact.
+Moderate raw FP64 problems whose outputs fit half of L2 and whose inputs fit
+twice L2 use one strided resident leaf instead of repeated cache-panel packing.
+Pointwise epilogue loads retain their capture at the original whole-matrix
+store, including inline broadcast reads that alias an output row; row-wise
+stores cannot substitute values already overwritten by an earlier row.
 Availability guards retain vector fallbacks for automatic selection and reject
 unavailable explicit instruction families. Low-level `T.amx`/`T.sme` APIs remain
 available; public C++ operators are unchanged. Performance parity is measured

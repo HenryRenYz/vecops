@@ -190,3 +190,19 @@ def test_new_abi_metadata_remains_outer_to_existing_induction_bounds():
 def test_invalid_captured_streaming_length_is_rejected(svl):
   with pytest.raises(ValueError, match="streaming length"):
     simplify_loop_metadata(I.Block([]), streaming_bytes=svl)
+
+
+def test_overflow_guards_do_not_create_unrepresentable_metadata_literals():
+  from vecops.language._compiler.ir.traversal import walk_unique
+
+  maximum = (1 << 63) - 1
+  interpreter = Interpreter(I.KernelIR(I.Block([]), {}, {}), {})
+  width = I.Expr(I.ScalarType("int64"), "raw", data="streaming.width")
+  for factor in (1, 2):
+    padding = I.binary("sub", I.binary("mul", I.literal(factor), width), I.literal(1))
+    guarded_limit = canonical_integer(I.binary("sub", I.literal(maximum), padding))
+    assert all(-(1 << 63) <= value.data <= maximum for value in walk_unique(guarded_limit)
+               if value.op == "literal" and type(value.data) is int)
+    for lanes in (8, 16, 32, 64, 256):
+      interpreter.environment["streaming.width"] = lanes
+      assert interpreter.value(guarded_limit) == maximum - (factor * lanes - 1)

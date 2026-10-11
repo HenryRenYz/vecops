@@ -75,7 +75,8 @@ def test_owned_hardware_view_and_immutable_metadata():
   source = CPUBackend().lower(kernel.ir, (), target="AVX512").source
   assert ".with_configuration(" in source
   assert "#pragma GCC unroll 1" in source
-  assert "hardware view index is outside" in source
+  # Constant trip/layout intervals already prove the indexed accesses.
+  assert "hardware view index is outside" not in source
 
 
 def test_hardware_square_transpose_loops_are_not_fused():
@@ -626,8 +627,6 @@ def test_sme_rank_one_store_retains_preflight_and_write_effect():
   source = artifact.source
   owner = source.index(".with_resources(")
   for message in (
-    "hardware view index is outside its tensor",
-    "SME operand must have unit column stride",
     "SME operand must fit one streaming word/tile",
     "SME ZA slice index is outside its streaming tile",
   ):

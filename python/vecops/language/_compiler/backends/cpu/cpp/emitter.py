@@ -66,6 +66,7 @@ class CPUEmitter(
     self.materialized = {}
     self.reduction_materialized = {}
     self.hardware_scope = None
+    self.hardware_scalar_bindings = {}
     self.uses_streaming_math_policy = False
     self.buffer_declarations = {}
     self.parallel_depth = 0

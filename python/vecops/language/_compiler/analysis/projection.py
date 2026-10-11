@@ -13,7 +13,7 @@ from .. import ir as I
 
 
 def pointwise_row_projection(value, boundary, reference, row, column, extent, catalog):
-  """Project a pointwise caller DAG onto a register row without new reads.
+  """Project a pointwise caller DAG onto a logical/register row without new reads.
 
   Shape-changing/stateful boundaries are deliberately rejected. Loads retain
   their original identity behind ordinary value windows, so the standard alias
@@ -35,7 +35,8 @@ def pointwise_row_projection(value, boundary, reference, row, column, extent, ca
     if not 1 <= len(shape) <= 2:
       raise TypeError("pointwise row projection requires rank-one/two operands")
     width = I.literal(1) if I.constant(shape[-1]) == 1 else extent
-    typ = I.VectorType(value.type.dtype, (width,), value.type.mask, reference.type.tag)
+    typ = (I.VectorType(value.type.dtype, (width,), value.type.mask, reference.type.tag)
+           if isinstance(reference.type, I.VectorType) else I.TileType(value.type.dtype, (width,), value.type.mask))
     if catalog.has(value, Trait.MEMORY_READ):
       if value.op != "load":
         raise TypeError("opaque memory projection is unsupported")

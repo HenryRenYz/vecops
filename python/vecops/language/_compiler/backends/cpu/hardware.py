@@ -37,7 +37,13 @@ def preflight(region, catalog=None):
     return result
 
   def require(condition, active, message):
-    checks.append((I.binary("or", I.Expr(I.ScalarType("bool"), "not", (active,)), condition), message))
+    # Static layout/width facts need no runtime branch. Keep every unproved
+    # access check outside ownership, including checks for captured strides.
+    if trivial_true(condition):
+      return
+    check = (I.binary("or", I.Expr(I.ScalarType("bool"), "not", (active,)), condition), message)
+    if check not in checks:
+      checks.append(check)
 
   def shape_interval(view, axis, bounds):
     root = view.region.axes[axis] if view.region is not None else None

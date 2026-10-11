@@ -11,9 +11,10 @@ rank-three Matmul rather than a per-batch rewrite. The DSL rank-three wrapper
 records serial versus shared-B folding; it is not a native T.grid claim.
 "raw" describes the supplied input layout, not a ban on the public C++
 operator's internal automatic packing. In particular, unbounded Dynamic SME
-inputs may be packed by the C++ reference inside the timed call. T.dot does
-not add automatic packing, whereas T.library.matmul may do so. Raw dot versus
-public Matmul ratios therefore need separate algorithm/path interpretation.
+inputs may be packed by the C++ reference inside the timed call. Native T.dot
+prepares instruction-required layouts; T.library.matmul additionally selects
+cache phases and optional dense caches. Raw dot versus public Matmul ratios
+therefore need separate algorithm/path interpretation.
 
 Use --list to audit, --cohort to schedule whole cohorts, or --chunk-size and
 --chunk-index for bounded build graphs. No default FLOP/shape cap applies.
@@ -525,6 +526,7 @@ def main(argv=None):
   parser.add_argument("--mode", nargs="+", choices=("Const", "Dynamic"), default=["Const", "Dynamic"])
   parser.add_argument("--level", nargs="+", choices=("dot", "matmul"), default=["matmul"])
   parser.add_argument("--native", nargs="+")
+  parser.add_argument("--pipeline", nargs="+", choices=OUTPUTS)
   parser.add_argument("--shape", nargs="+")
   parser.add_argument("--packing", nargs="+", choices=PACKING)
   parser.add_argument("--batch-strategy", choices=("auto", "serial"), default="auto")
@@ -565,6 +567,11 @@ def main(argv=None):
     shapes=args.shape,
     packing=args.packing,
   )
+  if args.pipeline:
+    selected = tuple(s for s in selected if s.case.output_pipeline in args.pipeline)
+    missing = set(args.pipeline) - {s.case.output_pipeline for s in selected}
+    if missing:
+      raise ValueError(f"requested pipelines have no matching source executions: {sorted(missing)}")
   chunks = [selected[start : start + args.chunk_size] for start in range(0, len(selected), args.chunk_size)]
   if args.chunk_index is not None and args.chunk_index >= len(chunks):
     raise ValueError(f"chunk index exceeds {len(chunks)} selected chunks")
@@ -579,6 +586,7 @@ def main(argv=None):
     selected_execution_ids=[s.execution_id for chunk in chosen for s in chunk],
     requested_execution_ids=[s.execution_id for s in selected],
     results={},
+    artifact_sources={},
     executed=False,
     completed=0,
     failures=0,
@@ -676,6 +684,11 @@ def main(argv=None):
               for kernel in pair:
                 kernel.operator(*source_metadata(scenario), 1, **kernel._core.specialization_values)
             prepared.append((scenario, pairs))
+            audit["artifact_sources"][scenario.execution_id] = {
+              ("pack_" if index else "") + role: str(kernel.source)
+              for index, pair in enumerate(pairs)
+              for role, kernel in zip(("dsl", "cpp"), pair)
+            }
         vecops.compile_batch(collector.requests, parallelism=args.jobs, execution_parallelism=1)
       except Exception as error:  # noqa: BLE001 -- retain unexpected compiler failures in the complete ledger
         for scenario in chunk:

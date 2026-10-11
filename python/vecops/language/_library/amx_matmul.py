@@ -14,6 +14,15 @@ from .registers import transpose_dwords_512
 
 
 @T.func
+def _load_a(a, tile, mi, ki, kr):
+  if len(a.shape) == 4:
+    value = amx.load(tile, a[mi // 16, ki, :, :])
+  else:
+    value = amx.load(tile, a[mi:mi + 16, ki * kr:ki * kr + kr])
+  return value
+
+
+@T.func
 def _tiles(a, b, output, *, initial, kr):
   if output.shape[0] % 32 == 0 and output.shape[1] % 32 == 0:
     _tiles_2x2(a, b, output, initial=initial, kr=kr)
@@ -38,9 +47,9 @@ def _tiles_2x2(a, b, output, *, initial, kr):
           c1 = amx.zero(1, dtype=output.dtype)
           c2 = amx.zero(2, dtype=output.dtype)
           c3 = amx.zero(3, dtype=output.dtype)
-        for ki in T.serial(a.shape[1] // kr, unroll=2):
-          a0 = amx.load(4, a[mi * 32:mi * 32 + 16, ki * kr:ki * kr + kr])
-          a1 = amx.load(5, a[mi * 32 + 16:mi * 32 + 32, ki * kr:ki * kr + kr])
+        for ki in T.serial(b.shape[1], unroll=2):
+          a0 = _load_a(a, 4, mi * 32, ki, kr)
+          a1 = _load_a(a, 5, mi * 32 + 16, ki, kr)
           b0 = amx.load(6, b[ni * 2, ki, :, :])
           b1 = amx.load(7, b[ni * 2 + 1, ki, :, :])
           amx.tdp(c0, a0, b0)
@@ -62,15 +71,16 @@ def _tiles_1x1(a, b, output, *, initial, kr):
           accumulator = amx.load(0, output[mi * 16:mi * 16 + 16, ni * 16:ni * 16 + 16])
         else:
           accumulator = amx.zero(0, dtype=output.dtype)
-        for ki in T.serial(a.shape[1] // kr, unroll=2):
-          left = amx.load(1, a[mi * 16:mi * 16 + 16, ki * kr:ki * kr + kr])
+        for ki in T.serial(b.shape[1], unroll=2):
+          left = _load_a(a, 1, mi * 16, ki, kr)
           right = amx.load(2, b[ni, ki, :, :])
           amx.tdp(accumulator, left, right)
         amx.store(accumulator, output[mi * 16:mi * 16 + 16, ni * 16:ni * 16 + 16])
 
 
 @T.func
-def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, raw_a=None, packed_b=None):
+def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, raw_a=None, raw_b=None,
+             packed_a=None, packed_b=None):
   a, b = inputs
   a, b = T.as_value(a), T.as_value(b)
   m, n, k = a.shape[0], b.shape[1], a.shape[1]
@@ -86,20 +96,21 @@ def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, ra
       if k % kr == 0:
         count = np * kp
         panels = T.reshape(packed_b[:count], (np // 16, kp // kr, 16, 16 * group))
-        _input_a(a, raw_a, panels, output, acc, acc_dtype, epilogue, mp, np, kp, kr)
+        _input_a(a, raw_a, panels, output, acc, acc_dtype, epilogue, mp, np, kp, kr, packed_a)
       else:
-        _input_b(a, b, raw_a, output, acc, acc_dtype, epilogue, mp, np, kp, kr, group)
+        _input_b(a, b, raw_a, output, acc, acc_dtype, epilogue, mp, np, kp, kr, group, packed_a)
     else:
-      _input_b(a, b, raw_a, output, acc, acc_dtype, epilogue, mp, np, kp, kr, group)
+      _input_b(a, b, raw_a, output, acc, acc_dtype, epilogue, mp, np, kp, kr, group, packed_a)
 
 
 @T.func
-def _input_b(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group):
+def _input_b(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
   # Reinterpret each spatial row's K groups as 16 dwords, then transpose
   # sixteen registers. This is the historical DSL/C++ AMX packing schedule:
   # ordinary rank-three reshape/transpose falls back to costly scalar gathers.
   dense = T.alloc((np, kp), dtype=b.dtype)
-  T.store(dense, T.zeros(dense.shape, dtype=b.dtype))
+  if b.shape[1] != np or b.shape[0] != kp:
+    T.store(dense, T.zeros(dense.shape, dtype=b.dtype))
   T.store(dense[:b.shape[1], :b.shape[0]], T.transpose(b))
   dense_rows = T.reshape(dense, (np, kp // kr, kr))
   panels = T.alloc((np // 16, kp // kr, 16, 16 * group), dtype=b.dtype)
@@ -112,12 +123,15 @@ def _input_b(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group):
       columns = transpose_dwords_512(rows)
       for column in T.unroll(16):
         T.store(panels[ni, ki, column, :], T.bitcast(columns[column], b.dtype))
-  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr)
+  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
 
 
 @T.func
-def _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr):
-  if raw_a is not None:
+def _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a):
+  if packed_a is not None and a.shape[1] % kr == 0:
+    left = T.reshape(packed_a[:mp * kp], (mp // 16, kp // kr, 16, kr))
+    _output(left, panels, output, acc, dtype, epilogue, mp, np, kr)
+  elif raw_a is not None:
     if a.shape[0] % 16 == 0 and a.shape[1] % kr == 0 and raw_a.strides[1] == 1 and T.view_disjoint(raw_a, output):
       _output(raw_a, panels, output, acc, dtype, epilogue, mp, np, kr)
     else:
@@ -129,7 +143,8 @@ def _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr):
 @T.func
 def _packed_a(a, panels, output, acc, dtype, epilogue, mp, np, kp, kr):
   left = T.alloc((mp, kp), dtype=a.dtype)
-  T.store(left, T.zeros(left.shape, dtype=left.dtype))
+  if a.shape[0] != mp or a.shape[1] != kp:
+    T.store(left, T.zeros(left.shape, dtype=left.dtype))
   T.store(left[:a.shape[0], :a.shape[1]], a)
   _output(left, panels, output, acc, dtype, epilogue, mp, np, kr)
 

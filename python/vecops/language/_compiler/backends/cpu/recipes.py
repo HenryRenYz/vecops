@@ -258,6 +258,13 @@ def expand_dot_recipes(ir, context):
             continue
           if family and epilogue:
             serial += 1
+            # Expanding a whole-matrix store into row stores must preserve
+            # inline epilogue reads as captures at the original store point.
+            # An unbound broadcast Prior that aliases C's first row otherwise
+            # observes that row's updated value in every subsequent row.
+            product_loads = {id(load) for load in I.loads_unique(product)}
+            output.extend(I.BindTile(load) for load in I.loads_unique(statement.value)
+                          if id(load) not in product_loads)
             output.append(
               I.Assert(
                 I.Expr(I.ScalarType("bool"), "view_nonoverlap", data=statement.destination),
@@ -299,6 +306,7 @@ def expand_dot_recipes(ir, context):
                 kwargs["prefer_k"] = prefer_k
               extent = I.Expr(I.ScalarType("int64"), "region_argument", data="prefix")
               reference = I.Expr(
+                I.TileType(product.type.dtype, (extent,)) if native else
                 I.VectorType(product.type.dtype, (extent,), tag=I.VectorTag(basis_dtype=product.type.dtype)),
                 "region_argument",
                 data="result",
@@ -355,22 +363,25 @@ def expand_dot_recipes(ir, context):
                                        ELEMENT_BYTES[product.type.dtype] // ELEMENT_BYTES[product.args[0].type.dtype]),
                               span=I.literal(32) if family == "amx" else I.binary("mul", I.literal(2),
                                     I.Expr(I.ScalarType("int64"), "streaming_lanes", data=product.type.dtype)))
-              elif all(isinstance(item, (I.BindTile, I.Assert, I.Assign, I.Allocate)) for item in output):
-                a = product.args[0]
-                b = product.args[1]
+              if all(isinstance(item, (I.BindTile, I.Assert, I.Assign, I.Allocate)) for item in output):
+                a, b = product.args[:2]
                 raw = lambda v: v.op == "load" and not v.args and v.data.dtype == v.type.dtype and v.data.region is not None
-                if family == "amx":
+                if family == "amx" and raw(a):
+                  kwargs["raw_a"] = a.data
+                elif family == "sme":
                   if raw(a):
                     kwargs["raw_a"] = a.data
-                  if b.op == "packed_load" and b.data.format in {"amx", "auto"}:
-                    view = b.data.view
+                  if raw(b):
+                    kwargs["raw_b"] = b.data
+                for side, operand in (("a", a), ("b", b)):
+                  if (operand.op == "packed_load" and operand.data.format in {family, "auto"}
+                      and (family == "sme" and product.type.dtype != "int64" or family == "amx")):
+                    view = operand.data.view
                     count = I.Expr(I.ScalarType("int64"), "checked_shape", view.shape)
-                    name = f"dsl_recipe_dot_{serial}_packed_b_capacity"
+                    name = f"dsl_recipe_dot_{serial}_packed_{side}_capacity"
                     native_bindings.append(I.Assign(name, count))
                     capacity = I.Expr(I.ScalarType("int64"), "local", data=name)
-                    kwargs["packed_b"] = replace(view, shape=(capacity,), strides=(I.literal(1),), region=None)
-                elif raw(a) and raw(b) and a.type.dtype in {"float32", "float64"}:
-                  kwargs.update(raw_a=a.data, raw_b=b.data)
+                    kwargs[f"packed_{side}"] = replace(view, shape=(capacity,), strides=(I.literal(1),), region=None)
             result, body = expand_helper(
               recipe,
               arguments,

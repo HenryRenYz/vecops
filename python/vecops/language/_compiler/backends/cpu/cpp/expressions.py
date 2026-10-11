@@ -64,6 +64,10 @@ class ExpressionsEmitter:
     return result
 
   def scalar(self, value):
+    if value.op in {"raw", "symbol", "local", "frozen"}:
+      owned = self.hardware_scalar_bindings.get((value.op, value.data))
+      if owned is not None:
+        return owned
     if value.op == "cache_bytes":
       field = {"L1": "l1d_bytes", "L2": "l2_bytes", "L3": "l3_bytes", "LLC": "llc_bytes"}[value.data]
       text = f"vecops::platform::cache_info().{field}"

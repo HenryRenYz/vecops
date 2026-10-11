@@ -11,6 +11,59 @@ only typed vector/ZA instructions execute in the no-throw streaming owner.
 from .. import dsl as T
 from .. import sme
 from .matrix_recipe import finish_matrix, grouped_operand, seed_accumulator
+from .sme_packing import pack_fringe
+
+
+@T.func
+def _packed_operand(value, side, dtype, raw):
+  # Keep the public SME [panel, K-group, 2*ZA-width*group] layout. A
+  # rank-three logical transpose used to scalarize this entire hot path.
+  # ZA's row/column moves transpose storage words, preserving all payload
+  # bits, and pad only storage; producers never see a padded logical index.
+  spatial = value.shape[0] if side == "A" else value.shape[1]
+  reduction = value.shape[1] if side == "A" else value.shape[0]
+  width = sme.streaming_lanes(dtype)
+  group = T.itemsize(dtype) // T.itemsize(value.dtype)
+  chunk = sme.streaming_lanes(value.dtype)
+  assert reduction <= 9223372036854775807 - (chunk - 1), "SME packing extent overflow"
+  panels = (spatial + 2 * width - 1) // (2 * width)
+  # Whole physical K chunks keep interval checks independent of the final
+  # logical group count. MOPA still consumes only ceil(logical K/group).
+  packed = T.alloc((panels, (reduction + chunk - 1) // chunk * (chunk // group), 2 * width * group), dtype=value.dtype)
+  if raw is not None:
+    source = raw if side == "A" else T.transpose(raw)
+    if source.strides[1] == 1 and spatial % (2 * width) == 0:
+      _pack_view(source, packed, dtype, group)
+    else:
+      _pack_dense(value, side, packed, dtype, group)
+  else:
+    _pack_dense(value, side, packed, dtype, group)
+  return packed
+
+
+@T.func
+def _pack_dense(value, side, packed, dtype, group):
+  logical = value if side == "A" else T.transpose(value)
+  spatial = packed.shape[0] * 2 * sme.streaming_lanes(dtype)
+  dense = T.alloc((spatial, logical.shape[1]), dtype=value.dtype)
+  if spatial != logical.shape[0]:
+    T.store(dense[logical.shape[0]:, :], T.zeros((spatial - logical.shape[0], logical.shape[1]), dtype=value.dtype))
+  T.store(dense[:logical.shape[0], :], logical)
+  _pack_view(dense, packed, dtype, group)
+
+
+@T.func
+def _pack_view(dense, packed, dtype, group):
+  spatial, reduction = dense.shape
+  with sme.region():
+    pack_width = sme.streaming_lanes(dtype)
+    chunk = sme.streaming_lanes(dense.dtype)
+    for panel in T.serial(packed.shape[0], unroll=1):
+      for chunk_index in T.serial((reduction + chunk - 1) // chunk, unroll=1):
+        ki = chunk_index * chunk
+        pack_fringe(dense, packed[panel, :, :], origin=panel * 2 * pack_width,
+                    k_origin=ki, width=pack_width, active_k=T.min(chunk, reduction - ki),
+                    spatial=spatial, output_origin=ki // group)
 
 
 @T.func
@@ -28,6 +81,9 @@ def _grouped_tiles(a, b, output, *, initial, group, groups=None, raw_a=False, ra
 def _load_a(a, ki, mi, width, group, raw):
   if raw:
     result = sme.load(a[mi:mi + width, ki], strided=True)
+  elif len(a.shape) == 3:
+    start = (mi % (2 * width)) * group
+    result = sme.load(a[mi // (2 * width), ki, start:start + width * group])
   else:
     result = sme.load(a[ki, mi * group:(mi + width) * group])
   return result
@@ -37,6 +93,9 @@ def _load_a(a, ki, mi, width, group, raw):
 def _load_b(b, ki, ni, width, group, raw):
   if raw:
     result = sme.load(b[ki, ni:ni + width], strided=True)
+  elif len(b.shape) == 3:
+    start = (ni % (2 * width)) * group
+    result = sme.load(b[ni // (2 * width), ki, start:start + width * group])
   else:
     result = sme.load(b[ki, ni * group:(ni + width) * group])
   return result
@@ -89,7 +148,8 @@ def _grouped_tiles_1x1(a, b, output, *, initial, group, groups, raw_a, raw_b):
 
 
 @T.func
-def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, raw_a=None, raw_b=None):
+def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, raw_a=None, raw_b=None,
+             packed_a=None, packed_b=None):
   a, b = inputs
   a, b = T.as_value(a), T.as_value(b)
   m, n, k = a.shape[0], b.shape[1], a.shape[1]
@@ -101,23 +161,56 @@ def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, ra
       # Direct strided sources remain legal with an accumulator and epilogue.
       # Output stays private, so even overlapping raw input/output is safe.
       _buffered_output(raw_a, raw_b, output, acc, acc_dtype, epilogue, group, groups=k, raw_a=True, raw_b=True)
-    else:
+    elif acc_dtype == "int64":
+      # I16/I64 uses four halfwords per 64-bit accumulator lane. The public
+      # I16 SME packing ABI instead groups two halfwords into a dword.
+      # Retain the dedicated layout until a separate 64-bit ABI is available.
       left = grouped_operand(a, side="A", group=group, spatial=m, reduction=kp)
       right = grouped_operand(b, side="B", group=group, spatial=n, reduction=kp)
       _output(left, right, output, acc, acc_dtype, epilogue, group)
+    else:
+      width = sme.streaming_lanes(acc_dtype)
+      assert m <= 9223372036854775807 - (2 * width - 1), "SME spatial extent overflow"
+      assert n <= 9223372036854775807 - (2 * width - 1), "SME spatial extent overflow"
+      if packed_a is not None:
+        if k % group == 0:
+          shape_a = ((m + 2 * width - 1) // (2 * width), kp // group, 2 * width * group)
+          left = T.reshape(packed_a[:shape_a[0] * kp * 2 * width], shape_a)
+          _input_b(left, b, packed_b, raw_b, output, acc, acc_dtype, epilogue, group, kp, width)
+        else:
+          saved_a = _packed_operand(a, "A", acc_dtype, raw_a)
+          _input_b(saved_a, b, packed_b, raw_b, output, acc, acc_dtype, epilogue, group, kp, width)
+      else:
+        left = _packed_operand(a, "A", acc_dtype, raw_a)
+        _input_b(left, b, packed_b, raw_b, output, acc, acc_dtype, epilogue, group, kp, width)
 
 
 @T.func
-def _output(left, right, output, acc, acc_dtype, epilogue, group):
+def _input_b(left, b, packed_b, raw_b, output, acc, dtype, epilogue, group, kp, width):
+  if packed_b is not None:
+    if b.shape[0] % group == 0:
+      shape_b = ((b.shape[1] + 2 * width - 1) // (2 * width), kp // group, 2 * width * group)
+      right = T.reshape(packed_b[:shape_b[0] * kp * 2 * width], shape_b)
+      _output(left, right, output, acc, dtype, epilogue, group, groups=kp // group)
+    else:
+      saved_b = _packed_operand(b, "B", dtype, raw_b)
+      _output(left, saved_b, output, acc, dtype, epilogue, group, groups=kp // group)
+  else:
+    right = _packed_operand(b, "B", dtype, raw_b)
+    _output(left, right, output, acc, dtype, epilogue, group, groups=kp // group)
+
+
+@T.func
+def _output(left, right, output, acc, acc_dtype, epilogue, group, *, groups=None):
   if epilogue is None and output.dtype == acc_dtype:
     if output.strides[1] == 1:
       if acc is not None:
         T.store(output, T.broadcast_to(T.cast(T.as_value(acc), acc_dtype), output.shape))
-      _grouped_tiles(left, right, output, initial=acc is not None, group=group)
+      _grouped_tiles(left, right, output, initial=acc is not None, group=group, groups=groups)
     else:
-      _buffered_output(left, right, output, acc, acc_dtype, epilogue, group)
+      _buffered_output(left, right, output, acc, acc_dtype, epilogue, group, groups=groups)
   else:
-    _buffered_output(left, right, output, acc, acc_dtype, epilogue, group)
+    _buffered_output(left, right, output, acc, acc_dtype, epilogue, group, groups=groups)
 
 @T.func
 def _buffered_output(left, right, output, acc, dtype, epilogue, group, *, groups=None, raw_a=False, raw_b=False):

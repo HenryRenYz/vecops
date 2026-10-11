@@ -5,11 +5,56 @@
 import json
 
 from .... import ir as I
+from ....ir.traversal import nodes, walk_unique
 from ....dtypes import ELEMENT_BYTES
 from .hardware_sme import SMEInstructionEmitter
 
 
 class HardwareEmitter(SMEInstructionEmitter):
+  def snapshot_hardware_inputs(self, program):
+    """Snapshot invariant references inside the streaming callback.
+
+    SME memory clobbers otherwise force LLVM to reload reference-captured
+    pointers and loop metadata on every instruction. Region-local immutable
+    values keep their SSA identity without changing storage or ownership.
+    No allocation or scalar mutation is legal during this lexical interval.
+    """
+    statements = tuple(nodes(program))
+    defined = {s.target for s in statements if isinstance(s, (I.Assign, I.For))}
+    roots, views = [], []
+    for statement in statements:
+      if isinstance(statement, I.For):
+        roots.extend((statement.start, statement.stop, statement.step))
+      elif isinstance(statement, I.Assign):
+        roots.append(statement.value)
+      elif isinstance(statement, I.If):
+        roots.append(statement.condition)
+      elif isinstance(statement, I.ArchitectureCall):
+        if statement.vector is not None:
+          roots.append(statement.vector.extent)
+        if statement.slice_index is not None:
+          roots.append(statement.slice_index)
+        if statement.view is not None:
+          views.append(statement.view)
+      elif isinstance(statement, I.Prefetch):
+        views.append(statement.view)
+    for view in views:
+      roots.extend((view.offset, *view.shape, *view.strides))
+    references = {}
+    for root in roots:
+      for value in walk_unique(root):
+        if (isinstance(value.type, I.ScalarType) and value.op in {"raw", "symbol", "local", "frozen"}
+            and not (value.op in {"local", "frozen"} and value.data in defined)):
+          references.setdefault((value.op, value.data), value)
+    for key, value in sorted(references.items()):
+      owned = self.unique("hardware_metadata")
+      self.line(f"const auto {owned} = {self.scalar(value)};")
+      self.hardware_scalar_bindings[key] = owned
+    for storage in sorted({view.storage for view in views}):
+      owned = self.unique("hardware_pointer")
+      self.line(f"auto* const {owned} = {self.storage_pointer(storage)};")
+      self.parameter_pointers[storage] = owned
+
   def owner_integer(self, value, fallback):
     """Keep known scalar metadata literal inside an outlined state owner.
 
@@ -93,7 +138,15 @@ class HardwareEmitter(SMEInstructionEmitter):
     previous, self.hardware_scope = self.hardware_scope, (kind, scope)
     if kind == "amx":
       self.opening(f"{scope}.with_configuration({configuration}, [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT")
-    self.hardware_block(I.Block(statements))
+    prior_pointers, prior_scalars = self.parameter_pointers, self.hardware_scalar_bindings
+    if kind == "sme" and not any(isinstance(s, I.Store) for s in nodes(I.Block(statements))):
+      self.parameter_pointers = dict(prior_pointers)
+      self.hardware_scalar_bindings = dict(prior_scalars)
+      self.snapshot_hardware_inputs(I.Block(statements))
+    try:
+      self.hardware_block(I.Block(statements))
+    finally:
+      self.parameter_pointers, self.hardware_scalar_bindings = prior_pointers, prior_scalars
     if kind == "amx":
       self.indent -= 1
       self.line("});")

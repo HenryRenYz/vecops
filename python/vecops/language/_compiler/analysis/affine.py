@@ -308,6 +308,15 @@ def _canonical_integer(value, memo):
       terms[identity] = previous, coefficient + factor
 
   collect(value, 1)
+  bits = int(value.type.dtype[3:])
+  minimum, maximum = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+  if not minimum <= constants <= maximum or any(not minimum <= factor <= maximum for _, factor in terms.values()):
+    # MAX - (positive_width - 1) is representable. Reassociating it into
+    # (MAX + 1) - positive_width introduces an unrepresentable literal and
+    # makes otherwise valid Const-shape instruction kernels fail to compile.
+    # Keep the original arithmetic when collecting constants exceeds its
+    # signed metadata type; do not weaken the overflow check or cast to uint.
+    return value
   for expression, factor in tuple(terms.values()):
     if expression.op != "floordiv" or not factor:
       continue

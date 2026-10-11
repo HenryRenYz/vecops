@@ -656,6 +656,7 @@ class Frontend(
         view.offset,
         view.writable,
         view.owned,
+        replace(view.region, axes=tuple(view.region.axes[i] for i in axes)) if view.region is not None else None,
       )
     if operation == "reshape":
       view = args[0]

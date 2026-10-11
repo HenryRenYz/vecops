@@ -28,10 +28,17 @@ class PrimitivesEmitter:
       coords = tuple(self.scalar(v) for v in coordinates)
       pointer = self.pointer(load.data, coords)
       snapshot = self.snapshots.get(id(load))
-      if snapshot is not None:
+      if snapshot is not None and snapshot[0].dtype == load.data.dtype:
         saved, condition = snapshot
         pointer = f"({condition} ? {self.pointer(saved, coords)} : {pointer})"
       scalar = self.scalar_convert(load.type.dtype, f"*{pointer}", load.data.dtype)
+      if snapshot is not None and snapshot[0].dtype != load.data.dtype:
+        # A captured converting load stores compute elements. Its source
+        # still has the memory dtype: select converted values, since these
+        # pointers have different types (and different element widths).
+        saved, condition = snapshot
+        captured = self.scalar_convert(load.type.dtype, f"*{self.pointer(saved, coords)}", saved.dtype)
+        scalar = f"({condition} ? {captured} : {scalar})"
       source_dtype = load.type.dtype
       for dtype in casts:
         scalar = self.scalar_convert(dtype, scalar, source_dtype)
