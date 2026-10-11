@@ -631,8 +631,12 @@ fixed-accuracy spellings (`exp_strict`, `exp_fast`, `exp_est`,
   overflow test — **positive active lanes have unspecified results**. Defining
   `VECOPS_MATH_ASSUME_VALID_INPUTS` additionally skips NaN propagation on
   these paths.
-- Fast/Estimate always flush subnormal outputs to zero; with
-  `VECOPS_PRESERVE_SUBNORMALS` defined, Strict preserves them.
+- The default build flushes subnormal outputs in every tier. With
+  `VECOPS_PRESERVE_SUBNORMALS` defined, Strict preserves them. This contract
+  applies to the output storage format, including widened fp16/bf16 paths.
+  Fast/Estimate always flush them.
+  Hardware FTZ/DAZ is a separate caller-controlled mode and can suppress
+  gradual results even in a preserving build.
 
 Implementation notes: the SVE backend derives all bases from the Arm
 optimized-routines SVE exp kernels (FEXPA table + shared reduction
@@ -673,7 +677,10 @@ Special inputs are **tier-independent**: `rcp(+-0) = +-inf`,
 `rsqrt(+inf) = +0`, `rsqrt(x < 0) = NaN` (including `-inf`), and NaN
 propagates. rcp's Strict tier produces gradual subnormal results under
 `VECOPS_PRESERVE_SUBNORMALS` (rcp of huge magnitudes); Fast/Estimate flush
-them to signed zero.
+them to signed zero. The output storage format determines flushing, even
+when fp16/bf16 compute through fp32. Stored output bits follow this contract
+independently of hardware flush mode; enabling that mode may also suppress
+Strict's gradual results.
 - NaN inputs propagate through every tier and family, including mixed
   vectors whose special-tail lanes force the slow path.
 
@@ -1009,6 +1016,11 @@ assumed bitwise identity with scalar/reassociated vector reductions.
 
 `vecops/vec/SME.h` publishes `vec::sme` ZA/vector primitives (horizontal and
 vertical load/store/read/write, zero, addha, mopa, and SVL queries).
+`mopa` also accepts I16-to-I64 four-way groups with SME_I16I64 and I16-to-I32
+two-way groups with SME2. I64 accepts all operand signedness pairs; I32 requires
+matching signedness. Integer accumulation wraps at the accumulator width;
+input predicates use the input element width. These optional instruction
+families require their matching target features, just like AMX FP16.
 `load_hor`/`load_ver` and `store_hor`/`store_ver` transfer a contiguous
 memory slice directly to/from ZA without an intermediate Z register.
 These memory forms take unsigned 8/16/32/64-bit containers; cast a

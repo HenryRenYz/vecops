@@ -9,6 +9,10 @@ vector memory primitives. Its prefix still fits one streaming word and root
 bounds are checked before ownership; raw ZA slice/bit moves remain contiguous.
 mopa(tile, A, B) selects a typed outer-product instruction, store_tile(tile, C)
 writes the clipped accumulator tile. T.dot owns a separately planned schedule.
+I16 inputs default to I64 accumulation; acc_dtype="int32" selects SME2's
+two-halfword family. I8 inputs retain I32 and all four signedness pairs.
+I16/I64 requires SME_I16I64; I16/I32 requires SME2. A matching compilation
+target is required: selecting the type does not enable absent hardware.
 Validation/alias handling is outside SM. Vectors cannot escape into Python;
 16/8-bit inputs must already use the architectural grouped-K packing order.
 Bounded T.serial loops and pure metadata branches keep one region active.

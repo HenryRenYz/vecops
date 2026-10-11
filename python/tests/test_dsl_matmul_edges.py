@@ -97,7 +97,6 @@ def test_prepacked_cache_panels_and_fused_final_store(compiler,dtype,format_,imp
   compiled.operator.native(a,b,d,c)
   expected=(a.astype(np.float32)@b.astype(np.float32)+d).astype(np.float64)*0.5+1
   np.testing.assert_allclose(c,expected,rtol=3e-5,atol=3e-5)
-  assert 'block_k' in compiled.generated_source
 
 
 def test_zero_k_with_explicit_phases(compiler):

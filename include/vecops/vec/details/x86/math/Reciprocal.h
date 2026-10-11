@@ -42,6 +42,7 @@
 #include <type_traits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Math.h"
 #include "vecops/vec/details/x86/Arithmetic.h"
 #include "vecops/vec/details/x86/Basic.h"
 #include "vecops/vec/details/x86/Types.h"
@@ -50,11 +51,7 @@ namespace vecops::vec::details {
 
 template <Accuracy Tier>
 constexpr bool x86_recip_gradual() {
-#ifdef VECOPS_PRESERVE_SUBNORMALS
-  return Tier == Accuracy::Strict;
-#else
-  return false;
-#endif
+  return math_preserves_subnormals<Tier>();
 }
 
 #if defined(CPU_CAPABILITY_AVX512)
@@ -214,15 +211,7 @@ T x86_recip_scalar_fixup(T value) {
 
 template <Accuracy Tier, Element T>
 T x86_recip_flush(T result) {
-  if constexpr (x86_recip_gradual<Tier>()) {
-    return result;
-  } else {
-    const double widened = static_cast<double>(result);
-    if (widened != 0.0 && std::abs(widened) <
-                          static_cast<double>(std::numeric_limits<T>::min()))
-      return static_cast<T>(widened * 0.0);
-    return result;
-  }
+  return math_flush_subnormal_scalar<Tier>(result);
 }
 
 /**

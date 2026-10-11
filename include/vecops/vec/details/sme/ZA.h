@@ -236,6 +236,15 @@ VECOPS_SME_DEFINE_ZA_MEMORY_WIDTH(std::uint64_t, ld1d, d, d)
 
 #undef VECOPS_SME_DEFINE_ZA_MEMORY_WIDTH
 
+/**
+ * Accumulate architectural grouped-K outer products into a typed ZA tile.
+ * Byte inputs use four-way I32 sums (all signedness pairs); halfword integers
+ * use four-way I64 sums with SME_I16I64 (all sign pairs) or two-way I32
+ * sums with SME2 (matching operand signedness only).
+ * Integer accumulation wraps modulo the accumulator width. Predicates have
+ * the input lane width; inactive input elements contribute zero. The caller
+ * owns Streaming+ZA state and supplies the instruction's grouped-K order.
+ */
 template <int Tile, typename TAcc, typename TA, typename TB>
 VECOPS_ALWAYS_INLINE void mopa(
     Mask<WordTag<TA>> pga, Mask<WordTag<TB>> pgb,
@@ -285,6 +294,38 @@ VECOPS_ALWAYS_INLINE void mopa(
                        std::same_as<TA, float64_t> &&
                        std::same_as<TB, float64_t>) {
     VECOPS_SME_MOPA_ASM(fmopa, d, d);
+  } else if constexpr (std::same_as<TAcc, std::int64_t> &&
+                       sizeof(TA) == 2 && sizeof(TB) == 2 &&
+                       std::is_integral_v<TA> && std::is_integral_v<TB>) {
+#if defined(HAS_SME_I16I64)
+    if constexpr (std::is_signed_v<TA> && std::is_signed_v<TB>) {
+      VECOPS_SME_MOPA_ASM(smopa, d, h);
+    } else if constexpr (!std::is_signed_v<TA> && !std::is_signed_v<TB>) {
+      VECOPS_SME_MOPA_ASM(umopa, d, h);
+    } else if constexpr (std::is_signed_v<TA>) {
+      VECOPS_SME_MOPA_ASM(sumopa, d, h);
+    } else {
+      VECOPS_SME_MOPA_ASM(usmopa, d, h);
+    }
+#else
+    static_assert(dependent_false_v<TAcc, TA, TB>, "SME I16I64 is not enabled for this target");
+#endif
+  } else if constexpr (std::same_as<TAcc, std::int32_t> &&
+                       sizeof(TA) == 2 && sizeof(TB) == 2 &&
+                       std::is_integral_v<TA> && std::is_integral_v<TB>) {
+#if defined(HAS_SME2)
+    static_assert(std::is_signed_v<TA> == std::is_signed_v<TB>,
+                  "SME2 I16I32 requires matching operand signedness");
+    if constexpr (std::is_signed_v<TA> && std::is_signed_v<TB>) {
+      VECOPS_SME_MOPA_ASM(smopa, s, h);
+    } else if constexpr (!std::is_signed_v<TA> && !std::is_signed_v<TB>) {
+      VECOPS_SME_MOPA_ASM(umopa, s, h);
+    } else {
+      static_assert(dependent_false_v<TA, TB>, "unsupported SME2 I16I32 sign pair");
+    }
+#else
+    static_assert(dependent_false_v<TAcc, TA, TB>, "SME I16I32 requires SME2");
+#endif
   } else {
     static_assert(dependent_false_v<TAcc, TA, TB>,
                   "unsupported SME outer-product dtype combination");

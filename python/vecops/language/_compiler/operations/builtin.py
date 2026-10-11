@@ -166,6 +166,7 @@ define("indices", "index", T.NONE, keywords=("axis",))
 define("workspace", "allocation", T.NONE, keywords=("dtype",))
 define("worker_capacity", "execution", T.CSE)
 define("view_nonoverlap", "memory_proof", T.NONE)
+define("compile_feature", "metadata", T.CSE)
 define(
   "mask_all mask_any mask_none mask_count mask_first mask_last",
   "mask_query",
@@ -195,6 +196,7 @@ define("amx.zero", "architecture", T.NONE, effects="state", keywords=("dtype",))
 define("sme.load", "architecture", T.NONE, effects="state", keywords=("dtype", "strided"))
 define("sme.load_bits sme.read_hor sme.read_ver", "architecture", T.NONE, effects="state", keywords=("dtype",))
 define("sme.mask", "architecture", T.NONE, effects="none", keywords=("dtype",))
+define("sme.mopa", "architecture", T.NONE, effects="state", keywords=("acc_dtype",))
 define("sme.store sme.store_bits sme.write_hor sme.write_ver sme.zero_za", "architecture", T.NONE, effects="state")
 define(
   "sme.load_hor sme.load_ver sme.store_hor sme.store_ver",

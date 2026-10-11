@@ -45,6 +45,7 @@
 #include <limits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Math.h"
 #include "vecops/vec/details/sve/Basic.h"
 #include "vecops/vec/details/sve/Bf16.h"
 #include "vecops/vec/details/sve/math/Policy.h"
@@ -54,11 +55,7 @@ namespace vecops::vec::details {
 /** True for the tiers that must produce gradual subnormal results if enabled. */
 template <Accuracy Tier>
 constexpr bool sve_recip_gradual() {
-#ifdef VECOPS_PRESERVE_SUBNORMALS
-  return Tier == Accuracy::Strict;
-#else
-  return false;
-#endif
+  return math_preserves_subnormals<Tier>();
 }
 
 /* **************************************************************************** */
@@ -330,18 +327,18 @@ VECOPS_ALWAYS_INLINE svfloat16_t sve_recip_f16_via_f32(svfloat16_t raw) {
 /**
  * Flushes subnormal f16 outputs to (signed) zero for the tiers whose
  * contract does not preserve them. The widening route computes them as f32
- * normals, so the flush needs this explicit select. Negative results must
- * not be caught by the magnitude bound, hence the absolute compare.
+ * normals, so the flush needs this explicit select. Classify stored bits:
+ * with FPCR.FZ16 enabled, a floating comparison can read a stored subnormal
+ * as zero and skip the flush. Preserve the sign without floating arithmetic.
  */
 template <Accuracy Tier>
 VECOPS_ALWAYS_INLINE svfloat16_t sve_recip_f16_flush(svfloat16_t y) {
   if constexpr (!sve_recip_gradual<Tier>()) {
-    const auto flush = svand_b_z(
-        svptrue_b16(), svcmpne_n_f16(svptrue_b16(), y, float16_t(0)),
-        svnot_b_z(svptrue_b16(),
-                  svacge_n_f16(svptrue_b16(), y, float16_t(6.103515625e-05f))));
-    return svsel_f16(
-        flush, svmul_n_f16_x(svptrue_b16(), y, float16_t(0)), y);
+    const auto bits = svreinterpret_u16_f16(y);
+    const auto exponent = svand_n_u16_x(svptrue_b16(), bits, 0x7c00);
+    const auto flush = svcmpeq_n_u16(svptrue_b16(), exponent, 0);
+    return svreinterpret_f16_u16(svsel_u16(
+        flush, svand_n_u16_x(svptrue_b16(), bits, 0x8000), bits));
   } else {
     return y;
   }

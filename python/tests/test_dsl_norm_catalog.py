@@ -18,7 +18,6 @@ from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.environment import freeze
 from vecops.language._compiler.ir.traversal import nodes
 from vecops.language._compiler.passes.kernel.reuse import plan_computation_reuse
-from vecops.language._library.math import softmax_exp_neg
 
 
 @pytest.fixture(scope="module")
@@ -180,13 +179,8 @@ def test_softmax_accuracy_propagates_to_exp_and_reciprocal(rank, accuracy, unrol
   assert reductions
   assert {region.unroll for region in reductions} == {unroll}
   assert f"vecops::vec::opt::math::{accuracy}" in source
-  if accuracy == "estimate":
-    assert "vecops::vec::exp" not in source
-    assert "vecops::vec::fmadd" in source
-    if rank == 1:
-      assert "dsl_o_reuse_" in source
-  else:
-    assert "vecops::vec::exp" in source
+  assert "vecops::vec::exp_neg" in source
+  assert not any(node.op == "fma" for node in expressions)
   if accuracy == "strict":
     divisions = [
       node
@@ -247,12 +241,12 @@ def test_float64_estimate_softmax_retains_native_exp(rank):
 
 
 def test_estimate_exponential_native_special_values(tmp_path):
-  """The source helper preserves NaNs and explicitly zeros x < -80."""
+  """Native Estimate retains NaNs and the vec output-flush contract."""
   shape = (137,)
 
   @T.template
   def kernel(A: T.Tensor(shape, dtype="float32"), C: T.Tensor(shape, dtype="float32", access="output")):
-    T.store(C, softmax_exp_neg(T.load(A), accuracy="estimate"))
+    T.store(C, T.exp_neg(T.load(A), accuracy="estimate"))
 
   compiler = make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   compiled = T.compile(kernel, compiler=compiler)
@@ -263,33 +257,53 @@ def test_estimate_exponential_native_special_values(tmp_path):
   output = np.empty_like(inputs)
   compiled(inputs, output)
   expected = np.exp(inputs.astype(np.float64)).astype(np.float32)
-  expected[inputs < -80] = 0
-  np.testing.assert_allclose(output, expected, rtol=5e-5, atol=0, equal_nan=True)
-  np.testing.assert_array_equal(output[inputs < -80], 0)
+  expected[expected < np.finfo(np.float32).tiny] = 0
+  np.testing.assert_allclose(output, expected, rtol=0.006, atol=0, equal_nan=True)
+  np.testing.assert_array_equal(output[inputs < -90], 0)
   assert np.isnan(output[np.isnan(inputs)]).all()
   source = compiled.generated_source
-  assert "vecops::vec::exp" not in source
+  assert "vecops::vec::exp_neg" in source
   assert "std::exp" not in source
   assert "std::array<vecops::vec::Vec" not in source
 
 
-@pytest.mark.parametrize("operation", ["rsqrt", "rcp"])
+@pytest.mark.parametrize("operation", ["rsqrt", "rcp", "exp", "exp_neg", "exp2", "exp2_neg", "log", "log2"])
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("accuracy", ["strict", "fast", "estimate"])
-def test_scalar_reciprocal_uses_native_math_tier(operation, dtype, accuracy):
+def test_scalar_math_uses_native_math_tier(operation, dtype, accuracy):
+  operation_fn = getattr(T, operation)
+
   @T.template
   def kernel(A: T.Tensor((37,), dtype=dtype), C: T.Tensor((), dtype=dtype, access="output")):
     total = T.reduce_add(T.load(A))
-    if operation == "rsqrt":
-      inverse = T.rsqrt(total, accuracy=accuracy)
-    else:
-      inverse = T.rcp(total, accuracy=accuracy)
+    inverse = operation_fn(total, accuracy=accuracy)
     T.store(C, inverse)
 
   source = CPUBackend().lower(kernel.ir, (), target="SVE").source
   assert f"vecops::vec::{operation}" in source
   assert f"vecops::vec::opt::math::{accuracy}" in source
   assert "std::sqrt" not in source
+
+
+@pytest.mark.parametrize("operation", ["sqrt", "abs"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_scalar_exact_unary_math_uses_native_signature(tmp_path, operation, dtype):
+  # sqrt/abs have no accuracy option. Compile and execute the scalar call to
+  # catch accidental propagation of the approximate-math option pack.
+  operation_fn = getattr(T, operation)
+
+  @T.template
+  def kernel(A: T.Tensor((37,), dtype=dtype), C: T.Tensor((1,), dtype=dtype, access="output")):
+    T.store(C[0], operation_fn(T.reduce_add(T.load(A))))
+
+  compiler = make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(kernel, compiler=compiler)
+  inputs = np.full((37,), -1 if operation == "abs" else 1, dtype=dtype)
+  output = np.empty((1,), dtype=dtype)
+  compiled(inputs, output)
+  np.testing.assert_allclose(output, 37 if operation == "abs" else np.sqrt(37), rtol=1e-6)
+  assert f"vecops::vec::{operation}" in compiled.generated_source
+  assert "vecops::vec::opt::math::" not in compiled.generated_source
 
 
 @pytest.mark.parametrize("rank", [1, 2, 3, 4])

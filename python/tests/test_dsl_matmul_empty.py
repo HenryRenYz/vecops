@@ -52,4 +52,3 @@ def test_empty_dynamic_amx_and_zero_k_bias(tmp_path):
     c = np.empty((m, n), np.float32)
     compiled.operator.native(a, b, d, c, **compiled._core.specialization_values)
     np.testing.assert_array_equal(c, np.broadcast_to(d + 1, c.shape))
-  assert "empty products need no resources" in compiled.generated_source

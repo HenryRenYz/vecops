@@ -195,7 +195,12 @@ class ControlEmitter:
         self.close()
       elif isinstance(statement, I.If):
         self.protect_region(I.Block([statement]), self.expression_loads(I.Block(block.statements[index + 1 :])))
-        self.opening(f"if ({self.scalar(statement.condition)})")
+        feature = statement.condition.data if statement.condition.op == "compile_feature" else None
+        if feature:
+          self.line(f"#if {feature}")
+          self.opening("/* target instruction recipe */")
+        else:
+          self.opening(f"if ({self.scalar(statement.condition)})")
         old_proofs = getattr(self, "disjoint_roots", {})
         proofs = dict(old_proofs)
 
@@ -213,9 +218,15 @@ class ControlEmitter:
         self.disjoint_roots = old_proofs
         self.close()
         if statement.otherwise.statements:
-          self.opening("else")
+          if feature:
+            self.line("#else")
+            self.opening("/* target instruction fallback */")
+          else:
+            self.opening("else")
           self.block(statement.otherwise)
           self.close()
+        if feature:
+          self.line("#endif")
       elif isinstance(statement, I.While):
         self.protect_region(statement.body, self.expression_loads(I.Block(block.statements[index + 1 :])))
         if self.scalar_has_statements(statement.condition):

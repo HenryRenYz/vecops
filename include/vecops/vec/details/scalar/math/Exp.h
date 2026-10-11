@@ -18,6 +18,7 @@
 #include <limits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Math.h"
 #include "vecops/vec/details/scalar/Basic.h"
 #include "vecops/vec/details/Wordwise.h"
 
@@ -32,14 +33,7 @@ inline constexpr long double kScalarLog2Base10 = 3.32192809488736234787031942948
  */
 template <Accuracy A, Element T>
 VECOPS_ALWAYS_INLINE T scalar_exp_flush(T result) {
-#ifdef VECOPS_PRESERVE_SUBNORMALS
-  if constexpr (A == Accuracy::Strict) return result;
-#endif
-  const double widened = static_cast<double>(result);
-  if (widened > 0.0 &&
-      widened < static_cast<double>(std::numeric_limits<T>::min()))
-    return T(0.0F);
-  return result;
+  return math_flush_subnormal_scalar<A>(result);
 }
 
 template <Accuracy A, Element T>

@@ -30,7 +30,7 @@ def expand_dot_recipes(ir, context):
   vector_state = environment.vector_state
   native_bytes = vector_state.sve_bytes or 16 if target.isa in {"sve", "sme"} else (target.vector_bits or 128) // 8
   budget = context.options.get("cpu_state_register_budget", 12)
-  serial, rewritten, sme_rewritten = 0, set(), set()
+  serial, rewritten, sme_rewritten, native_rewritten = 0, set(), set(), set()
   fusion = context.options.get("cpu_matmul_fusion", "auto")
   if fusion not in {"auto", "always", "never"}:
     raise ValueError("cpu_matmul_fusion must be auto, always or never")
@@ -85,19 +85,30 @@ def expand_dot_recipes(ir, context):
       and b_dtype in {"int8", "uint8"}
       and product.type.dtype == "int32"
     )
+    wide_integer = (a_dtype in {"int16", "uint16"} and b_dtype in {"int16", "uint16"}
+                    and (product.type.dtype == "int64" or product.type.dtype == "int32" and a_dtype == b_dtype))
     if (
       product.data.implementation == "amx"
       and not native_narrow
       or product.data.implementation == "sme"
       and not (
-        native_narrow or a_dtype == b_dtype == product.type.dtype and product.type.dtype in {"float32", "float64"}
+        native_narrow or wide_integer or a_dtype == b_dtype == product.type.dtype and product.type.dtype in {"float32", "float64"}
       )
     ):
       raise TypeError(f"unsupported {product.data.implementation} dot dtype combination")
-    if product.type.dtype not in {"float32", "float64", "int32"}:
+    if product.type.dtype not in {"float32", "float64", "int32", "int64"}:
       return False
     if any(value.op == "dot" for arg in product.args for value in walk_unique(arg)):
       return False
+    hint = product.data.implementation
+    if hint in {"auto", "amx"} and native_narrow and target.architecture == "x86" and target.isa != "scalar":
+      return "amx"
+    if hint in {"auto", "sme"} and target.isa == "sme" and (
+      native_narrow or wide_integer or a_dtype == b_dtype == product.type.dtype and product.type.dtype in {"float32", "float64"}
+    ):
+      return "sme"
+    if hint in {"amx", "sme"}:
+      raise TypeError(f"{hint} dot requires a matching compilation target")
     if product.data.tiled:
       return "blocked"
     if pipeline != "off":
@@ -230,6 +241,17 @@ def expand_dot_recipes(ir, context):
               catalog=environment.operations,
               prefix=f"dsl_recipe_sme_dot_{serial}",
             )
+            guard = ("defined(HAS_SME_FA64) && (!defined(HAS_FIXED_SVE_BITS) || "
+                     "(defined(HAS_FIXED_STREAMING_SVE_BITS) && FIXED_SVE_BITS == FIXED_STREAMING_SVE_BITS))")
+            if product.type.dtype == "float64":
+              guard += " && defined(HAS_SME_F64F64)"
+            if product.data.implementation == "auto":
+              _, fallback = expand_helper(vector_dot_into, (product.args[:2], statement.destination),
+                                           keyword_arguments={"acc_dtype": product.type.dtype},
+                                           catalog=environment.operations, prefix=f"dsl_recipe_sme_fallback_{serial}")
+            else:
+              fallback = [I.Assert(I.literal(False), "sme dot instruction family is not enabled for this target")]
+            body = [I.If(I.Expr(I.ScalarType("bool"), "compile_feature", data=guard), I.Block(body), I.Block(fallback))]
             output.extend(body)
             rewritten.add(id(product))
             sme_rewritten.add(id(product))
@@ -246,11 +268,14 @@ def expand_dot_recipes(ir, context):
             kwargs = {"acc": product.args[2] if len(product.args) > 2 else None, "acc_dtype": product.type.dtype}
             kwargs["unroll"] = unroll
             arguments = (product.args[:2],)
-            if family in {"streaming", "blocked"}:
-              kwargs.update(pipeline=pipeline, distance=distance)
+            if family in {"streaming", "blocked", "amx", "sme"}:
+              native = family in {"amx", "sme"}
+              if not native:
+                kwargs.update(pipeline=pipeline, distance=distance)
               inputs = []
               for ordinal in range(2):
-                operand, preamble = input_policy(product, ordinal, f"dsl_recipe_dot_{serial}_{ordinal}")
+                operand, preamble = ((product.args[ordinal], []) if native else
+                                    input_policy(product, ordinal, f"dsl_recipe_dot_{serial}_{ordinal}"))
                 output.extend(preamble)
                 inputs.append(operand)
               arguments = (tuple(inputs),)
@@ -263,13 +288,15 @@ def expand_dot_recipes(ir, context):
                 ),
                 None,
               )
-              kwargs["prefer_k"] = (
+              prefer_k = (
                 I.literal(True)
                 if product.args[1].op == "packed_load" and product.args[1].data.format == "dense"
                 else I.literal(False)
                 if primary is None
                 else I.binary("eq", primary.data.strides[0], I.literal(1))
               )
+              if not native:
+                kwargs["prefer_k"] = prefer_k
               extent = I.Expr(I.ScalarType("int64"), "region_argument", data="prefix")
               reference = I.Expr(
                 I.VectorType(product.type.dtype, (extent,), tag=I.VectorTag(basis_dtype=product.type.dtype)),
@@ -283,6 +310,8 @@ def expand_dot_recipes(ir, context):
                   statement.value, product, reference, row, column, extent, environment.operations
                 ),
               )
+              if statement.value is product:
+                kwargs["epilogue"] = None
               arguments += (statement.destination,)
               if family == "blocked":
                 kwargs.update(
@@ -291,20 +320,125 @@ def expand_dot_recipes(ir, context):
                   BK=product.data.block_k,
                   packing=product.data.packing,
                 )
+            recipe = vector_tile_dot if family == "tile" else blocked_dot_into if family == "blocked" else vector_dot_into
+            native_bindings = []
+            if family in {"amx", "sme"}:
+              from ...._library.amx_matmul import dot_into as amx_dot
+              from ...._library.sme_matmul import dot_into as sme_dot
+
+              recipe = amx_dot if family == "amx" else sme_dot
+              kwargs.pop("unroll")
+              # Broadcast-domain validation can throw. Evaluate such shape
+              # metadata before entering an architectural state owner; its
+              # bounded logical domain remains identical for projection.
+              dimensions = (product.args[0].type.shape[0], product.args[1].type.shape[1], product.args[0].type.shape[1])
+              if any(not environment.operations.has(v, Trait.HARDWARE_SCALAR)
+                     and v.op not in {"floordiv", "mod"} for dim in dimensions for v in walk_unique(dim)):
+                bound = []
+                for index, dim in enumerate(dimensions):
+                  name = f"dsl_recipe_dot_{serial}_dimension_{index}"
+                  native_bindings.append(I.Assign(name, dim))
+                  bound.append(I.Expr(I.ScalarType("int64"), "local", data=name))
+                m, n, k = bound
+                inputs = tuple(replace(v, type=replace(v.type, shape=shape)) for v, shape in
+                               zip(arguments[0], ((m, k), (k, n))))
+                arguments = (inputs, replace(arguments[1], shape=(m, n)))
+              if product.data.tiled:
+                from ...._library.matrix_recipe import blocked_matrix
+                from ...frontend.capture import capture
+
+                arguments += (capture(recipe.function),)
+                recipe = blocked_matrix
+                kwargs.update(BM=product.data.block_m, BN=product.data.block_n, BK=product.data.block_k,
+                              packing=product.data.packing,
+                              quantum=(64 // ELEMENT_BYTES[product.args[0].type.dtype] if family == "amx" else
+                                       ELEMENT_BYTES[product.type.dtype] // ELEMENT_BYTES[product.args[0].type.dtype]),
+                              span=I.literal(32) if family == "amx" else I.binary("mul", I.literal(2),
+                                    I.Expr(I.ScalarType("int64"), "streaming_lanes", data=product.type.dtype)))
+              elif all(isinstance(item, (I.BindTile, I.Assert, I.Assign, I.Allocate)) for item in output):
+                a = product.args[0]
+                b = product.args[1]
+                raw = lambda v: v.op == "load" and not v.args and v.data.dtype == v.type.dtype and v.data.region is not None
+                if family == "amx":
+                  if raw(a):
+                    kwargs["raw_a"] = a.data
+                  if b.op == "packed_load" and b.data.format in {"amx", "auto"}:
+                    view = b.data.view
+                    count = I.Expr(I.ScalarType("int64"), "checked_shape", view.shape)
+                    name = f"dsl_recipe_dot_{serial}_packed_b_capacity"
+                    native_bindings.append(I.Assign(name, count))
+                    capacity = I.Expr(I.ScalarType("int64"), "local", data=name)
+                    kwargs["packed_b"] = replace(view, shape=(capacity,), strides=(I.literal(1),), region=None)
+                elif raw(a) and raw(b) and a.type.dtype in {"float32", "float64"}:
+                  kwargs.update(raw_a=a.data, raw_b=b.data)
             result, body = expand_helper(
-              vector_tile_dot if family == "tile" else blocked_dot_into if family == "blocked" else vector_dot_into,
+              recipe,
               arguments,
               keyword_arguments=kwargs,
               catalog=environment.operations,
               prefix=f"dsl_recipe_dot_{serial}",
             )
+            if family in {"amx", "sme"}:
+              body = native_bindings + body
+              dtype = product.args[0].type.dtype
+              if family == "amx":
+                feature = "HAS_AMX_FP16" if dtype == "float16" else "HAS_AMX_BF16" if dtype == "bfloat16" else "HAS_AMX_INT8"
+                guard = f"defined(HAS_AMX_TILE) && defined({feature})"
+              else:
+                extra = "HAS_SME_F64F64" if dtype == "float64" else (
+                  "HAS_SME_I16I64" if product.type.dtype == "int64" else "HAS_SME2"
+                ) if dtype in {"int16", "uint16"} else None
+                guard = ("defined(HAS_SME_FA64) && (!defined(HAS_FIXED_SVE_BITS) || "
+                         "(defined(HAS_FIXED_STREAMING_SVE_BITS) && FIXED_SVE_BITS == FIXED_STREAMING_SVE_BITS))")
+                guard += f" && defined({extra})" if extra else ""
+              if product.data.implementation == "auto":
+                def expand_fallback(prefix):
+                  fallback_inputs, fallback_preamble = [], []
+                  for ordinal in range(2):
+                    operand, preparation = input_policy(product, ordinal, f"{prefix}_{ordinal}")
+                    fallback_inputs.append(operand)
+                    fallback_preamble.extend(preparation)
+                  fallback_kwargs = {name: kwargs[name] for name in ("acc", "acc_dtype", "epilogue")}
+                  fallback_kwargs.update(unroll=unroll, pipeline=pipeline, distance=distance, prefer_k=prefer_k)
+                  if product.data.tiled:
+                    fallback_kwargs.update(BM=product.data.block_m, BN=product.data.block_n,
+                                           BK=product.data.block_k, packing=product.data.packing)
+                  _, fallback = expand_helper(
+                    blocked_dot_into if product.data.tiled else vector_dot_into,
+                    (tuple(fallback_inputs), statement.destination),
+                    keyword_arguments=fallback_kwargs,
+                    catalog=environment.operations, prefix=prefix,
+                  )
+                  return fallback_preamble + fallback
+
+                fallback = expand_fallback(f"dsl_recipe_dot_fallback_{serial}")
+                # Measured AttentionBench decode/spec-decode shapes lose to
+                # SIMD below one spatial tile: physical packing dominates.
+                # Keep automatic small matrices on their original vector
+                # recipe, including its producer caches. Explicit requests
+                # still exercise matrix instructions and their fringes.
+                # GCC 13's complete versioned kernel currently costs about
+                # 2–3% on single-row AttentionBench decode versus the former
+                # vector-only source. Unconditionally selecting AMX was ~8x
+                # slower there. On 920f-4, some decode pairs measured up to
+                # ~4.5% overhead. Retain this gate and producer-cache policy
+                # until a replacement passes paired shape/meta benchmarks;
+                # deleting the gate is not a valid performance fix.
+                use_native = I.binary("and", I.binary("ge", product.type.shape[0], I.literal(16)),
+                                      I.binary("ge", product.type.shape[1], I.literal(16)))
+                body = [I.If(use_native, I.Block(body), I.Block(expand_fallback(f"dsl_recipe_dot_small_{serial}")))]
+              else:
+                fallback = [I.Assert(I.literal(False), f"{family} dot instruction family is not enabled for this target")]
+              body = [I.If(I.Expr(I.ScalarType("bool"), "compile_feature", data=guard), I.Block(body), I.Block(fallback))]
+              ir.diagnostics.append(f"staged {family.upper()} matrix instruction recipe from DSL library")
+              native_rewritten.add(id(product))
             if family != "blocked" and all(
               type(I.constant(v)) is int for v in (*product.type.shape, product.args[0].type.shape[1])
             ):
               body = simplify_loop_metadata(I.Block(body)).statements
             output.extend(body)
             rewritten.add(id(product))
-            if family in {"streaming", "blocked"}:
+            if family in {"streaming", "blocked", "amx", "sme"}:
               continue
             statement = replace(statement, value=replace_product(statement.value, product, result, {}))
       output.append(statement)
@@ -332,8 +466,9 @@ def expand_dot_recipes(ir, context):
     from ...passes.kernel.transforms import fold_value_transforms
 
     ir = fold_value_transforms(ir, context)
-    if len(rewritten) > len(sme_rewritten):
-      ir.diagnostics.append(f"staged {len(rewritten) - len(sme_rewritten)} vector dot leaf/leaves from DSL library")
+    vector_count = len(rewritten - sme_rewritten - native_rewritten)
+    if vector_count:
+      ir.diagnostics.append(f"staged {vector_count} vector dot leaf/leaves from DSL library")
     if sme_rewritten:
       ir.diagnostics.append(f"staged {len(sme_rewritten)} direct SME dot leaf/leaves from DSL library")
   return PassResult(ir, changed=bool(rewritten))

@@ -538,13 +538,15 @@ class Frontend(
           "acc_dtype",
           "int32"
           if a.type.dtype in {"int8", "uint8"} and b.type.dtype in {"int8", "uint8"}
+          else "int64"
+          if a.type.dtype in {"int16", "uint16"} and b.type.dtype in {"int16", "uint16"}
           else "float64"
           if "float64" in (a.type.dtype, b.type.dtype)
           else "float32",
         )
       )
-      if dtype not in {"float32", "float64", "int32"}:
-        self.error(node, "dot accumulator must be float32, float64 or int32")
+      if dtype not in {"float32", "float64", "int32", "int64"}:
+        self.error(node, "dot accumulator must be float32, float64, int32 or int64")
       for x, y in (
         (a.type.shape[1], b.type.shape[0]),
         (a.type.shape[0], output.shape[0]),
@@ -672,7 +674,13 @@ class Frontend(
         if axis + 1 < len(shape):
           strides[axis] = I.binary("mul", strides[axis + 1], shape[axis + 1])
       self.block.statements.append(I.Assert(I.binary("eq", previous_size, new_size), "reshape changes element count"))
-      return I.View(view.storage, view.dtype, shape, tuple(strides), view.offset, view.writable, view.owned)
+      # A checked dense reshape creates a bounded logical coordinate system
+      # for memory preflight. It does not establish an affine grid partition
+      # relative to other views of the original storage.
+      region = I.ViewRegion(shape, tuple(strides), (I.literal(0),) * len(shape), shape,
+                            (1,) * len(shape), tuple(range(len(shape))), (False,) * len(shape),
+                            affine_partition=False)
+      return I.View(view.storage, view.dtype, shape, tuple(strides), view.offset, view.writable, view.owned, region)
     if operation == "load":
       view = args[0]
       if not isinstance(view, I.View):

@@ -155,13 +155,20 @@ void expect_accurate(T input, T actual) {
   ASSERT_EQ(std::isnan(as_double(expected)), std::isnan(as_double(actual)))
       << "x=" << as_double(input);
   if (std::isnan(as_double(expected))) return;
-#ifndef VECOPS_PRESERVE_SUBNORMALS
-  if (as_double(expected) > 0.0 &&
-      as_double(expected) < as_double(std::numeric_limits<T>::min()) &&
-      as_double(actual) == 0.0) {
-    return;
-  }
+  // Even when gradual Strict results are enabled, Fast/Estimate flush.
+#ifdef VECOPS_PRESERVE_SUBNORMALS
+  constexpr bool gradual = Tier == vec::Accuracy::Strict;
+#else
+  constexpr bool gradual = false;
 #endif
+  if constexpr (!gradual) {
+    EXPECT_FALSE(as_double(actual) > 0.0 &&
+                 as_double(actual) < as_double(std::numeric_limits<T>::min()))
+        << "x=" << as_double(input) << " unexpected subnormal output";
+    if (as_double(expected) > 0.0 &&
+        as_double(expected) < as_double(std::numeric_limits<T>::min()) &&
+        as_double(actual) == 0.0) return;
+  }
   const auto expected_bits = bits(expected);
   const auto actual_bits = bits(actual);
   const auto ulps = expected_bits > actual_bits

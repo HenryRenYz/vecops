@@ -139,6 +139,8 @@ vecops_add_test(NAME VecRoundingTest FILES vec/RoundingTest.cpp
     FOLDER vec/arithmetic ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecMathTest FILES vec/MathTest.cpp
     FOLDER vec/math ARCH ${VEC_BASE_ARCH} LABELS vec)
+vecops_add_test(NAME VecMathSubnormalTest FILES vec/MathSubnormalTest.cpp
+    FOLDER vec/math ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecReciprocalTest FILES vec/ReciprocalTest.cpp
     FOLDER vec/math ARCH ${VEC_BASE_ARCH} LABELS vec)
 vecops_add_test(NAME VecLogTest FILES vec/LogTest.cpp

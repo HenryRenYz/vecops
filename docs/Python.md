@@ -507,8 +507,9 @@ per worker/invocation, not automatically persistent across calls.
 Visible `T.library` helpers now include:
 
 - `stable_sigmoid(x, accuracy="fast", algorithm="exp")` and `silu`: clamp
-  magnitude to 80; use reduced-argument exp plus squaring, or the explicit
-  `algorithm="polynomial"` AF3 SME evaluation schedule. Small-float inputs
+  magnitude to 80 and call native `T.exp_neg` at the requested accuracy.
+  `algorithm="polynomial"` remains a compatibility alias for the same native
+  path; no polynomial or squaring schedule lives in the DSL. Small-float inputs
   compute in float32. Accuracy values are strict, fast or estimate.
 - `rmsnorm(x, eps=1e-5, axis=-1, unroll=2)`: float32 accumulation for fp16/bf16.
 - `masked_softmax(x, mask=None, axis=-1, accuracy="fast", unroll=2)`:
@@ -653,7 +654,10 @@ C++ Matmul operator's `[N,K]` convention). Inputs may be views, elementwise
 tile DAGs or explicitly packed values. The result is also returned as a tile
 expression for a fused final store. `T.dot(A, B, acc=None)` is the pure
 returning form. Dot does not introduce cache blocking or persistent packing;
-instruction-format staging is still necessary for raw AMX/SME inputs.
+instruction-format staging is still necessary for raw AMX/SME inputs. Native
+floating products follow the selected instruction's fused accumulation and
+rounding semantics; bitwise equality with the vector widening path is not
+promised. Use an explicit implementation when that distinction matters.
 
 ```python
 a = T.cast(T.library.layernorm(T.load(A)) * scale + bias, "bfloat16")
@@ -673,7 +677,8 @@ reinterpreted by this transformation.
 
 Row/column GEMV use vector widening-dot/FMA leaves; matrix leaves use public
 AMX or SME instructions when their dtype/target contract permits, otherwise
-vector FMA. Accumulation defaults to int32 for 8-bit integer inputs, float64
+vector FMA. Accumulation defaults to int32 for 8-bit integer inputs, int64 for
+16-bit integer inputs, float64
 if either input is float64, otherwise float32. Native accumulator loads can
 initialize hardware accumulators directly. K-block continuation uses native
 accumulator storage; the original acc/bias is applied only on the first block
@@ -711,27 +716,47 @@ caches are allocated and read only on their selected branch.
 
 The library recipe owns BM/BN/BK cache loops, optional dense packing, one
 initial accumulator seed per panel and one final epilogue. Explicit blocks
-and packing choices remain authoritative. Automatic blocks query actual
+and optional dense-cache packing choices remain authoritative; required native
+grouping/padding is independent of that choice. Automatic blocks query actual
 L1/L2 capacity and may bypass packing/blocking when A, B and C fit conservative
 private-L2 shares. Empty M/N is checked before cache queries and traversal.
 L3 and LLC queries do not invent absent cache levels. Dot alone does not add
-cache blocking or automatic packing. Column-contiguous library outputs may
+cache blocking; matrix-instruction leaves do perform their required physical
+grouping and zero-padding. Column-contiguous library outputs may
 transpose the complete fused DAG by swapping A/B.
 
 `cpu_gemv_k_unroll` accepts 1, 2 or 4 (default 2) and controls source K-loop
-unrolling. `cpu_matmul_pipeline` accepts auto/off/prefetch/staged; source
-recipes use the generic `T.pipelined` planner. A staged request that cannot
+unrolling. `cpu_matmul_pipeline` accepts auto/off/prefetch/staged; vector source
+recipes use the generic `T.pipelined` planner. Matrix-instruction recipes use
+their fixed register reuse and K-loop unroll schedules. A staged request that cannot
 legally double-buffer a recurrence uses its diagnosed prefetch fallback.
 There is no private matrix pipeline printer.
 
-Raw first-sink, same-type FP32/FP64 SME products use a source MOPA recipe with
-a checked lexical SM/ZA owner, strided operand loads and direct horizontal
-stores. Its geometry follows the calling process's captured SVL. More complex
-products and narrow SME/AMX products currently use portable source vector
-recipes, including packed input decoding. Implementation hints retain dtype
-legality checks but do not resurrect the removed instruction-family generator.
-This deliberately sacrifices some hardware fast paths to complete migration;
-whole-catalog performance parity has not been established.
+Matrix instruction recipes live in `_library/amx_matmul.py` and
+`_library/sme_matmul.py`. AMX covers BF16/F16-to-F32 and all four I8-to-I32
+signedness pairs. SME additionally covers F32/F64 and I16-to-I64/I32.
+I16-to-I64 supports all sign pairs and requires SME_I16I64; I16-to-I32
+requires matching signedness and SME2, and AMX F16 requires
+AMX_FP16. Automatic selection retains a source vector fallback when the
+compiled target lacks an instruction; explicit implementation requests reject
+an unavailable family. Instruction support does not imply hardware availability. Automatic native
+selection currently requires M and N at least 16; smaller matrices retain the
+vector recipe and its producer-cache policy, as measured decode packing costs
+otherwise dominate. The versioned GCC 13 path currently adds roughly 2–3%
+to some single-row decode cases relative to the prior vector-only source;
+920f-4 showed up to roughly 4.5% overhead on a few decode pairs.
+This measured limitation is recorded alongside the gate, rather than treated
+as whole-catalog performance parity. Explicit requests retain native fringe support.
+Prologue expressions are evaluated over logical inputs before physical padding;
+accumulator/broadcast initialization precedes hardware compute, and output
+conversion/epilogues follow it. Aligned tiles reuse operands in 2x2 register
+families. AMX B packing uses the historical 16x16 dword register-transpose
+schedule, preserving grouped-K payload bits. Legal AMX raw A and complete-K external packed B can be read directly;
+same-type row-contiguous output can be written directly. Raw first-sink F32/F64
+SME sources also retain signed-stride direct reads, including with an accumulator
+and epilogue. Historical reads, aliasing, capacity and layout checks precede
+the lexical instruction owner. Whole-catalog performance parity remains a
+separate measured property, rather than an instruction-selection guarantee.
 
 The old matrix/cache/packing C++ loop generators, specialized schedule IR,
 SME automatic-packing policy objects and their experiment switches are gone.
@@ -785,14 +810,14 @@ tier. The default remains `"strict"` for both rank-one and rank-two tiles;
 their scalar inverse is defined by the same visible DSL helper, including
 rank-two masked normalization's safe denominator. This strengthens strict
 inverse precision and does not change the explicit `T.rcp` primitive,
-reduction order, or the default `unroll=2`. Like native C++ Softmax, FP32 `"estimate"`
-uses a visible degree-nine polynomial with seven squarings instead of FEXPA,
-which can be exceptionally slow for some ARM input values. Centered scores
-below -80 become zero and NaNs remain NaNs. Strict/Fast and non-FP32 compute
-dtypes keep the native exponential. Masked softmax uses the same policy.
-Scalar `T.rsqrt`/`T.rcp` on FP32/FP64 row statistics use the same native vec
-math dispatcher and accuracy tier as vector values, including SVE estimate
-and refinement instructions; they are not silently replaced by scalar libm.
+reduction order, or the default `unroll=2`. Every accuracy/compute dtype
+uses native `vec::exp_neg`, including masked softmax. There is no separate
+FP32 Estimate polynomial or -80 cutoff: the vec backend owns approximation,
+NaN propagation and the documented storage-format underflow policy.
+Scalar exponential, logarithm and reciprocal primitives use the same native
+vec math dispatcher and requested accuracy as vector values. Scalar row
+statistics broadcast into one native word and extract lane zero; no libm
+fallback silently discards their accuracy option.
 
 Unrolling copies each operation across iterations, not the complete body per
 iteration. Seven adjacent vector chunks group as 4+2+1, with powers P+2/P+1/P.
@@ -1892,18 +1917,18 @@ from the captured caller DAG into the current vector, not implemented as host
 callbacks or native closures. Cost-based operand caches use lazy reads: an
 inactive cache branch never loads uninitialized private memory or evaluates
 both arithmetic alternatives.
-Integer vector recipes perform modulo-32-bit multiply/accumulate using unsigned
+Integer vector recipes perform modulo-32/64-bit multiply/accumulate using unsigned
 arithmetic plus bit reinterpretation, not numeric saturating conversion.
 Packed ABI capacity, density and output-disjointness checks precede decoding.
-Raw first-sink FP32/FP64 SME dots without acc/epilogue stage a direct MOPA
-helper: no implicit packing, signed-stride vector loads, masked ZA stores and
-pre-owner alias copies. Earlier writes/captured state and broader native
-families use identity-preserving DSL vector recipes, not a native matrix loop
-printer. This migration does **not** claim AMX/SME instruction-family performance
-parity: complex/narrow matrix-instruction families currently use the portable
-vector implementation, including when requested as the implementation hint.
-Unsupported explicit dtype combinations still fail. Low-level `T.amx`/`T.sme`
-instruction APIs remain available; public C++ operators are unchanged.
+AMX and SME instruction families now stage source matrix recipes, including
+accumulators and pointwise producer/epilogue DAGs. Packing and fringes remain
+source algorithms; the terminal instruction printer owns no matrix/cache loop.
+Raw first-sink FP32/FP64 SME products retain strided reads and masked direct ZA
+stores; more general products preserve captured reads through private staging.
+Availability guards retain vector fallbacks for automatic selection and reject
+unavailable explicit instruction families. Low-level `T.amx`/`T.sme` APIs remain
+available; public C++ operators are unchanged. Performance parity is measured
+separately from correctness and instruction-family coverage.
 
 Cache traversal, private accumulator initialization, K-phase accumulation,
 optional dense packing and final epilogue application live in

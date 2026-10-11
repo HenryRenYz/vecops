@@ -50,6 +50,7 @@
 #include <limits>
 
 #include "vecops/vec/details/Dispatch.h"
+#include "vecops/vec/details/Math.h"
 
 namespace vecops::vec::details {
 
@@ -192,11 +193,11 @@ struct X86ExpReduction<ExpBase::Base10> {
  * Domain boundaries per base and storage type, as exact doubles (narrowed
  * by the caller). overflow is the largest input whose result stays finite
  * after one rounding; normal_limit flushes everything whose result would be
- * subnormal (used when gradual results are neither preserved nor produced
- * naturally); zero_limit is the true underflow boundary of the format; and
- * zero_sentinel is the clamp fed to computations that let the hardware
- * round subnormal results away. Values sit on the representable grid of the
- * storage type, chosen so no finite-result input is selected to a tail.
+ * subnormal; zero_limit is the true underflow boundary of the format.
+ * Non-preserving tiers clamp at normal_limit before evaluation so discarded
+ * results do not create subnormal intermediates on x86. Values sit on the
+ * representable storage-type grid, chosen so no finite-result input is
+ * selected to a tail.
  */
 template <ExpBase Base, typename T>
 struct X86ExpDomain;
@@ -214,9 +215,6 @@ struct X86ExpDomain<ExpBase::E, T> {
       std::same_as<T, float16_t> ? -9.704060527839
       : std::same_as<T, float32_t> ? -87.3365447505531
                                    : -708.3964185322641;
-  static constexpr double zero_sentinel =
-      std::same_as<T, float16_t> ? -18.0
-      : std::same_as<T, float32_t> ? -104.0 : -746.0;
 };
 
 template <typename T>
@@ -231,9 +229,6 @@ struct X86ExpDomain<ExpBase::Base2, T> {
   static constexpr double normal_limit =
       std::same_as<T, float16_t> ? -14.0
       : std::same_as<T, float32_t> ? -126.0 : -1022.0;
-  static constexpr double zero_sentinel =
-      std::same_as<T, float16_t> ? -26.0
-      : std::same_as<T, float32_t> ? -151.0 : -1076.0;
 };
 
 template <typename T>
@@ -250,9 +245,6 @@ struct X86ExpDomain<ExpBase::Base10, T> {
       std::same_as<T, float16_t> ? -4.21484375
       : std::same_as<T, float32_t> ? -37.929779052734375
                                    : -307.65265556858878;
-  static constexpr double zero_sentinel =
-      std::same_as<T, float16_t> ? -7.5625
-      : std::same_as<T, float32_t> ? -46.0 : -324.0;
 };
 
 /** Estimate-tier coefficients [a1, a2]: 1 + a1*r + a2*r^2, per base. */
@@ -354,11 +346,11 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_poly(
       return fmadd(tag, p, r, fill_word(tag, T(1)));
     }
     constexpr const double* k = x86_exp_estimate<Base>();
-    return fmadd(
-        tag, fill_word(tag, T(k[1])), r2,
-        fmadd(
-            tag, fill_word(tag, T(k[0])), r,
-            fill_word(tag, T(1))));
+    // Horner uses the same Estimate coefficients with one fewer multiply;
+    // the rounding difference remains well inside the relative-error tier.
+    return fmadd(tag,
+        fmadd(tag, fill_word(tag, T(k[1])), r, fill_word(tag, T(k[0]))),
+        r, fill_word(tag, T(1)));
   } else if constexpr (std::same_as<T, float16_t>) {
     constexpr const double* k = x86_exp_f16_strict<Base>();
     auto p = fill_word(tag, T(k[3]));
@@ -474,21 +466,10 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
   using T = ElementOf<Tag>;
   using Raw = decltype(x.value);
   using D = X86ExpDomain<Base, T>;
-  constexpr bool strict = Tier == Accuracy::Strict;
   constexpr bool estimate = Tier == Accuracy::Estimate;
-#ifdef VECOPS_PRESERVE_SUBNORMALS
-  constexpr bool gradual = strict;
-#else
-  constexpr bool gradual = false;
-#endif
-#if defined(CPU_CAPABILITY_AVX512) && !defined(VECOPS_PRESERVE_SUBNORMALS)
-  constexpr bool natural_underflow = true;
-#else
-  constexpr bool natural_underflow = false;
-#endif
+  constexpr bool gradual = math_preserves_subnormals<Tier>();
   const T overflow = T(D::overflow);
-  const T lower = natural_underflow
-      ? T(D::zero_sentinel) : T(gradual ? D::zero_limit : D::normal_limit);
+  const T lower = T(gradual ? D::zero_limit : D::normal_limit);
 
   auto xc = max(tag, x, fill_word(tag, lower));
   if constexpr (!NegativeOnly)
@@ -542,33 +523,50 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
   const auto poly = x86_exp_poly<Base, Tier, Index>(tag, r);
   NativeWordVec<Tag> y;
 #if defined(CPU_CAPABILITY_AVX512)
+  // Fuse the output cutoff into reconstruction; no extra zero blend and no
+  // discarded lane can generate a subnormal SCALEF result.
+  // This mask is REQUIRED by the output contract, independently of MXCSR.
+  // Unmasked SCALEF used to leak subnormal outputs in default/Fast/Estimate
+  // builds. The necessary check cost about 2-4% in some Strict/Fast ExpBench
+  // cases on the local Sapphire Rapids target (2026-10); removing it solely
+  // for throughput would restore that correctness bug. Any replacement must
+  // pass MathSubnormalTest with/without VECOPS_PRESERVE_SUBNORMALS and FTZ/DAZ,
+  // including signed zeros and preservation of masked inactive values.
+  // For a negative threshold, unsigned IEEE bit ordering accepts every
+  // nonnegative input and reverses the negative magnitude order. Use the
+  // integer compare pipeline to leave the floating-point pipes for the poly.
+  using Bits = std::conditional_t<sizeof(T) == 8, std::uint64_t,
+      std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint16_t>>;
+  constexpr Rebind<Bits, Tag> bits_tag{};
+  const auto reconstruct = cmple(bits_tag, bitcast(bits_tag, x),
+      fill_word(bits_tag, std::bit_cast<Bits>(lower)));
   if constexpr (std::same_as<T, float16_t>) {
 #if defined(HAS_AVX512_FP16)
     if constexpr (sizeof(Raw) == 16)
-      y = NativeWordVec<Tag>{_mm_castph_si128(_mm_scalef_ph(
+      y = NativeWordVec<Tag>{_mm_castph_si128(_mm_maskz_scalef_ph(reconstruct.value,
           _mm_castsi128_ph(poly.value), _mm_castsi128_ph(qf.value)))};
 #if VEC_WIDTH >= 256
     else if constexpr (sizeof(Raw) == 32)
-      y = NativeWordVec<Tag>{_mm256_castph_si256(_mm256_scalef_ph(
+      y = NativeWordVec<Tag>{_mm256_castph_si256(_mm256_maskz_scalef_ph(reconstruct.value,
           _mm256_castsi256_ph(poly.value), _mm256_castsi256_ph(qf.value)))};
 #endif
 #if VEC_WIDTH >= 512
-    else y = NativeWordVec<Tag>{_mm512_castph_si512(_mm512_scalef_ph(
+    else y = NativeWordVec<Tag>{_mm512_castph_si512(_mm512_maskz_scalef_ph(reconstruct.value,
         _mm512_castsi512_ph(poly.value), _mm512_castsi512_ph(qf.value)))};
 #endif
 #endif
   } else if constexpr (std::same_as<T, float32_t>) {
     if constexpr (sizeof(Raw) == 16)
-      y = NativeWordVec<Tag>{_mm_scalef_ps(poly.value, qf.value)};
+      y = NativeWordVec<Tag>{_mm_maskz_scalef_ps(reconstruct.value, poly.value, qf.value)};
     else if constexpr (sizeof(Raw) == 32)
-      y = NativeWordVec<Tag>{_mm256_scalef_ps(poly.value, qf.value)};
-    else y = NativeWordVec<Tag>{_mm512_scalef_ps(poly.value, qf.value)};
+      y = NativeWordVec<Tag>{_mm256_maskz_scalef_ps(reconstruct.value, poly.value, qf.value)};
+    else y = NativeWordVec<Tag>{_mm512_maskz_scalef_ps(reconstruct.value, poly.value, qf.value)};
   } else {
     if constexpr (sizeof(Raw) == 16)
-      y = NativeWordVec<Tag>{_mm_scalef_pd(poly.value, qf.value)};
+      y = NativeWordVec<Tag>{_mm_maskz_scalef_pd(reconstruct.value, poly.value, qf.value)};
     else if constexpr (sizeof(Raw) == 32)
-      y = NativeWordVec<Tag>{_mm256_scalef_pd(poly.value, qf.value)};
-    else y = NativeWordVec<Tag>{_mm512_scalef_pd(poly.value, qf.value)};
+      y = NativeWordVec<Tag>{_mm256_maskz_scalef_pd(reconstruct.value, poly.value, qf.value)};
+    else y = NativeWordVec<Tag>{_mm512_maskz_scalef_pd(reconstruct.value, poly.value, qf.value)};
   }
 #else
   constexpr IndexTag<Tag> index_tag{};
@@ -595,20 +593,29 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_family(
         tag, y, cmpgt(tag, x, fill_word(tag, overflow)),
         fill_word(tag, std::numeric_limits<T>::infinity()));
   }
-  if constexpr (!natural_underflow) {
+#if !defined(CPU_CAPABILITY_AVX512)
+  {
     y = blend(
         tag, y,
         cmplt(tag, x, fill_word(tag, gradual ? T(D::zero_limit)
                                            : T(D::normal_limit))),
         fill_word(tag, T(0)));
   }
+#endif
 #ifndef VECOPS_MATH_ASSUME_VALID_INPUTS
-  if constexpr (!NegativeOnly) {
-    y = blend(
-        tag, y, cmpne(tag, x, x), add(tag, x, x));
-  }
+  y = blend(tag, y, cmpne(tag, x, x), add(tag, x, x));
 #endif
   return y;
+}
+
+/** Apply the storage-format flush contract to widened narrow results. */
+template <Accuracy Tier, FloatingTag Tag>
+VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_flush_narrow(
+    Tag tag, NativeWordVec<Tag> value) {
+  if constexpr (math_preserves_subnormals<Tier>()) return value;
+  return blend(tag, value,
+      cmplt(tag, value, fill_word(tag, std::numeric_limits<ElementOf<Tag>>::min())),
+      fill_word(tag, ElementOf<Tag>(0)));
 }
 
 template <ExpBase Base, Accuracy Tier, bool NegativeOnly, nint_t Index,
@@ -638,11 +645,13 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_low_precision(
         Base, compute_tier, NegativeOnly, 0>(
             float_tag, NativeWordVec<FloatTag>{high});
     if constexpr (std::same_as<T, bfloat16_t>)
-      return NativeWordVec<Tag>{x86_float32_pair_to_bfloat16(
-          result_low.value, result_high.value)};
+      return x86_exp_flush_narrow<Tier>(tag,
+          NativeWordVec<Tag>{x86_float32_pair_to_bfloat16(
+              result_low.value, result_high.value)});
     else
-      return NativeWordVec<Tag>{x86_float32_pair_to_float16(
-          result_low.value, result_high.value)};
+      return x86_exp_flush_narrow<Tier>(tag,
+          NativeWordVec<Tag>{x86_float32_pair_to_float16(
+              result_low.value, result_high.value)});
   }
 #if VEC_WIDTH >= 256
   else if constexpr (sizeof(Raw) == 32) {
@@ -659,11 +668,13 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_low_precision(
         Base, compute_tier, NegativeOnly, 0>(
             float_tag, NativeWordVec<FloatTag>{high});
     if constexpr (std::same_as<T, bfloat16_t>)
-      return NativeWordVec<Tag>{x86_float32_pair_to_bfloat16(
-          result_low.value, result_high.value)};
+      return x86_exp_flush_narrow<Tier>(tag,
+          NativeWordVec<Tag>{x86_float32_pair_to_bfloat16(
+              result_low.value, result_high.value)});
     else
-      return NativeWordVec<Tag>{x86_float32_pair_to_float16(
-          result_low.value, result_high.value)};
+      return x86_exp_flush_narrow<Tier>(tag,
+          NativeWordVec<Tag>{x86_float32_pair_to_float16(
+              result_low.value, result_high.value)});
   }
 #endif
 #if VEC_WIDTH >= 512
@@ -681,11 +692,13 @@ VECOPS_ALWAYS_INLINE NativeWordVec<Tag> x86_exp_low_precision(
         Base, compute_tier, NegativeOnly, 0>(
             float_tag, NativeWordVec<FloatTag>{high});
     if constexpr (std::same_as<T, bfloat16_t>)
-      return NativeWordVec<Tag>{x86_float32_pair_to_bfloat16(
-          result_low.value, result_high.value)};
+      return x86_exp_flush_narrow<Tier>(tag,
+          NativeWordVec<Tag>{x86_float32_pair_to_bfloat16(
+              result_low.value, result_high.value)});
     else
-      return NativeWordVec<Tag>{x86_float32_pair_to_float16(
-          result_low.value, result_high.value)};
+      return x86_exp_flush_narrow<Tier>(tag,
+          NativeWordVec<Tag>{x86_float32_pair_to_float16(
+              result_low.value, result_high.value)});
   }
 #endif
 }

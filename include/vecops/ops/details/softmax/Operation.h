@@ -16,7 +16,6 @@
 #include "vecops/execution/Parallel.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/ops/details/softmax/Exp.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/vec/Vec.h"
 
@@ -235,8 +234,9 @@ public:
   template <typename BlockTag, typename Active>
   VECOPS_ALWAYS_INLINE static auto exp_cache_block(BlockTag block_tag, nint_t col, Active active,
                                                    vec::Vec<BlockTag> centered, ComputeType* exp_cache) {
-    auto exponential = softmax_details::exp_neg_estimate_safe<
-        ComputeType, ExpAccuracy>(block_tag, centered, active);
+    auto exponential = vec::exp_neg(
+        block_tag, centered,
+        vec::opt::math::accuracy<ExpAccuracy>, active, vec::opt::zero);
     vec::store(block_tag, exp_cache + col, exponential, active);
     return exponential;
   }
@@ -579,8 +579,9 @@ private:
             auto tile_max = vec::load(block_tag, tile_max_cache + i, active, vec::opt::merge(global_max));
             const auto maximum = vec::fill(block_tag, global_max);
             auto centered = vec::sub(tile_max, maximum);
-            auto scale = softmax_details::exp_neg_estimate_safe<
-                ComputeType, ExpAccuracy>(block_tag, centered, active);
+            auto scale = vec::exp_neg(
+                block_tag, centered,
+                vec::opt::math::accuracy<ExpAccuracy>, active, vec::opt::zero);
             vec::store(block_tag, tile_max_cache + i, scale, active);
             auto tile_sum = vec::load(block_tag, tile_sum_cache + i, active, vec::opt::merge(ComputeType(0)));
             // sum += exp(tile_max - global_max) * tile_sum: each tile's
@@ -589,9 +590,9 @@ private:
             sum = vec::fmadd(scale, tile_sum, sum);
           },
           kernel::loop::reduce_add(global_sum));
-        // A denormal/underflowed sum (or a NaN produced by the rescale)
-        // would divide the row by garbage; fall back instead. The check
-        // `> 0` also rejects a zero sum, whose rows are constant -inf.
+        // Reject an invalid or nonpositive normalization sum. A finite row
+        // contributes exp(0) at its maximum, so this guard handles exceptional
+        // data rather than imposing a subnormal cutoff on valid finite rows.
         if (!std::isfinite(static_cast<double>(global_sum)) || !(global_sum > ComputeType(0))) {
           run_bound_fallback<Recipe, CopyDirectInput>(n, exp_cache, x, y);
           return;

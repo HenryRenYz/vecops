@@ -14,9 +14,46 @@
  * @brief Backend-independent exponential batching and option dispatch.
  */
 
+#include <bit>
+#include <cstdint>
+#include <limits>
+#include <type_traits>
+
 #include "vecops/vec/details/Arithmetic.h"
 
 namespace vecops::vec::details {
+
+/** Build-level output policy, independent of the caller's FPCR/MXCSR mode. */
+template <Accuracy A>
+constexpr bool math_preserves_subnormals() {
+#ifdef VECOPS_PRESERVE_SUBNORMALS
+  return A == Accuracy::Strict;
+#else
+  return false;
+#endif
+}
+
+/**
+ * Flush scalar math results by IEEE representation, preserving signed zero.
+ * Floating comparisons are insufficient with x86 DAZ: they can read a stored
+ * subnormal as zero and accidentally leave its nonzero bits in the result.
+ * This is a numerical-contract check, not an optional slow-path workaround.
+ * Retain its signed-zero and FTZ/DAZ guarantees when optimizing it; the
+ * MathSubnormalTest reciprocal cases exercise both hardware modes.
+ */
+template <Accuracy A, Element T>
+VECOPS_ALWAYS_INLINE T math_flush_subnormal_scalar(T value) {
+  static_assert(::vecops::is_float_v<T>);
+  if constexpr (math_preserves_subnormals<A>()) return value;
+  using Bits = std::conditional_t<sizeof(T) == 8, std::uint64_t,
+      std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint16_t>>;
+  constexpr int fraction_bits = std::numeric_limits<T>::digits - 1;
+  constexpr int exponent_bits = sizeof(T) * 8 - fraction_bits - 1;
+  constexpr Bits sign = Bits(1) << (sizeof(T) * 8 - 1);
+  constexpr Bits exponent = ((Bits(1) << exponent_bits) - 1) << fraction_bits;
+  const Bits bits = std::bit_cast<Bits>(value);
+  return (bits & exponent) == 0 ? std::bit_cast<T>(Bits(bits & sign)) : value;
+}
 
 template <ExpBase Base, Accuracy A, bool NegativeOnly>
 struct EnableElementwiseWordBatching<ExpOp<Base, A, NegativeOnly>>

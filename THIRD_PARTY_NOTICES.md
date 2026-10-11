@@ -83,6 +83,12 @@ Local material:
 | `x86/math/Log.h` | Arm-derived coefficients/tables adapted to x86 evaluation |
 | `x86/math/Exp.h` | f16 constant bit-pattern comparison with Arm; its source attributes the f32 fits to vecops, separate from SLEEF f64 sets |
 
+Project-owned numerical-policy changes in October 2026 centralize the
+Strict-only gradual-output policy and scalar/SVE-fp16 IEEE bit-based flushing. The
+SVE exponential tails retain the upstream-style scale-and-select structure;
+x86 reconstruction applies the documented output cutoff even with hardware
+FTZ disabled. These changes introduce no upstream coefficients or tables.
+
 Fixed reference: commit `67126040cf80f956676fbf473c2d9bebdb475283` of
 [ARM-software/optimized-routines](https://github.com/ARM-software/optimized-routines/tree/67126040cf80f956676fbf473c2d9bebdb475283).
 `sve/math/Trig.h` already records this source commit. For the other families

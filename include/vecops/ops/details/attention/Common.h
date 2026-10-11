@@ -13,7 +13,6 @@
 #include "vecops/CoreTypes.h"
 #include "vecops/kernel/Loop.h"
 #include "vecops/kernel/Workspace.h"
-#include "vecops/ops/details/softmax/Exp.h"
 #include "vecops/tensor/DataAccess.h"
 #include "vecops/tensor/OptionalOperand.h"
 #include "vecops/vec/Vec.h"
@@ -312,9 +311,9 @@ VECOPS_INLINE void softmax_row(
         auto values = vec::load(
             block_tag, scores + i, active,
             vec::opt::merge(negative_infinity));
-        auto exponential = softmax_details::exp_neg_estimate_safe<
-            Score, ExpAccuracy>(
-            block_tag, vec::sub(block_tag, values, maximum_v), active);
+        auto exponential = vec::exp_neg(
+            block_tag, vec::sub(block_tag, values, maximum_v),
+            vec::opt::math::accuracy<ExpAccuracy>, active, vec::opt::zero);
         sum_v = vec::add(sum_v, exponential);
         vec::store(block_tag, scores + i, exponential, active);
       },

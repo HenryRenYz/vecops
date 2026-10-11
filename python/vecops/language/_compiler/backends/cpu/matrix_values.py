@@ -56,6 +56,9 @@ def stage_matrix_values(ir, context):
             (result.type.shape[1], I.literal(1)),
             I.literal(0),
             owned=True,
+            region=I.ViewRegion(result.type.shape, (result.type.shape[1], I.literal(1)),
+                                (I.literal(0), I.literal(0)), result.type.shape,
+                                (1, 1), (0, 1), (False, False)),
           )
           output.extend((I.Allocate(view), I.Store(view, result)))
           saved[id(value)] = result = I.Expr(result.type, "load", data=view)

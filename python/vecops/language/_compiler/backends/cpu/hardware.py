@@ -167,7 +167,13 @@ def preflight(region, catalog=None):
       # Check the actual subview rather than demand a non-overlapping root:
       # disjoint writable subregions of a broadcast root can still be legal.
       if any(affine_contains(v, bounds, definitions) for v in (*view.shape, *view.strides)):
-        raise TypeError("hardware store layout must be invariant within its instruction loops")
+        if region.kind != "amx" or any(affine_contains(v, bounds, definitions) for v in view.strides):
+          raise TypeError("hardware store layout must be invariant within its instruction loops")
+        # AMX stores exactly the configured rectangle. The capacity checks
+        # above prove it fits even when a clipped source slice retains loop-
+        # dependent shape expressions. Check that invariant rectangle's
+        # layout, rather than an unused larger logical slice.
+        view = replace(view, shape=tuple(I.literal(v) for v in needed))
       checked_view = replace(
         view,
         shape=tuple(expand_definitions(v, definitions) for v in view.shape),

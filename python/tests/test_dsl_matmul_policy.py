@@ -117,7 +117,9 @@ def test_load_conversion_participates_in_recompute_cost():
     B: T.Tensor((33, 4096), dtype="bfloat16"),
     C: T.Tensor((17, 4096), dtype="float32", access="output"),
   ):
-    T.dot((T.load(A, dtype="bfloat16"), B), C)
+    # Exercise the vector recomputation policy. Matrix-instruction recipes
+    # materialize the conversion once in their mandatory physical packing.
+    T.dot((T.load(A, dtype="bfloat16"), B), C, implementation="vector")
 
   artifact = plans(kernel)
   assert [statement.destination.storage.rsplit("_", 3)[-3] for statement in caches(artifact)] == ["0"]

@@ -31,8 +31,12 @@
  * therefore have unspecified results. `VECOPS_MATH_ASSUME_VALID_INPUTS` also
  * skips NaN propagation checks on this path.
  *
+ * By default every tier flushes subnormal outputs to zero.
  * When `VECOPS_PRESERVE_SUBNORMALS` is defined, Strict preserves representable
  * subnormal results. Fast and Estimate always flush subnormal outputs to zero.
+ * The output storage format determines this policy, including widened narrow
+ * implementations. Flushing is independent of FPCR/MXCSR; a caller enabling
+ * hardware flush can still suppress Strict's gradual results.
  *
  * Accuracy is orthogonal to the unary masking options. Calls may combine one
  * accuracy option with exactly one `opt::masked(mask)`, `opt::first(count)`, or
@@ -65,8 +69,9 @@
  * rsqrt(+-0) = +inf, rsqrt(x < 0) = NaN, and NaN propagates. When
  * `VECOPS_PRESERVE_SUBNORMALS` is defined, Strict produces gradual subnormal
  * results (rcp of huge inputs); Fast and Estimate always flush subnormal
- * outputs to zero. Accuracy options apply exactly as for the exponential
- * family, including combination with masking options.
+ * outputs to signed zero (as does default Strict). The storage-format and
+ * hardware-mode rules above apply here too. Accuracy options apply as for
+ * the exponential family, including combination with masking options.
  *
  * ***
  *

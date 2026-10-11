@@ -180,12 +180,21 @@ class HardwareFrontend:
       tile = I.constant(self.value(args[0], node))
       a, b = args[1:]
       da, db = a.dtype, b.dtype
-      integer = da in {"int8", "uint8"} and db in {"int8", "uint8"}
+      integer = (da in {"int8", "uint8"} and db in {"int8", "uint8"}) or (
+        da in {"int16", "uint16"} and db in {"int16", "uint16"}
+      )
       floating = da == db and da in {"float16", "bfloat16", "float32", "float64"}
       if not (integer or floating):
         self.error(node, "unsupported SME mopa operand dtype combination")
-      dtype = "int32" if integer else "float64" if da == "float64" else "float32"
-      limit = 8 if dtype == "float64" else 4
+      dtype = dtype_name(kwargs.get("acc_dtype", "int64" if da in {"int16", "uint16"} else
+                                    "int32" if integer else "float64" if da == "float64" else "float32"))
+      legal = (dtype in {"int32", "int64"} if da in {"int16", "uint16"} else
+               dtype == "int32" if integer else dtype == ("float64" if da == "float64" else "float32"))
+      if not legal:
+        self.error(node, "unsupported SME mopa accumulator dtype")
+      if dtype == "int32" and da in {"int16", "uint16"} and da != db:
+        self.error(node, "SME2 I16I32 requires matching operand signedness")
+      limit = ELEMENT_BYTES[dtype]
       if type(tile) is not int or not 0 <= tile < limit:
         self.error(node, "SME accumulator tile index out of range")
       self.block.statements.append(I.ArchitectureCall(operation, tile, operands=(dtype, a, b)))
@@ -196,9 +205,9 @@ class HardwareFrontend:
       view = args[1]
       tile = I.constant(self.value(args[0], node))
       if (
-        view.dtype not in {"float32", "int32", "float64"}
+        view.dtype not in {"float32", "int32", "float64", "int64"}
         or type(tile) is not int
-        or not 0 <= tile < (8 if view.dtype == "float64" else 4)
+        or not 0 <= tile < ELEMENT_BYTES[view.dtype]
       ):
         self.error(node, "invalid SME store accumulator type/index")
       self.block.statements.append(I.ArchitectureCall(operation, tile, view))

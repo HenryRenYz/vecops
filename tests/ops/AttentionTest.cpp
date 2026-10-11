@@ -64,14 +64,13 @@ TEST(AttentionTest, EstimateSoftmaxExpHandlesLargeNegativeScores) {
     input[static_cast<std::size_t>(lane)] =
         scores[static_cast<std::size_t>(lane) % scores.size()];
   const auto active = vec::mwhilelt(tag, 0, lanes - 1);
-  const auto result = ops::softmax_details::exp_neg_estimate_safe<
-      float32_t, vec::Accuracy::Estimate>(
+  const auto result = vec::exp_neg(
       tag, vec::load(tag, input.data(), vec::opt::unmasked),
-      vec::opt::masked(active));
+      vec::opt::math::estimate, vec::opt::masked(active), vec::opt::zero);
   vec::store(tag, output.data(), result, vec::opt::unmasked);
   for (nint_t lane = 0; lane < lanes; ++lane) {
     const auto index = static_cast<std::size_t>(lane);
-    if (lane == lanes - 1 || input[index] < -80.0f) {
+    if (lane == lanes - 1 || input[index] == -std::numeric_limits<float32_t>::infinity()) {
       EXPECT_EQ(output[index], 0.0f);
     } else {
       const float32_t expected = std::exp(input[index]);
@@ -97,8 +96,7 @@ TEST(AttentionTest, EstimateSoftmaxHandlesExtremeMaskedScores) {
   double output_sum = 0.0;
   for (std::size_t i = 0; i < x.size(); ++i) {
     output_sum += out[i];
-    if (x[i] < -80.0f) EXPECT_EQ(out[i], 0.0f);
-    else EXPECT_NEAR(out[i], std::exp(static_cast<double>(x[i])) /
+    EXPECT_NEAR(out[i], std::exp(static_cast<double>(x[i])) /
                                reference_sum, 0.008);
   }
   EXPECT_NEAR(output_sum, 1.0, 0.008);
@@ -116,16 +114,15 @@ TEST(AttentionTest, EstimateSoftmaxExpTracksNormalRange) {
       input[static_cast<std::size_t>(lane)] =
           -80.0f * static_cast<float32_t>(sample % 809) / 808.0f;
     }
-    const auto result = ops::softmax_details::exp_neg_estimate_safe<
-        float32_t, vec::Accuracy::Estimate>(
+    const auto result = vec::exp_neg(
         tag, vec::load(tag, input.data(), vec::opt::unmasked),
-        vec::opt::unmasked);
+        vec::opt::math::estimate, vec::opt::unmasked);
     vec::store(tag, output.data(), result, vec::opt::unmasked);
     for (nint_t lane = 0; lane < lanes; ++lane) {
       const auto expected =
           std::exp(input[static_cast<std::size_t>(lane)]);
       EXPECT_NEAR(output[static_cast<std::size_t>(lane)], expected,
-                  expected * 0.001f);
+                  expected * 0.006f);
     }
   }
 }

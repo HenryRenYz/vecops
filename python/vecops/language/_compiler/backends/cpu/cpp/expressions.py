@@ -206,23 +206,19 @@ class ExpressionsEmitter:
       return f"({arguments[0]} ? {arguments[1]} : {arguments[2]})"
     if value.op == "fma":
       return f"std::fma({', '.join(arguments)})"
-    if implementation.scalar_kind == "std_math":
-      return f"std::{implementation.scalar_spelling}({arguments[0]})"
-    if implementation.scalar_kind == "reciprocal":
-      if value.type.dtype in {"float32", "float64"}:
-        # Row statistics are scalar, but their math contract is the same as
-        # vector math. Broadcasting into one native word lets each backend
-        # select its reciprocal estimate/refinement tier (as C++ LayerNorm
-        # does) rather than silently routing every tier through scalar libm.
-        # A single get extracts the result; no closure or register array is
-        # introduced, including the sizeless SVE representation.
-        cpp = CPP_TYPES[value.type.dtype]
-        tag = f"vecops::vec::ScalableTag<{cpp}, 0>"
-        tier = value.data or "strict"
-        return (
-          f"vecops::vec::get({tag}{{}}, vecops::vec::{value.op}({tag}{{}}, "
-          f"vecops::vec::fill({tag}{{}}, static_cast<{cpp}>({arguments[0]})), "
-          f"vecops::vec::opt::math::{tier}), 0)"
-        )
-      return f"(static_cast<{CPP_TYPES[value.type.dtype]}>(1) / {'std::sqrt(' + arguments[0] + ')' if value.op == 'rsqrt' else arguments[0]})"
+    if implementation.scalar_kind in {"std_math", "reciprocal"}:
+      # Row statistics are scalar, but their math contract is the same as
+      # vector math. Broadcasting into one native word lets each backend
+      # select the requested math accuracy (as C++ LayerNorm does) instead
+      # of silently routing scalar exp/log/reciprocals through libm.
+      # A single get extracts the result; no closure or register array is
+      # introduced, including the sizeless SVE representation.
+      cpp = CPP_TYPES[value.type.dtype]
+      tag = f"vecops::vec::ScalableTag<{cpp}, 0>"
+      tier = value.data or "strict"
+      option = f", vecops::vec::opt::math::{tier}" if implementation.wordwise_math else ""
+      return (
+        f"vecops::vec::get({tag}{{}}, vecops::vec::{value.op}({tag}{{}}, "
+        f"vecops::vec::fill({tag}{{}}, static_cast<{cpp}>({arguments[0]})){option}), 0)"
+      )
     raise TypeError(f"no scalar lowering for {value.op}")

@@ -112,8 +112,9 @@ def vector_tile_dot(inputs, *, acc=None, acc_dtype="float32", unroll=2):
     right = T.expand_dims(T.cast(b[k, :], acc_dtype), 0)
     if acc_dtype == "float32" or acc_dtype == "float64":
       result = T.fma(left, right, result)
-    elif acc_dtype == "int32":
-      result = T.bitcast(T.bitcast(result, "uint32") + T.bitcast(left, "uint32") * T.bitcast(right, "uint32"), "int32")
+    elif acc_dtype == "int32" or acc_dtype == "int64":
+      bits = "uint64" if acc_dtype == "int64" else "uint32"
+      result = T.bitcast(T.bitcast(result, bits) + T.bitcast(left, bits) * T.bitcast(right, bits), acc_dtype)
     else:
       result = result + left * right
   return result
@@ -124,7 +125,8 @@ def _vector_row_update(value, columns, a, row, k, dtype):
   scalar = T.cast(T.element_at(a, (row, k)), dtype)
   if dtype == "float32" or dtype == "float64":
     return T.fma(scalar, columns, value)
-  return T.bitcast(T.bitcast(value, "uint32") + T.bitcast(scalar, "uint32") * T.bitcast(columns, "uint32"), "int32")
+  bits = "uint64" if dtype == "int64" else "uint32"
+  return T.bitcast(T.bitcast(value, bits) + T.bitcast(scalar, bits) * T.bitcast(columns, bits), dtype)
 
 
 @T.func
@@ -156,7 +158,7 @@ def _vector_dot_core(
   a, b = inputs
   a, b = T.as_value(a), T.as_value(b)
   T.static_assert(len(a.shape) == 2 and len(b.shape) == 2 and len(output.shape) == 2)
-  T.static_assert(acc_dtype == "float32" or acc_dtype == "float64" or acc_dtype == "int32")
+  T.static_assert(acc_dtype == "float32" or acc_dtype == "float64" or acc_dtype == "int32" or acc_dtype == "int64")
   assert a.shape[1] == b.shape[0], "incompatible vector dot reduction extents"
   assert output.shape[0] == a.shape[0] and output.shape[1] == b.shape[1], "vector dot output shape mismatch"
   descriptor = T.Vector(acc_dtype)
@@ -215,21 +217,23 @@ def _vector_inner_dot_into(inputs, output, *, acc=None, acc_dtype="float32", epi
   initial = None if acc is None else T.broadcast_to(T.cast(T.as_value(acc), acc_dtype), output.shape)
   for row in T.serial(a.shape[0], unroll=1):
     for column in T.serial(b.shape[1], unroll=1):
-      if acc_dtype == "int32":
+      if acc_dtype == "int32" or acc_dtype == "int64":
+        bits = "uint64" if acc_dtype == "int64" else "uint32"
         product = T.bitcast(
           T.reduce_add(
-            T.bitcast(T.cast(a[row, :], "int32"), "uint32") * T.bitcast(T.cast(b[:, column], "int32"), "uint32"),
+            T.bitcast(T.cast(a[row, :], acc_dtype), bits) * T.bitcast(T.cast(b[:, column], acc_dtype), bits),
             unroll=unroll,
           ),
-          "int32",
+          acc_dtype,
         )
       else:
         product = T.reduce_add(T.cast(a[row, :], acc_dtype) * T.cast(b[:, column], acc_dtype), unroll=unroll)
       value = T.as_vector(T.full((1,), product, dtype=acc_dtype), T.Vector(acc_dtype, N=1))
       if initial is not None:
-        if acc_dtype == "int32":
+        if acc_dtype == "int32" or acc_dtype == "int64":
+          bits = "uint64" if acc_dtype == "int64" else "uint32"
           value = T.bitcast(
-            T.bitcast(value, "uint32") + T.bitcast(T.element_at(initial, (row, column)), "uint32"), "int32"
+            T.bitcast(value, bits) + T.bitcast(T.element_at(initial, (row, column)), bits), acc_dtype
           )
         else:
           value = value + T.cast(T.element_at(initial, (row, column)), acc_dtype)

@@ -210,7 +210,7 @@ def test_native_shared_producer_tail_layouts_aliases_and_row_refresh(native_shar
           mask[1] = 0
         source[...] = rng.normal(size=(3, width)) * 4 + repeat
         if width:
-          source[2, 0] = 100  # Exercise the <-80 estimate cutoff and tail masks.
+          source[2, 0] = 100  # Exercise native exp underflow and tail masks.
         before = source.copy()
         expected = reference(before, mask, masked)
         compiled(source, mask, output, other)
@@ -227,7 +227,7 @@ def test_native_shared_producer_tail_layouts_aliases_and_row_refresh(native_shar
   # The cached producer must match the existing materialized schedule for
   # special values. Masked softmax specifies finite valid logits, and native
   # exp_neg keeps backend NaN behavior; neither promises a NumPy-style whole
-  # NaN row. FP32-compute Estimate's visible polynomial does preserve NaNs.
+  # NaN row. The native math backend owns NaN and underflow behavior.
   special = np.zeros((3, 129), dtype=dtype)
   special[0, 127] = np.nan
   special[1, 1:] = -1000
