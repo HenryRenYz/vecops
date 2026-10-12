@@ -147,7 +147,7 @@ class HardwareEmitter(SMEInstructionEmitter):
     for view in plan.writes:
       root = self.storage_views.get(view.storage)
       if root is not None:
-        for identity in set(self.active_loads) & set(future):
+        for identity in self.live_loads(future):
           self.snapshot(self.active_loads[identity], root, True)
     # Generic fusion may group stores; restore instruction order for a region
     # that explicitly owns destructive architectural state.

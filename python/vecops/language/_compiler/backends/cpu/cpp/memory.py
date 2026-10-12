@@ -11,6 +11,17 @@ from ..capabilities import CPP_TYPES
 
 
 class MemoryEmitter:
+  def live_loads(self, required):
+    """Visit retained reads in capture order, independent of object addresses.
+
+    Python ids are membership keys only. Iterating their set changed alias
+    preparation order between equivalent lowerings and changed native code.
+    Keep the scheduling deterministic when tuning it. Snapshotting never writes caller memory;
+    an immutable key tuple preserves the original independent-read semantics.
+    """
+    required = set(required)
+    return tuple(identity for identity in self.active_loads if identity in required)
+
   def conversion_layout_option(self):
     """A private paired load/store layout exists only in a proven full body."""
     return ", vecops::vec::cvt::unordered" if getattr(self, "pointwise_register_layout", None) else ""
@@ -360,7 +371,8 @@ class MemoryEmitter:
     current = {id(load): load for load in I.loads_unique(statement.value)}
     if statement.mask is not None:
       current.update({id(load): load for load in I.loads_unique(statement.mask)})
-    preserved = set(self.active_loads) & set(future)
+    preserved = self.live_loads(future)
+    preserved_ids = set(preserved)
     # Matrix inputs are re-read across output tiles. Even identical mappings
     # are not an elementwise-safe in-place update (C=A/B needs a snapshot).
     matrix_inputs = {
@@ -384,7 +396,7 @@ class MemoryEmitter:
       self.snapshot(
         load,
         statement.destination,
-        identity in preserved or identity in matrix_inputs or identity in transformed_inputs or load.op == "gather",
+        identity in preserved_ids or identity in matrix_inputs or identity in transformed_inputs or load.op == "gather",
       )
       if not historical and identity in self.snapshots:
         fresh[identity] = self.snapshots[identity]
@@ -411,8 +423,8 @@ class MemoryEmitter:
     dependencies = self.expression_loads(region)
     dependencies.update(future)
     destinations = {s.destination.storage for s in self.stores(region)}
-    for identity in set(self.active_loads) & set(dependencies):
-      for destination in destinations:
+    for identity in self.live_loads(dependencies):
+      for destination in sorted(destinations):
         root = self.storage_views.get(destination)
         if root is not None:
           self.snapshot(self.active_loads[identity], root, True)

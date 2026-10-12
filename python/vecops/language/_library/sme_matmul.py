@@ -6,6 +6,8 @@ I8/I32 uses four-byte groups (all sign pairs), I16/I64 four halfwords,
 I16/I32 two halfwords, F16/BF16 two halfwords, and F32/F64 one element.
 Producer packing, initial accumulators and output epilogues are source DSL;
 only typed vector/ZA instructions execute in the no-throw streaming owner.
+External fractional-K inputs borrow their complete prefix and privately repair
+one terminal group per spatial panel; neither padding nor the caller is modified.
 """
 
 from .. import dsl as T
@@ -16,13 +18,15 @@ from .sme_packing import pack_fringe
 
 @T.func
 def _repair_packed_tail(source, destination, reduction, group):
-  """Retain physical panels and clear only invalid lanes of the last group.
+  """Copy only the terminal group and clear its invalid storage lanes.
 
-  External padding has no numerical promise. A physical copy plus one masked
-  group avoids decoding all logical elements and running a ZA transpose again.
-  Selection performs no arithmetic on discarded NaN/Inf padding.
+  External padding has no numerical promise. The complete K prefix stays in
+  the checked borrowed view; only the final group needs private storage.
+  Capacity/nonaliasing checks remain at the caller's packed boundary. The
+  repair is necessary even if a particular packer normally writes zeros:
+  external NaN/Inf K padding must not enter MOPA. Selection performs no
+  arithmetic on discarded lanes, and never modifies caller-owned storage.
   """
-  T.store(destination, T.load(source))
   # Only the low one/two index bits matter. A modulo-256 byte sequence keeps
   # the same group offsets even for SVL > 128B, and avoids an int64 index
   # vector wider than scalable SVE's four-word limit. Cast the scalar bound
@@ -31,7 +35,7 @@ def _repair_packed_tail(source, destination, reduction, group):
            < T.cast(reduction % group, "uint8"))
   for panel in T.serial(source.shape[0], unroll=1):
     tail = T.load(source[panel, source.shape[1] - 1, :])
-    T.store(destination[panel, source.shape[1] - 1, :], T.where(valid, tail, 0))
+    T.store(destination[panel, 0, :], T.where(valid, tail, 0))
 
 
 @T.func
@@ -88,7 +92,7 @@ def _pack_view(dense, packed, dtype, group):
 
 @T.func
 def _grouped_tiles(a, b, output, *, initial, group, groups=None, raw_a=False, raw_b=False, initial_broadcast=None,
-                   full_packed_views=True):
+                   full_packed_views=True, tail_a=None, tail_b=None):
   if groups is None:
     groups = a.shape[0]
   # Each physical panel contains exactly two complete streaming words.
@@ -101,9 +105,9 @@ def _grouped_tiles(a, b, output, *, initial, group, groups=None, raw_a=False, ra
     b = T.reshape(b, (b.shape[0], b.shape[1], 2, b.shape[2] // 2))
   if (output.shape[0] % (2 * sme.streaming_lanes(output.dtype)) == 0 and
       output.shape[1] % (2 * sme.streaming_lanes(output.dtype)) == 0):
-    _grouped_tiles_2x2(a, b, output, initial=initial, group=group, groups=groups, raw_a=raw_a, raw_b=raw_b, initial_broadcast=initial_broadcast)
+    _grouped_tiles_2x2(a, b, output, initial=initial, group=group, groups=groups, raw_a=raw_a, raw_b=raw_b, initial_broadcast=initial_broadcast, tail_a=tail_a, tail_b=tail_b)
   else:
-    _grouped_tiles_1x1(a, b, output, initial=initial, group=group, groups=groups, raw_a=raw_a, raw_b=raw_b, initial_broadcast=initial_broadcast)
+    _grouped_tiles_1x1(a, b, output, initial=initial, group=group, groups=groups, raw_a=raw_a, raw_b=raw_b, initial_broadcast=initial_broadcast, tail_a=tail_a, tail_b=tail_b)
 
 
 @T.func
@@ -135,7 +139,25 @@ def _load_b(b, ki, ni, width, group, raw):
 
 
 @T.func
-def _grouped_tiles_2x2(a, b, output, *, initial, group, groups, raw_a, raw_b, initial_broadcast=None):
+def _load_terminal_a(a, tail, ki, mi, width, group, raw):
+  if tail is not None:
+    result = _load_a(tail, 0, mi, width, group, False)
+  else:
+    result = _load_a(a, ki, mi, width, group, raw)
+  return result
+
+
+@T.func
+def _load_terminal_b(b, tail, ki, ni, width, group, raw):
+  if tail is not None:
+    result = _load_b(tail, 0, ni, width, group, False)
+  else:
+    result = _load_b(b, ki, ni, width, group, raw)
+  return result
+
+
+@T.func
+def _grouped_tiles_2x2(a, b, output, *, initial, group, groups, raw_a, raw_b, initial_broadcast=None, tail_a=None, tail_b=None):
   with sme.region():
     width = sme.streaming_lanes(output.dtype)
     for mblock in T.serial(output.shape[0] // (2 * width), unroll=1):
@@ -153,11 +175,20 @@ def _grouped_tiles_2x2(a, b, output, *, initial, group, groups, raw_a, raw_b, in
             for c in T.unroll(2):
               for row in T.serial(width, unroll=2):
                 sme.load_hor(r * 2 + c, row, output[mi + r * width + row, ni + c * width:ni + (c + 1) * width])
-        for ki in T.serial(groups, unroll=2):
+        for ki in T.serial(groups - (1 if tail_a is not None or tail_b is not None else 0), unroll=2):
           a0 = _load_a(a, ki, mi, width, group, raw_a)
           a1 = _load_a(a, ki, mi + width, width, group, raw_a)
           b0 = _load_b(b, ki, ni, width, group, raw_b)
           b1 = _load_b(b, ki, ni + width, width, group, raw_b)
+          sme.mopa(0, a0, b0, acc_dtype=output.dtype)
+          sme.mopa(1, a0, b1, acc_dtype=output.dtype)
+          sme.mopa(2, a1, b0, acc_dtype=output.dtype)
+          sme.mopa(3, a1, b1, acc_dtype=output.dtype)
+        if tail_a is not None or tail_b is not None:
+          a0 = _load_terminal_a(a, tail_a, groups - 1, mi, width, group, raw_a)
+          a1 = _load_terminal_a(a, tail_a, groups - 1, mi + width, width, group, raw_a)
+          b0 = _load_terminal_b(b, tail_b, groups - 1, ni, width, group, raw_b)
+          b1 = _load_terminal_b(b, tail_b, groups - 1, ni + width, width, group, raw_b)
           sme.mopa(0, a0, b0, acc_dtype=output.dtype)
           sme.mopa(1, a0, b1, acc_dtype=output.dtype)
           sme.mopa(2, a1, b0, acc_dtype=output.dtype)
@@ -169,7 +200,7 @@ def _grouped_tiles_2x2(a, b, output, *, initial, group, groups, raw_a, raw_b, in
 
 
 @T.func
-def _grouped_tiles_1x1(a, b, output, *, initial, group, groups, raw_a, raw_b, initial_broadcast=None):
+def _grouped_tiles_1x1(a, b, output, *, initial, group, groups, raw_a, raw_b, initial_broadcast=None, tail_a=None, tail_b=None):
   with sme.region():
     width = sme.streaming_lanes(output.dtype)
     for mi in T.serial(0, output.shape[0], width, unroll=1):
@@ -182,9 +213,13 @@ def _grouped_tiles_1x1(a, b, output, *, initial, group, groups, raw_a, raw_b, in
         elif initial:
           for row in T.serial(T.min(width, output.shape[0] - mi), unroll=2):
             sme.load_hor(0, row, output[mi + row, ni:ni + width])
-        for ki in T.serial(groups, unroll=2):
+        for ki in T.serial(groups - (1 if tail_a is not None or tail_b is not None else 0), unroll=2):
           left = _load_a(a, ki, mi, width, group, raw_a)
           right = _load_b(b, ki, ni, width, group, raw_b)
+          sme.mopa(0, left, right, acc_dtype=output.dtype)
+        if tail_a is not None or tail_b is not None:
+          left = _load_terminal_a(a, tail_a, groups - 1, mi, width, group, raw_a)
+          right = _load_terminal_b(b, tail_b, groups - 1, ni, width, group, raw_b)
           sme.mopa(0, left, right, acc_dtype=output.dtype)
         for row in T.serial(T.min(width, output.shape[0] - mi), unroll=2):
           sme.store_hor(0, row, output[mi + row, ni:ni + width])
@@ -234,45 +269,45 @@ def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, ra
         if k % group == 0:
           _input_b(source_a, b, packed_b, raw_b, output, acc, acc_dtype, epilogue, group, kp, width, broadcast_acc, full_packed_views)
         else:
-          saved_a = T.alloc(shape_a, dtype=a.dtype)
+          saved_a = T.alloc((shape_a[0], 1, shape_a[2]), dtype=a.dtype)
           _repair_packed_tail(source_a, saved_a, k, group)
-          _input_b(saved_a, b, packed_b, raw_b, output, acc, acc_dtype, epilogue, group, kp, width, broadcast_acc, full_packed_views)
+          _input_b(source_a, b, packed_b, raw_b, output, acc, acc_dtype, epilogue, group, kp, width, broadcast_acc, full_packed_views, tail_a=saved_a)
       else:
         left = _packed_operand(a, "A", acc_dtype, raw_a)
         _input_b(left, b, packed_b, raw_b, output, acc, acc_dtype, epilogue, group, kp, width, broadcast_acc, full_packed_views)
 
 
 @T.func
-def _input_b(left, b, packed_b, raw_b, output, acc, dtype, epilogue, group, kp, width, broadcast_acc, full_packed_views):
+def _input_b(left, b, packed_b, raw_b, output, acc, dtype, epilogue, group, kp, width, broadcast_acc, full_packed_views, tail_a=None):
   if packed_b is not None:
     shape_b = ((b.shape[1] + 2 * width - 1) // (2 * width), kp // group, 2 * width * group)
     source_b = T.reshape(packed_b[:shape_b[0] * kp * 2 * width], shape_b)
     if b.shape[0] % group == 0:
-      _output(left, source_b, output, acc, dtype, epilogue, group, groups=kp // group, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views)
+      _output(left, source_b, output, acc, dtype, epilogue, group, groups=kp // group, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views, tail_a=tail_a)
     else:
-      saved_b = T.alloc(shape_b, dtype=b.dtype)
+      saved_b = T.alloc((shape_b[0], 1, shape_b[2]), dtype=b.dtype)
       _repair_packed_tail(source_b, saved_b, b.shape[0], group)
-      _output(left, saved_b, output, acc, dtype, epilogue, group, groups=kp // group, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views)
+      _output(left, source_b, output, acc, dtype, epilogue, group, groups=kp // group, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views, tail_a=tail_a, tail_b=saved_b)
   else:
     right = _packed_operand(b, "B", dtype, raw_b)
-    _output(left, right, output, acc, dtype, epilogue, group, groups=kp // group, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views)
+    _output(left, right, output, acc, dtype, epilogue, group, groups=kp // group, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views, tail_a=tail_a)
 
 
 @T.func
-def _output(left, right, output, acc, acc_dtype, epilogue, group, *, groups=None, broadcast_acc=False, full_packed_views=True):
+def _output(left, right, output, acc, acc_dtype, epilogue, group, *, groups=None, broadcast_acc=False, full_packed_views=True, tail_a=None, tail_b=None):
   if epilogue is None and output.dtype == acc_dtype:
     if output.strides[1] == 1:
       if acc is not None and broadcast_acc:
         prior = _broadcast_seed(acc, output.shape[1], acc_dtype)
-        _grouped_tiles(left, right, output, initial=False, group=group, groups=groups, initial_broadcast=prior, full_packed_views=full_packed_views)
+        _grouped_tiles(left, right, output, initial=False, group=group, groups=groups, initial_broadcast=prior, full_packed_views=full_packed_views, tail_a=tail_a, tail_b=tail_b)
       else:
         if acc is not None:
           T.store(output, T.broadcast_to(T.cast(T.as_value(acc), acc_dtype), output.shape))
-        _grouped_tiles(left, right, output, initial=acc is not None, group=group, groups=groups, full_packed_views=full_packed_views)
+        _grouped_tiles(left, right, output, initial=acc is not None, group=group, groups=groups, full_packed_views=full_packed_views, tail_a=tail_a, tail_b=tail_b)
     else:
-      _buffered_output(left, right, output, acc, acc_dtype, epilogue, group, groups=groups, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views)
+      _buffered_output(left, right, output, acc, acc_dtype, epilogue, group, groups=groups, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views, tail_a=tail_a, tail_b=tail_b)
   else:
-    _buffered_output(left, right, output, acc, acc_dtype, epilogue, group, groups=groups, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views)
+    _buffered_output(left, right, output, acc, acc_dtype, epilogue, group, groups=groups, broadcast_acc=broadcast_acc, full_packed_views=full_packed_views, tail_a=tail_a, tail_b=tail_b)
 
 @T.func
 def _broadcast_seed(acc, columns, dtype):
@@ -286,16 +321,16 @@ def _broadcast_seed(acc, columns, dtype):
 
 @T.func
 def _buffered_output(left, right, output, acc, dtype, epilogue, group, *, groups=None, raw_a=False, raw_b=False, broadcast_acc=False,
-                     full_packed_views=True):
+                     full_packed_views=True, tail_a=None, tail_b=None):
   result = T.alloc(output.shape, dtype=dtype)
   if acc is not None and broadcast_acc:
     prior = _broadcast_seed(acc, output.shape[1], dtype)
     _grouped_tiles(left, right, result, initial=False, group=group, groups=groups,
-                   raw_a=raw_a, raw_b=raw_b, initial_broadcast=prior, full_packed_views=full_packed_views)
+                   raw_a=raw_a, raw_b=raw_b, initial_broadcast=prior, full_packed_views=full_packed_views, tail_a=tail_a, tail_b=tail_b)
   else:
     if acc is not None:
       seed_accumulator(acc, result, output.shape[0], output.shape[1], dtype)
-    _grouped_tiles(left, right, result, initial=acc is not None, group=group, groups=groups, raw_a=raw_a, raw_b=raw_b, full_packed_views=full_packed_views)
+    _grouped_tiles(left, right, result, initial=acc is not None, group=group, groups=groups, raw_a=raw_a, raw_b=raw_b, full_packed_views=full_packed_views, tail_a=tail_a, tail_b=tail_b)
   finish_matrix(result, output, epilogue=epilogue)
 
 

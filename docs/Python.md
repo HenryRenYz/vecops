@@ -1940,12 +1940,17 @@ materialize their logical domain. Private storage rounds K to complete
 streaming chunks for bounded access proofs; MOPA consumes only the logical
 K groups, and no producer is evaluated at a padded index. Checked external
 SME packed A/B and AMX packed A/B are read directly when K contains complete instruction groups.
-Fractional K copies physical panels and selects zero for the invalid lanes of
-the final instruction group/tile, avoiding logical decoding and retransposing
-the whole operand. External K padding is not a numerical promise; discarded
-NaN/Inf payloads never participate in arithmetic. SME clears the last packed
-group's invalid lanes with byte group offsets, without constructing a wide
-int64 index mask or handling each packed dword through a scalar loop.
+For fractional K, SME borrows the complete-group prefix and privately copies
+only one terminal group per spatial panel. That repaired group is consumed
+once after the prefix, inside the same ZA owner and in the original K order.
+The one-sided packed path uses the other operand's corresponding terminal
+group. AMX retains its physical-panel copy and terminal-tile repair.
+Neither path decodes or retransposes the whole logical operand. Capacity and
+packed-input/output nonaliasing checks remain in force. External K padding is
+not a numerical promise; discarded NaN/Inf payloads never participate in the
+matrix arithmetic. SME selects zero with byte group offsets, without a wide
+int64 index mask or per-dword scalar loop. This repair is required for external
+padding correctness even when a benchmark packer happens to supply zeros.
 SME I16/I64 retains its separate four-halfword layout:
 the public I16 packed ABI uses two halfwords per dword and is not compatible.
 The default resident library Matmul leaf preserves these direct-input paths;
@@ -1960,6 +1965,10 @@ arithmetic initialization with an outer product of ones is not equivalent.
 Owned-buffer forwarding may replace an initializer only for the same view.
 A zero-offset partial store first materializes a different previously
 forwarded view, preserving its surrounding elements and matrix padding.
+Alias snapshots follow the original read-capture order, with stable storage
+ordering at multi-output boundaries. Object addresses identify retained reads
+but never select their emission order: otherwise equivalent JIT lowerings can
+change the native compiler's spills and layout without an algorithm change.
 AMX and SME callbacks snapshot invariant pointers and integer metadata into local SSA
 values after preflight, so instruction memory clobbers do not reload captured
 descriptors inside K loops. Buffers may resize before ownership; their addresses

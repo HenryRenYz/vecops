@@ -379,7 +379,7 @@ class PrimitivesEmitter:
     for value in (statement.indices, statement.value, statement.mask):
       if value is not None:
         dependencies.update((id(load), load) for load in I.loads(value))
-    for identity in set(self.active_loads) & set(future):
+    for identity in self.live_loads(future):
       dependencies[identity] = self.active_loads[identity]
     for load in dependencies.values():
       self.snapshot(load, statement.destination, True)

@@ -489,3 +489,108 @@ def test_native_broadcast_za_seed_preserves_float_bits_and_alias(library, tmp_pa
     expected = np.broadcast_to(prior.view(np.uint64).copy(), (rows, columns))
     compiled.operator.native(a, b, prior, out, **compiled._core.specialization_values)
     np.testing.assert_array_equal(out.view(np.uint64), expected)
+
+
+@pytest.mark.parametrize("family", BYTE_PAIRS + [("bfloat16", "bfloat16", "float32")])
+def test_native_external_packed_k_prefix_and_poisoned_terminal_group(family, tmp_path):
+  """Borrowed prefixes and private suffixes preserve every signedness pair.
+
+  The zero-prefix, full-K and long-prefix cases exercise the instruction
+  boundary independently of packing code. Padding is deliberately invalid;
+  borrowed input bytes and guard elements must survive the invocation.
+  """
+  import ml_dtypes
+
+  implementation = "amx" if platform.machine() == "x86_64" else "sme"
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(external_ab_template(implementation, False, *family), compiler=compiler)
+  dtypes = [ml_dtypes.bfloat16 if d == "bfloat16" else np.dtype(d) for d in family]
+  if implementation == "amx":
+    panel, quantum = 16, 64 // np.dtype(dtypes[0]).itemsize
+  else:
+    from vecops._arm_vector_state import get_vector_state
+    panel = 2 * get_vector_state().sme_bytes // 4
+    quantum = 4 // np.dtype(dtypes[0]).itemsize
+  group = 4 // np.dtype(dtypes[0]).itemsize
+
+  def physical(rows, spatial, kpad, side):
+    if implementation == "amx":
+      view = rows.reshape(spatial // 16, 16, kpad // quantum, quantum)
+      if side == "A":
+        return view.transpose(0, 2, 1, 3).copy().ravel()
+      return view.reshape(spatial // 16, 16, kpad // quantum, 16, group).transpose(0, 2, 3, 1, 4).copy().ravel()
+    return rows.reshape(spatial // panel, panel, kpad // group, group).transpose(0, 2, 1, 3).copy().ravel()
+
+  for m, n, k in [(32, 32, 0), (32, 32, 1), (32, 32, 64), (32, 32, 257),
+                   (19, 23, 65), (33, 35, 129)]:
+    a = (np.arange(m * k).reshape(m, k) % 7 + (249 if family[0] == "uint8" else -3)).astype(dtypes[0])
+    b = (np.arange(k * n).reshape(k, n) % 5 + (251 if family[1] == "uint8" else -2)).astype(dtypes[1])
+    mp, npad, kp = (m + panel - 1) // panel * panel, (n + panel - 1) // panel * panel, (k + quantum - 1) // quantum * quantum
+    aa, bb = np.empty((mp, kp), dtypes[0]), np.empty((npad, kp), dtypes[1])
+    if family[0] == "bfloat16":
+      # Includes signalling/quiet NaN payloads and both infinities. Repair
+      # selects storage bits; no arithmetic may touch invalid K members.
+      poison = np.array([0x7f81, 0x7fc3, 0x7f80, 0xff80], np.uint16)
+      aa.view(np.uint16)[:] = np.resize(poison, aa.shape)
+      bb.view(np.uint16)[:] = np.resize(poison, bb.shape)
+    else:
+      aa[:], bb[:] = 13, 251 if family[1] == "uint8" else -5
+    aa[:m, :k], bb[:n, :k] = a, b.T
+    ap, bp = physical(aa, mp, kp, "A"), physical(bb, npad, kp, "B")
+    before_a, before_b = ap.view(np.uint8).copy(), bp.view(np.uint8).copy()
+    backing = np.full(m * n + 8, -777, dtypes[2])
+    output = backing[4:-4].reshape(m, n)
+    output[0] = np.arange(n) - 10 if family[2] == "float32" else np.iinfo(np.int32).max - np.arange(n) % 3
+    prior = output[:1]
+    compute = np.float32 if family[2] == "float32" else np.int64
+    expected = ((a.astype(compute) @ b.astype(compute) + prior.astype(compute).copy()) * 2 + 1).astype(dtypes[2])
+    compiled.operator.native(ap, bp, a, prior, output, **compiled._core.specialization_values)
+    np.testing.assert_array_equal(output, expected)
+    np.testing.assert_array_equal(ap.view(np.uint8), before_a)
+    np.testing.assert_array_equal(bp.view(np.uint8), before_b)
+    np.testing.assert_array_equal(backing[:4], -777)
+    np.testing.assert_array_equal(backing[-4:], -777)
+
+
+@pytest.mark.parametrize("side", ["A", "B"])
+@pytest.mark.parametrize("family", [("int8", "uint8", "int32"), ("bfloat16", "bfloat16", "float32")])
+@pytest.mark.skipif(platform.machine() == "x86_64", reason="SME terminal-group consumer required")
+def test_native_sme_one_sided_packed_prefix_and_strided_epilogue(side, family, tmp_path):
+  import ml_dtypes
+  from vecops._arm_vector_state import get_vector_state
+
+  m, n, k, capacity = (T.dynamic(lower=0) for _ in range(4))
+  sd = family[0] if side == "A" else family[1]
+
+  @T.template
+  def template(A: T.Tensor((m, k), dtype=family[0]), B: T.Tensor((k, n), dtype=family[1]),
+               P: T.Tensor((capacity,), dtype=sd), Prior: T.Tensor((1, n), dtype=family[2]),
+               C: T.Tensor((m, n), (T.dynamic(), T.dynamic()), family[2], access="output")):
+    a = T.packed(P, (m, k), side="A", format="sme") if side == "A" else T.load(A)
+    b = T.packed(P, (k, n), side="B", format="sme") if side == "B" else T.load(B)
+    product = T.dot(a, b, acc=T.load(Prior), implementation="sme")
+    T.store(C, product * 2 + T.load(Prior))
+
+  compiled = T.compile(template, compiler=make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"))
+  dtypes = [ml_dtypes.bfloat16 if d == "bfloat16" else np.dtype(d) for d in family]
+  panel, group = 2 * get_vector_state().sme_bytes // 4, 4 // np.dtype(dtypes[0]).itemsize
+  for rows, columns, reduction in [(32, 32, 1), (19, 23, 65), (33, 35, 257)]:
+    a = (np.arange(rows * reduction).reshape(rows, reduction) % 7).astype(dtypes[0])
+    b = (np.arange(reduction * columns).reshape(reduction, columns) % 5).astype(dtypes[1])
+    source = a if side == "A" else b.T
+    spatial, kp = (source.shape[0] + panel - 1) // panel * panel, (reduction + group - 1) // group * group
+    dense = np.full((spatial, kp), np.nan if family[0] == "bfloat16" else 13, dtype=source.dtype)
+    dense[:source.shape[0], :reduction] = source
+    packed = dense.reshape(-1, panel, kp // group, group).transpose(0, 2, 1, 3).copy().ravel()
+    original = packed.view(np.uint8).copy()
+    backing = np.full((rows + 2, 2 * columns + 3), -777, dtypes[2])
+    output = backing[1:rows + 1, 1:2 * columns + 1:2][::-1, ::-1]
+    output[0] = np.arange(columns) - 10
+    prior = output[:1].copy()
+    compute = np.float32 if family[2] == "float32" else np.int64
+    expected = ((a.astype(compute) @ b.astype(compute) + prior) * 2 + prior).astype(dtypes[2])
+    compiled.operator.native(a, b, packed, prior, output, **compiled._core.specialization_values)
+    np.testing.assert_array_equal(output, expected)
+    np.testing.assert_array_equal(packed.view(np.uint8), original)
+    np.testing.assert_array_equal(backing[[0, -1]], -777)
+    np.testing.assert_array_equal(backing[:, 2:2 * columns + 1:2], -777)

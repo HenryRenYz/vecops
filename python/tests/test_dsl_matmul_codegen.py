@@ -184,3 +184,28 @@ def test_partially_static_amx_families_have_no_empty_instruction_tiles(tmp_path)
     c = np.empty((m, n), np.float32)
     compiled.operator.native(a, b, c, **compiled._core.specialization_values)
     np.testing.assert_array_equal(c, a.astype(np.float32) @ b.astype(np.float32))
+
+
+@pytest.mark.parametrize("target,implementation", [("AVX512", "amx"), ("SME", "sme")])
+def test_read_alias_preparation_is_independent_of_ir_object_addresses(target, implementation):
+  from dataclasses import replace
+  from vecops.language._compiler.ir.traversal import rewrite_expressions
+
+  @T.template
+  def kernel(A: T.Tensor((16, 64), dtype="bfloat16", access="inout"),
+             B: T.Tensor((64, 16), dtype="bfloat16"), D: T.Tensor((1, 16), dtype="float32"),
+             C: T.Tensor((16, 16), dtype="float32", access="output")):
+    original_a, original_b, prior = T.load(A), T.load(B), T.load(D)
+    T.store(A, T.zeros(A.shape, dtype="bfloat16"))
+    result = T.dot(T.cast(original_a + 2, "bfloat16"), original_b, acc=prior, implementation=implementation)
+    T.store(C, result * 2 + T.load(D))
+
+  original = kernel.ir
+  # Rebuilding load nodes changes allocation addresses while preserving
+  # shared captures, the alias contract and all logical operations. Holding
+  # each clone alive also prevents the allocator from recycling its ids.
+  variants = [original]
+  for _ in range(3):
+    variants.append(rewrite_expressions(original, lambda value: replace(value) if value.op == "load" else value))
+  sources = [CPUBackend().lower(ir, (), target=target).source for ir in variants]
+  assert len(set(sources)) == 1
