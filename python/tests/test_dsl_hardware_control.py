@@ -406,7 +406,7 @@ def test_sme_packing_uses_all_external_packed_dimensions():
 
   source = CPUBackend().lower(kernel.ir, (), target="SME").source
   actual = "std::int64_t{2}, std::int64_t{33}, std::int64_t{32}, std::int64_t{4}"
-  assert "checked_shape({" + actual + "})" in source and "packed output buffer too small" in source
+  assert "checked_shape(" + actual + ")" in source and "packed output buffer too small" in source
   assert "sme_pack_capacity_value" not in source, "packed logical axes replace per-store capacity clamps"
 
 

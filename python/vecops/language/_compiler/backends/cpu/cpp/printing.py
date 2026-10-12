@@ -71,7 +71,7 @@ class PrintEmitter:
         count = self.unique("print_count")
         index = self.unique("print_index")
         shape = [self.scalar(n) for n in value.type.shape]
-        self.line(f"const auto {count} = vecops_dsl::checked_shape({{{', '.join(shape)}}});")
+        self.line(f"const auto {count} = {self.checked_shape(', '.join(shape))};")
         limit = options.get("max_print_elements", 16)
         self.opening(f"for (vecops::nint_t {index}=0; {index}<std::min<vecops::nint_t>({count},{limit}); ++{index})")
         self.line(f'if ({index}) {record}.append(", ");')

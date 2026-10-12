@@ -2001,7 +2001,21 @@ additional full leaves in one function slowed measured tiny raw cases despite
 medium-case gains. A future extension must separate hot/cold code and pass
 both workloads, rather than adding only a runtime size gate.
 Pure integer metadata min/max and vector-tail clamps evaluate each operand once through an inline
-value helper; floating-point min/max semantics are unchanged. Same-dtype SME
+value helper; floating-point min/max semantics are unchanged. On ARM, signed scalar
+floor division, remainder and ceil division by a positive constant use small
+nonthrowing specializations. They evaluate the numerator once and preserve
+negative-numerator semantics, including `INT64_MIN`; unknown or nonpositive
+divisors retain the checked general helpers. ARM known-rank shape checks pass
+dimensions by value and preserve ordered negative-size/product-overflow checks,
+including checks after a zero axis. This avoids outlined initializer-list
+iteration in large generated kernels. x86 keeps its measured original emission:
+applying both rewrites to large GCC AMX functions regressed small fused dots.
+These choices follow the actual codegen architecture, not a cost-profile
+override. Divisors derived from SVL or other SSA aliases retain their runtime
+form: broader specialization regressed the measured smallest packed dot.
+Recipe views, packing selection, loop/branch interval analysis, runtime shape,
+stride, capacity and alias contracts retain their original behavior.
+Same-dtype SME
 loads use public masked `load`, whose inactive lanes are zero, and known unit
 strides use contiguous addressing. Converting, unknown-stride and fringe
 loads retain their checked conversion/mask paths.

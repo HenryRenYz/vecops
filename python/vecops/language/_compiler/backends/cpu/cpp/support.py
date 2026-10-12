@@ -258,6 +258,28 @@ inline std::int64_t mod(std::int64_t a, std::int64_t b) {
 inline std::int64_t ceildiv(std::int64_t a, std::int64_t b) {
   auto q = floordiv(a, b); return q + (mod(a, b) != 0);
 }
+// A positive constant divisor cannot trigger either exceptional division
+// case. Keep this small, nonthrowing specialization inline: on 920f-4 the
+// general helper stayed outlined (cost 190, threshold 45), losing constant
+// division strength reduction and taking ~31% of a packed K-tail dot sample.
+// Signed numerators still need Python floor/remainder semantics; do not
+// substitute truncating division or assume arbitrary user indices positive.
+template<std::int64_t Divisor>
+VECOPS_ALWAYS_INLINE std::int64_t floordiv_positive(std::int64_t a) noexcept {
+  static_assert(Divisor > 0);
+  return a / Divisor - (a % Divisor < 0);
+}
+template<std::int64_t Divisor>
+VECOPS_ALWAYS_INLINE std::int64_t mod_positive(std::int64_t a) noexcept {
+  static_assert(Divisor > 0);
+  const auto r = a % Divisor;
+  return r < 0 ? r + Divisor : r;
+}
+template<std::int64_t Divisor>
+VECOPS_ALWAYS_INLINE std::int64_t ceildiv_positive(std::int64_t a) noexcept {
+  static_assert(Divisor > 0);
+  return a / Divisor + (a % Divisor > 0);
+}
 template<std::unsigned_integral T> inline T floordiv(T a, T b) {
   if (!b) throw std::invalid_argument("DSL integer division by zero");
   return a / b;
@@ -294,6 +316,21 @@ VECOPS_ALWAYS_INLINE std::size_t checked_shape(std::initializer_list<std::int64_
     if (n < 0 || __builtin_mul_overflow(count, n, &count))
       throw std::overflow_error("DSL scratch shape overflow");
   }
+  return checked_count(count);
+}
+// Metadata ranks are known when emitting a kernel. Pass the dimensions as
+// values so even a large generated function cannot outline initializer_list
+// begin/end calls or expose a temporary dimension array across vector work.
+// The fold evaluates each dimension once, in order, retaining negative-size
+// and signed-product overflow checks (including products after a zero axis).
+template<std::integral... Extents>
+VECOPS_ALWAYS_INLINE std::size_t checked_shape(Extents... shape) {
+  std::int64_t count = 1;
+  auto axis = [&](std::int64_t n) VECOPS_INLINE_LAMBDA {
+    if (n < 0 || __builtin_mul_overflow(count, n, &count))
+      throw std::overflow_error("DSL scratch shape overflow");
+  };
+  (axis(shape), ...);
   return checked_count(count);
 }
 inline vecops::nint_t grid_count(std::initializer_list<std::int64_t> shape) {

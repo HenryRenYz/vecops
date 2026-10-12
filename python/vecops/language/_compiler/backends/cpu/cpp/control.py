@@ -253,7 +253,7 @@ class ControlEmitter:
       elif isinstance(statement, I.WorkspaceAllocate):
         self.storage_views[statement.view.storage] = statement.view
         shape = ", ".join(self.scalar(v) for v in statement.view.shape)
-        self.line(f"(void)vecops_dsl::checked_shape({{{shape}}});")
+        self.line(f"(void){self.checked_shape(shape)};")
         from ..capabilities import CPP_TYPES
 
         self.line(
@@ -264,7 +264,7 @@ class ControlEmitter:
         # Promoted scratch sites have no Store/Load using their storage.
         if statement.view.storage in self.used_storage(self.ir.body):
           count = ", ".join(self.scalar(v) for v in statement.view.shape)
-          self.allocate_buffer(statement.view.dtype, statement.view.storage, f"vecops_dsl::checked_shape({{{count}}})")
+          self.allocate_buffer(statement.view.dtype, statement.view.storage, self.checked_shape(count))
       elif isinstance(statement, I.Pack):
         raise TypeError("packing requires the cpu-expand-packing-recipes pass")
       elif isinstance(statement, I.Assert):

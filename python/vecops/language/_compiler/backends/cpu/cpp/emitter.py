@@ -210,7 +210,7 @@ class CPUEmitter(
       dtype = CPP_TYPES[cached.dtype]
       count = ", ".join(self.scalar(v) for v in cached.shape)
       lanes = self.vector_size(f"vecops::vec::ScalableTag<{dtype}, 0>")
-      self.line(f"const bool {cached.storage}_enabled = vecops_dsl::checked_shape({{{count}}}) >= 4 * {lanes};")
+      self.line(f"const bool {cached.storage}_enabled = {self.checked_shape(count)} >= 4 * {lanes};")
       self.line(f"vecops_dsl::Buffer<{dtype}> {cached.storage};")
     insertion = len(self.lines)
     self.block(self.ir.body)

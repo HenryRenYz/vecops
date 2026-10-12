@@ -405,6 +405,40 @@ def test_native_integer_scalar_minmax_signed_extremes(compiler):
     np.testing.assert_array_equal(out, (min(left, right), max(left, right), min(max(left, -7), 13)))
 
 
+@pytest.mark.parametrize("divisor", [1, 2, 3, 32, (1 << 63) - 1])
+def test_native_positive_constant_division_signed_extremes(compiler, divisor):
+  @T.template
+  def kernel(C: T.Tensor((3,), dtype="int64", access="output"), value: int):
+    T.store(C[0], value // divisor)
+    T.store(C[1], value % divisor)
+    T.store(C[2], T.ceildiv(value, divisor))
+
+  compiled = T.compile(kernel, compiler=compiler)
+  out = np.empty(3, np.int64)
+  for value in (-(1 << 63), -(1 << 63) + 1, -33, -32, -31, -3, -1, 0, 1, 3, 31, 32, 33,
+                (1 << 63) - 2, (1 << 63) - 1):
+    compiled(out, value)
+    # Avoid negating INT64_MIN in generated code; Python has unbounded ints.
+    np.testing.assert_array_equal(out, (value // divisor, value % divisor, -((-value) // divisor)))
+
+
+def test_native_runtime_divisor_keeps_signed_semantics_and_errors(compiler):
+  @T.template
+  def kernel(C: T.Tensor((3,), dtype="int64", access="output"), value: int, divisor: int):
+    T.store(C[0], value // divisor)
+    T.store(C[1], value % divisor)
+    T.store(C[2], T.ceildiv(value, divisor))
+
+  compiled = T.compile(kernel, compiler=compiler)
+  out = np.empty(3, np.int64)
+  for value, divisor in [(-33, 32), (33, -32), (-33, -32), (-(1 << 63), 3), ((1 << 63) - 1, -3)]:
+    compiled(out, value, divisor)
+    np.testing.assert_array_equal(out, (value // divisor, value % divisor, -((-value) // divisor)))
+  for value, divisor in [(1, 0), (-(1 << 63), -1)]:
+    with pytest.raises(Exception, match="division by zero or overflow"):
+      compiled(out, value, divisor)
+
+
 @pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32"])
 def test_native_unsigned_sequence_cast_wraps_at_storage_width(dtype, compiler):
   @T.template

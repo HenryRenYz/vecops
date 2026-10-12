@@ -113,7 +113,7 @@ class StateEmitter:
     else:
       if isinstance(statement, I.DeclareState):
         count = ", ".join(self.scalar(s) for s in state.type.shape)
-        self.allocate_buffer(plan.view.dtype, state.name, f"vecops_dsl::checked_shape({{{count}}})")
+        self.allocate_buffer(plan.view.dtype, state.name, self.checked_shape(count))
       # A private staging buffer keeps all old-state reads alive until an
       # update finishes, including non-elementwise recurrences/alias copies.
       destination = plan.view
@@ -121,7 +121,7 @@ class StateEmitter:
         name = self.unique("state_next")
         destination = I.View(name, plan.view.dtype, plan.view.shape, plan.view.strides, plan.view.offset, owned=True)
         count = ", ".join(self.scalar(s) for s in state.type.shape)
-        self.allocate_buffer(destination.dtype, name, f"vecops_dsl::checked_shape({{{count}}})")
+        self.allocate_buffer(destination.dtype, name, self.checked_shape(count))
       effects = tuple(replace(e, store=I.Store(destination, e.store.value)) for e in region.effects)
       proxy = replace(region, effects=effects)
       self.traverse_region(

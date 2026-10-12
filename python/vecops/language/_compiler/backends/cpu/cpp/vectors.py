@@ -646,7 +646,7 @@ class VectorsEmitter:
       if cached is not None and id(source) not in self.materialized:
         count = ", ".join(self.scalar(v) for v in cached.shape)
         self.opening(f"if ({cached.storage}_enabled && !{cached.storage}.data())")
-        self.line(f"{cached.storage}.resize(vecops_dsl::checked_shape({{{count}}}));")
+        self.line(f"{cached.storage}.resize({self.checked_shape(count)});")
         self.close()
     plan = plan or self.prepared.reduction(expressions, stores)
     operations = [effect.operation for effect in plan.initializations]

@@ -195,7 +195,7 @@ class MemoryEmitter:
       # outline checked_shape and force every live Vec to spill across calls.
       self.line("/* clipped SIMD extent: dense writable size already proven */")
     elif dense or transpose is not None and transpose.dense_destination:
-      self.line(f"vecops_dsl::checked_shape({{{shape}}}); /* proven dense writable layout */")
+      self.line(f"{self.checked_shape(shape)}; /* proven dense writable layout */")
     else:
       self.line(f"vecops_dsl::check_writable<{len(destination.shape)}>({{{shape}}}, {{{strides}}});")
     for operand in (value, statement.mask):
@@ -362,7 +362,7 @@ class MemoryEmitter:
     saved = statement.destination
     self.opening(f"if ({condition})")
     count = ", ".join(self.scalar(v) for v in shape)
-    self.line(f"{name}.resize(vecops_dsl::checked_shape({{{count}}}));")
+    self.line(f"{name}.resize({self.checked_shape(count)});")
     self.store(statement, plan=plan)
     self.close()
     self.snapshots[id(load)] = (saved, condition)

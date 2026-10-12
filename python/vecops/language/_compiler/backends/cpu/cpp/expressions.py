@@ -6,11 +6,23 @@ from __future__ import annotations
 
 import math
 
+from .... import ir as I
 from ....operations import Trait
 from ..capabilities import CPP_TYPES
 
 
 class ExpressionsEmitter:
+  def checked_shape(self, dimensions):
+    """Use value-based rank checks where outlined list iteration was measured.
+
+    Keep the x86 form: changing checks/constant division in its already
+    specialized AMX kernels changed code generation and regressed small fused dots.
+    Select the actual codegen architecture, never the cost-profile override.
+    """
+    if self.environment.codegen_target.architecture == "arm":
+      return f"vecops_dsl::checked_shape({dimensions})"
+    return f"vecops_dsl::checked_shape({{{dimensions}}})"
+
   def scalar_convert(self, dtype, expression, source_dtype=None):
     """Use the public scalar counterpart of vector conversion semantics."""
     if dtype == source_dtype or dtype == "bool" or getattr(self, "hardware_scope", None) is not None:
@@ -76,7 +88,7 @@ class ExpressionsEmitter:
       source = value.args[0]
       return f"std::bit_cast<{CPP_TYPES[value.type.dtype]}>(static_cast<{CPP_TYPES[source.type.dtype]}>({self.scalar(source)}))"
     if value.op == "checked_shape":
-      return "vecops_dsl::checked_shape({" + ", ".join(self.scalar(v) for v in value.args) + "})"
+      return self.checked_shape(", ".join(self.scalar(v) for v in value.args))
     if value.op == "worker_capacity":
       return "dsl_workspace.parallelism()"
     if value.op == "view_disjoint":
@@ -202,6 +214,17 @@ class ExpressionsEmitter:
       return f"vecops_dsl::broadcast_dim({', '.join(arguments)})"
     if implementation.lane_fallback:
       cpp = CPP_TYPES[value.type.dtype]
+      arm = self.environment.codegen_target.architecture == "arm"
+      # Stay literal-only: specializing SVL-derived aliases regressed the
+      # smallest packed SME dot by about 2% in repeated 920f-4 measurements.
+      divisor = I.constant(value.args[1])
+      if (
+        value.op in {"floordiv", "mod", "ceildiv"}
+        and arm
+        and value.type.dtype in {"int32", "int64"}
+        and type(divisor) is int and 0 < divisor <= (1 << (int(value.type.dtype[3:]) - 1)) - 1
+      ):
+        return f"static_cast<{cpp}>(vecops_dsl::{value.op}_positive<{divisor}>(static_cast<{cpp}>({arguments[0]})))"
       return f"static_cast<{cpp}>(vecops_dsl::{value.op}({', '.join(f'static_cast<{cpp}>({a})' for a in arguments)}))"
     if value.op == "cast":
       return self.scalar_convert(value.type.dtype, arguments[0], value.args[0].type.dtype)
