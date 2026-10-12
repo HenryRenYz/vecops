@@ -32,6 +32,11 @@ mask(count, dtype="uint32") creates a checked region-local prefix predicate.
 read_hor/ver accept that predicate instead of a count, allowing a helper to
 reuse it across an instruction loop. Lane widths must match; predicates, like
 streaming vectors, cannot cross an owner boundary.
+apply(pure_helper, vector, ...) evaluates a memory-free selection/conversion
+expression on region-local vectors with identical prefixes. It accepts casts,
+min/max, comparisons, bitwise logic and where, fitting one compute word.
+Floating arithmetic, memory/state reads, allocation and shape changes remain
+outside the owner. Scalar casts retain the public conversion contract.
 """
 
 from . import dsl as T
@@ -51,6 +56,7 @@ store_hor = Intrinsic("sme.store_hor")
 store_ver = Intrinsic("sme.store_ver")
 read_hor = Intrinsic("sme.read_hor")
 read_ver = Intrinsic("sme.read_ver")
+apply = Intrinsic("sme.apply")
 write_hor = Intrinsic("sme.write_hor")
 write_ver = Intrinsic("sme.write_ver")
 store = Intrinsic("sme.store")

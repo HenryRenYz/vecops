@@ -134,4 +134,50 @@ def plan_register_programs(prepared, context):
       plans[id(statement) if store else id(value)] = CPURegisterPlan(
         RegisterProgram(tuple(inputs), tuple(operations), (value,)), MappingProxyType(tags)
       )
+  # A multi-output permutation is one DAG. Printing a separate program at
+  # each store repeats its shared input conversion and butterfly nodes; the
+  # intervening stores can prevent the native compiler from recovering CSE.
+  # Memory independence is versioned at emission, retaining sequential
+  # behavior for overlapping destinations or inputs.
+  for group in nodes(prepared.vectors.kernel.body):
+    if not isinstance(group, I.ElementwiseGroup) or len(group.stores) < 2:
+      continue
+    members = [plans.get(id(store)) for store in group.stores]
+    if any(plan is None for plan in members):
+      continue
+    if any(not I.same_expr(store.destination.shape[0], group.stores[0].destination.shape[0])
+           for store in group.stores[1:]):
+      continue
+    # Unbounded materialized producers retain independent output banks:
+    # GCC's large Dynamic cache kernels otherwise spill more temporaries.
+    # Exact tile caches and original converting producers still share their
+    # DAG; repeated loads across independent stores hurt fringe conversion.
+    reads = tuple(load for store in group.stores for load in I.loads_unique(store.value))
+    cached = all(node.op in {"load", "identity", "bitcast", "value_transform"}
+                 for plan in members for value in plan.program.inputs for node in walk_unique(value)
+                 if isinstance(node.type, I.TileType))
+    unbounded = any(any(I.constant(extent) is None for extent in
+                        (load.data.region.root_shape if load.data.region is not None else load.data.shape))
+                    for load in reads)
+    if reads and cached and unbounded and all(load.data.owned for load in reads):
+      continue
+    outputs = tuple(plan.program.outputs[0] for plan in members)
+    first = outputs[0]
+    if any(value.type.dtype != first.type.dtype or value.type.mask != first.type.mask
+           or not I.same_expr(value.type.shape[0], first.type.shape[0])
+           or members[index].tags[id(value)] != members[0].tags[id(first)]
+           for index, value in enumerate(outputs)):
+      continue
+    inputs, operations, tags, input_ids, operation_ids = [], [], {}, set(), set()
+    for plan in members:
+      for value in plan.program.inputs:
+        if id(value) not in input_ids:
+          inputs.append(value)
+          input_ids.add(id(value))
+      for value in plan.program.operations:
+        if id(value) not in operation_ids:
+          operations.append(value)
+          operation_ids.add(id(value))
+      tags.update(plan.tags)
+    plans[id(group)] = CPURegisterPlan(RegisterProgram(tuple(inputs), tuple(operations), outputs), MappingProxyType(tags))
   return replace(prepared, register_programs=MappingProxyType(plans))

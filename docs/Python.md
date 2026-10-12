@@ -1140,7 +1140,9 @@ callbacks always use `VECOPS_INLINE_LAMBDA_NOEXCEPT`.
 The CPU preflight pass proves loop-wide view bounds before ownership rather
 than validating/replaying each iteration. Unknown nonlinear index intervals,
 lost root provenance, loop-varying store layouts, memory-dependent control,
-mutable scalar/tile state and ordinary SIMD computation are rejected. Region
+mutable scalar/tile state and general SIMD computation are rejected;
+`T.sme.apply` admits the bounded pure selection/conversion subset described
+below. Region
 assertions are checked before entry and must be loop-invariant.
 `T.sme.load_hor/ver(tile, slice_index, rank_one_view)` and `store_hor/ver`
 transfer storage bits without conversion; the view and index must fit the
@@ -1165,6 +1167,16 @@ An optional `compute_dtype` enables numeric boundary conversion via
 Region-local vectors carry dtype/active extent independently of memory views;
 their shape and every ZA slice index are checked before ownership. Conversions
 fuse into the memory load/store; there are no temporary tensor allocations.
+`T.sme.apply(pure_helper, vector, ...)` applies a source-parsed pointwise
+selection/conversion expression to region-local vectors with identical active
+prefixes. Scalar arguments and immutable string options (for example a dtype)
+may accompany the vectors. The result is one numeric streaming vector.
+Supported expressions are casts, min/max, comparisons, bitwise logic and
+`where`; intermediates must fit the input compute word. Memory/state reads,
+arithmetic, allocation and shape changes are rejected. Scalar numeric casts
+retain the public conversion contract. This bounded vocabulary lets matrix
+recipes consume ZA rows and directly write ReLU/converted results while keeping
+floating arithmetic and exceptional math on their existing ordinary path.
 Immutable scalar metadata declarations are legal within an instruction region;
 preflight expands those definitions before hoisting checks. They are not
 loop-carried mutable state.
@@ -1823,6 +1835,15 @@ are errors; view rebinding still requires explicit storage. This is a DSL
 grouping only: native Vec/Mask values remain individually named variables,
 never C++ arrays or tuple aggregates.
 
+`T.sme.apply(helper, vector, ...)` evaluates a pure `T.func` selection or
+conversion on region-local streaming vectors with identical active prefixes.
+Casts, min/max, comparisons, bitwise logic and `where` are supported when
+all vector intermediates fit the input compute word. Arithmetic, captured
+memory/state reads, allocation, shape changes and widening remain outside
+the owner. Scalar casts retain the ordinary public conversion contract;
+chained selections retain the narrowed streaming tag geometry. The resulting
+vector cannot escape its owner.
+
 Raw SME memory/ZA slice moves accept `word_dtype=...` to select the ZA word
 width independently of memory element type. For example, a contiguous byte
 view can be transferred as packed `uint32` words without numeric conversion.
@@ -1925,14 +1946,15 @@ Packed ABI capacity, density and output-disjointness checks precede decoding.
 AMX and SME instruction families now stage source matrix recipes, including
 accumulators and pointwise producer/epilogue DAGs. Packing and fringes remain
 source algorithms; the terminal instruction printer owns no matrix/cache loop.
-Raw first-sink FP32/FP64 SME products use masked direct ZA stores and 2x2
-register reuse for complete spatial blocks. Moderate inputs spanning several
-register tiles and at least 64 K elements are privately packed within a
-two-L2 input budget; smaller/nonresident inputs retain strided reads. The
-general FP64 leaf retains strided reads for fully static `T.dot` metadata,
-whose address loops already specialize well enough that packing regressed the
-measured case. Packing is part of the operation, and aliased producers are
-captured before writes.
+Raw first-sink FP32/FP64 SME products use masked direct ZA stores. Complete
+FP32 blocks reuse four tiles in a 2x2 schedule; eligible FP64 blocks use all
+eight ZA tiles in a 2x4 schedule to reuse each A load across more columns.
+Other complete/fringe shapes retain their bounded four-/one-tile schedules.
+Moderate inputs spanning several register tiles and at least 64 K elements
+are privately packed within a two-L2 input budget; smaller/nonresident inputs
+retain strided reads. Const and Dynamic FP64 use the same cache-budgeted
+packing choice. Packing is included in operation timing, and aliased producers
+are captured before writes.
 SME native operands use the public panel-major packed layout, constructed by
 ZA storage-word transposes from logical producers. Complete spatial panels with K-contiguous raw views skip the intermediate
 dense copy; transformed, spatial-fringe or other-stride producers first
@@ -1955,9 +1977,14 @@ SME I16/I64 retains its separate four-halfword layout:
 the public I16 packed ABI uses two halfwords per dword and is not compatible.
 The default resident library Matmul leaf preserves these direct-input paths;
 explicit cache phases use logical slices and preserve the initializer/epilogue
-once across all K phases. Native epilogues project over a whole logical row,
-letting ordinary vector legalization share layout checks and batch vector
-words instead of rebuilding a one-word scatter traversal for every word.
+once across all K phases. Closed SME selection/conversion epilogues fitting
+one accumulator word are evaluated from ZA rows and stored directly. Raw
+gather operands, wider intermediates, extra memory reads, arithmetic and
+unsupported output strides retain buffered output. Initializers are completely
+snapshotted before direct stores, including full matrices and row broadcasts
+that alias C. Buffered epilogues project over a whole logical row, letting
+ordinary vector legalization share layout checks and batch vector words
+instead of rebuilding a one-word scatter traversal for every word.
 SME row/scalar broadcast initializers stage one private row and initialize ZA
 with bit-preserving row writes rather than a full matrix memory round trip.
 This preserves a bias alias of the output and negative zero/NaN payloads;
@@ -1988,18 +2015,25 @@ resident leaves. Fully borrowed physical panels also retain their original
 scalar snapshots, while pointers keep region-local SSA values; poisoned K
 padding still receives private repair. These measured scope limits affect
 lowering alone, not input validation or numerical semantics.
-For statically complete AMX B panels with coordinate-preserving inputs and a known unit
-K or spatial stride, packing reads the original producer into the
-transpose/interleave registers. K-contiguous converting inputs use a single
-physical tile cache, avoiding repeated conversion in each transpose output
-column without retaining a whole NxK dense cache. Fringes and other producers
-retain the padded dense path. A checked rank-one value reshape preserves coordinates
-and uses vector loads rather than lane-wise load/set; its element-count check,
-conversion rounding and historical read captures remain intact.
-Unbounded Dynamic AMX kernels keep the original packing leaf: embedding the
-additional full leaves in one function slowed measured tiny raw cases despite
-medium-case gains. A future extension must separate hot/cold code and pass
-both workloads, rather than adding only a runtime size gate.
+For coordinate-preserving AMX B inputs, full panels use direct source
+registers with either K-contiguous transpose or spatial-word interleave.
+Direct dots share the downstream A/accumulator/output consumer across layout
+branches. Cache Matmul uses this choice for exact full-panel metadata;
+unbounded Dynamic cache traversal retains the materialized fallback because
+adding runtime layout branches regressed small x86 BiasRelu kernels, including
+under a 1.8 GHz cap. The original producer and all cast boundaries remain
+intact. Proven-layout fringes stage one physical B tile; unknown layouts
+retain their full logical-domain staging. Only padding is zero filled and
+producers never see padding coordinates. K-contiguous fringe rows use an
+explicit one-word vector descriptor, avoiding unused wide tail aggregates.
+Multi-output register permutations share one typed DAG, including input loads
+and conversions, and drain each output when ready to limit live vectors.
+Bare permutations of unbounded, already materialized private reads keep
+independent output banks. Exact tile caches, original producers and numeric
+conversions remain eligible for shared evaluation.
+Private disjoint storage skips runtime alias checks; unknown overlap retains
+sequential stores. An empty output prefix skips all input computation. Checked
+rank-one reshapes retain element counts, rounding and historical captures.
 Pure integer metadata min/max and vector-tail clamps evaluate each operand once through an inline
 value helper; floating-point min/max semantics are unchanged. On ARM, signed scalar
 floor division, remainder and ceil division by a positive constant use small

@@ -12,6 +12,29 @@ from dataclasses import replace
 from .. import ir as I
 
 
+def streaming_selection_supported(value, basis_dtype, *, staged=False):
+  """A closed selection/conversion DAG fitting one native compute word.
+
+  Memory reads, state, shape changes and arithmetic remain on the ordinary
+  pointwise path. In particular this does not move floating arithmetic or
+  exceptional math into a different architectural floating-point mode.
+  """
+  from ..dtypes import ELEMENT_BYTES
+  from ..ir.traversal import walk_unique
+
+  allowed = {"vector_ref", "literal", "raw", "symbol", "local", "frozen", "cast", "min", "max", "where",
+             "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "xor", "not", "mask_xor",
+             "bit_and", "bit_or", "bit_xor"}
+  if staged:
+    allowed.add("region_argument")
+  return all(
+    node.op in allowed and (
+      not isinstance(node.type, I.TileType) or node.type.mask
+      or ELEMENT_BYTES[node.type.dtype] <= ELEMENT_BYTES[basis_dtype]
+    ) for node in walk_unique(value)
+  )
+
+
 def pointwise_row_projection(value, boundary, reference, row, column, extent, catalog):
   """Project a pointwise caller DAG onto a logical/register row without new reads.
 

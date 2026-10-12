@@ -55,7 +55,8 @@ class HardwareFrontend:
               scalar(value)
           for value in statement.operands:
             if isinstance(value, I.Expr):
-              scalar(value)
+              if statement.operation != "sme.apply":
+                scalar(value)
           if statement.slice_index is not None:
             scalar(statement.slice_index)
           if statement.vector is not None:
@@ -76,6 +77,50 @@ class HardwareFrontend:
 
   def sme_operation(self, operation, args, kwargs, node):
     region = id(self.hardware_regions[-1])
+    if operation == "sme.apply":
+      from .capture import Body
+      from .helpers import ValueFunction
+
+      if len(args) < 2 or not isinstance(args[0], (Body, ValueFunction)):
+        self.error(node, "sme.apply expects a pure source helper and a streaming vector")
+      arguments, handles = [], []
+      for value in args[1:]:
+        if isinstance(value, I.SMEVector) and value.region == region:
+          handles.append(value)
+          arguments.append(I.Expr(I.TileType(value.dtype, (value.extent,)), "vector_ref", data=value.name))
+        elif isinstance(args[0], Body) and isinstance(value, str):
+          arguments.append(value)
+        else:
+          argument = self.value(value, node)
+          if not isinstance(argument.type, I.ScalarType):
+            self.error(node, "sme.apply operands must be region-local vectors or scalars")
+          arguments.append(argument)
+      if not handles:
+        self.error(node, "sme.apply requires a streaming vector")
+      if isinstance(args[0], ValueFunction):
+        result = args[0].bind(tuple(arguments))
+      else:
+        parent, self.block = self.block, I.Block()
+        try:
+          result = self.helper(args[0], node, arguments=arguments)
+          if any(not isinstance(s, I.BindTile) for s in self.block.statements):
+            self.error(node, "sme.apply helper must be a pure pointwise value expression")
+        finally:
+          self.block = parent
+      if (not isinstance(result, I.Expr) or not isinstance(result.type, I.TileType)
+          or len(result.type.shape) != 1 or result.type.mask or result.type.dtype == "bool"):
+        self.error(node, "sme.apply helper must return one numeric vector")
+      if any(not I.same_expr(v.extent, handles[0].extent) for v in handles[1:]):
+        self.error(node, "sme.apply vectors must have identical prefixes")
+      from ..analysis.projection import streaming_selection_supported
+
+      if not streaming_selection_supported(result, handles[0].dtype):
+        self.error(node, "sme.apply supports only memory-free conversion, selection and comparison expressions")
+      if not I.same_expr(result.type.shape[0], handles[0].extent):
+        self.error(node, "sme.apply cannot change the vector prefix")
+      handle = I.SMEVector(self.unique("streaming_result"), result.type.dtype, handles[0].extent, region)
+      self.block.statements.append(I.ArchitectureCall(operation, vector=handle, operands=(result, handles[0])))
+      return handle
     if operation == "sme.mask":
       if len(args) != 1:
         self.error(node, "sme.mask expects one scalar active count")

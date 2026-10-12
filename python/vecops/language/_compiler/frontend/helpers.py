@@ -22,6 +22,12 @@ class ValueFunction:
   parameters: tuple
   result: I.Expr
 
+  @property
+  def streaming_selection(self):
+    from ..analysis.projection import streaming_selection_supported
+
+    return streaming_selection_supported(self.result, self.parameters[0].type.dtype, staged=True)
+
   def bind(self, arguments):
     if len(arguments) != len(self.parameters):
       raise TypeError("value helper argument count mismatch")

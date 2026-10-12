@@ -196,6 +196,7 @@ define("amx.zero", "architecture", T.NONE, effects="state", keywords=("dtype",))
 define("sme.load", "architecture", T.NONE, effects="state", keywords=("dtype", "strided"))
 define("sme.load_bits sme.read_hor sme.read_ver", "architecture", T.NONE, effects="state", keywords=("dtype",))
 define("sme.mask", "architecture", T.NONE, effects="none", keywords=("dtype",))
+define("sme.apply", "architecture", T.NONE, effects="state")
 define("sme.mopa", "architecture", T.NONE, effects="state", keywords=("acc_dtype",))
 define("sme.store sme.store_bits sme.write_hor sme.write_ver sme.zero_za", "architecture", T.NONE, effects="state")
 define(

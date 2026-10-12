@@ -25,7 +25,29 @@ class SMEInstructionEmitter:
     return f"vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(extent)})"
 
   def emit_sme_instruction(self, statement):
-    if statement.operation == "sme.mask":
+    if statement.operation == "sme.apply":
+      expression, source = statement.operands
+      handle = statement.vector
+      source_tag = source.name + "_tag"
+      self.tag_dtypes[source_tag] = source.dtype
+      # A previous selection may have narrowed this logical word. Preserve
+      # its geometry when another helper consumes the region-local handle.
+      source_geometry = self.tag_geometry.setdefault(source_tag, (True, 0))
+      tag = handle.name + "_tag"
+      result_tag = self.rebound_tag(handle.dtype, source_tag)
+      self.line(f"using {tag} = {result_tag};")
+      self.tag_dtypes[tag] = handle.dtype
+      self.tag_geometry[tag] = (True, source_geometry[1] + ELEMENT_BYTES[handle.dtype].bit_length() - ELEMENT_BYTES[source.dtype].bit_length())
+      previous_cache = self.chunk_cache
+      previous_selection = getattr(self, "streaming_selection_scope", False)
+      self.chunk_cache, self.streaming_selection_scope = {}, True
+      try:
+        value = self.vector(expression, tag, (handle.extent,), ("0",), self.scalar(handle.extent))
+        self.line(f"auto {handle.name} = {value};")
+        self.line(f"auto {handle.name}_mask = vecops::vec::mwhilelt({tag}{{}}, 0, {self.scalar(handle.extent)});")
+      finally:
+        self.chunk_cache, self.streaming_selection_scope = previous_cache, previous_selection
+    elif statement.operation == "sme.mask":
       mask = statement.vector
       tag = mask.name + "_tag"
       unsigned = f"std::uint{ELEMENT_BYTES[mask.dtype] * 8}_t"

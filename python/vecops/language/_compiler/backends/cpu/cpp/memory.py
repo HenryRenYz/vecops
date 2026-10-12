@@ -302,6 +302,39 @@ class MemoryEmitter:
 
     return f"vecops_dsl::overlap({span(source)}, {span(destination)})"
 
+  def register_disjoint_proven(self, a, b):
+    # Private scratch cannot alias a different live storage. This is the same
+    # ownership fact used by snapshot(); do not add runtime span arithmetic
+    # for independently allocated permutation inputs and outputs.
+    if a.storage != b.storage and (a.owned or b.owned):
+      return True
+    if a.storage == b.storage and a.owned and b.owned and a.region is not None and b.region is not None:
+      root = self.storage_views.get(a.storage)
+      if root is not None and root.owned and root.dtype == a.dtype == b.dtype:
+        expected, dense = I.literal(1), True
+        for extent, stride in zip(reversed(root.shape), reversed(root.strides)):
+          dense = dense and I.same_expr(stride, expected)
+          expected = I.binary("mul", expected, extent)
+        regions = (a.region, b.region)
+        same_root = all(
+          len(region.root_shape) == len(root.shape)
+          and all(I.same_expr(x, y) for x, y in zip((*region.root_shape, *region.root_strides), (*root.shape, *root.strides)))
+          for region in regions
+        )
+        if dense and same_root and all(region.affine_partition and all(step == 1 for step in region.steps) for region in regions):
+          for start_a, start_b, width_a, width_b, clipped_a, clipped_b in zip(
+            a.region.exact_starts or a.region.starts, b.region.exact_starts or b.region.starts,
+            a.region.widths, b.region.widths, a.region.clipped, b.region.clipped
+          ):
+            if clipped_a or clipped_b:
+              continue
+            difference = I.constant(I.binary("sub", start_b, start_a))
+            wa, wb = I.constant(width_a), I.constant(width_b)
+            if all(type(v) is int for v in (difference, wa, wb)) and wa >= 0 and wb >= 0:
+              if difference >= wa or -difference >= wb:
+                return True
+    return self.disjoint_proven(a, b)
+
   def disjoint_proven(self, a, b):
     proof = getattr(self, "disjoint_roots", {}).get(tuple(sorted((a.storage, b.storage))))
     if proof is None:

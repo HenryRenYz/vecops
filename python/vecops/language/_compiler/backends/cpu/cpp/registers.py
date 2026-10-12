@@ -49,7 +49,7 @@ class RegistersEmitter:
       return name
     return f"vecops::vec::{value.op}({tag}{{}}, {', '.join(arguments)})"
 
-  def register_program(self, program, load, *, prefix="register", physical_tags=None):
+  def register_program(self, program, load, *, prefix="register", physical_tags=None, consume_output=None):
     """Print a closed typed program using a caller-provided memory boundary."""
     names, tags = {}, {}
 
@@ -75,6 +75,9 @@ class RegistersEmitter:
       return tags[key]
 
     ordinals = {id(value): index for index, value in enumerate(program.inputs)}
+    output_ordinals = {}
+    for index, value in enumerate(program.outputs):
+      output_ordinals.setdefault(id(value), []).append(index)
     for value in program.operations:
       own = tag(value)
       if id(value) in ordinals:
@@ -91,6 +94,9 @@ class RegistersEmitter:
         )
         self.line(f"auto {name} = {expression};")
         names[id(value)] = name
+      if consume_output is not None and id(value) in output_ordinals:
+        for index in output_ordinals[id(value)]:
+          consume_output(index, own, names[id(value)])
     return tag(program.outputs[0]), tuple(names[id(value)] for value in program.outputs)
 
   def register_store(self, statement):
@@ -100,6 +106,7 @@ class RegistersEmitter:
     program = plan.program
     previous_full, cache = getattr(self, "full_vector", False), self.chunk_cache
     self.full_vector, self.chunk_cache = True, {}
+
     try:
       tag, values = self.register_program(
         program,
@@ -125,3 +132,57 @@ class RegistersEmitter:
       return True
     finally:
       self.full_vector, self.chunk_cache = previous_full, cache
+
+  def register_group_store(self, group, future):
+    plan = self.prepared.register_programs.get(id(group))
+    if plan is None:
+      return False
+    # As for ordinary stores, an empty prefix must not evaluate its inputs.
+    self.opening(f"if (({self.scalar(group.stores[0].destination.shape[0])}) > 0)")
+    loads = {id(load): load for store in group.stores for load in I.loads_unique(store.value)}
+    guards = []
+    for index, store in enumerate(group.stores):
+      for other in group.stores[index + 1:]:
+        if not self.register_disjoint_proven(store.destination, other.destination):
+          guards.append(f"!({self.overlap(store.destination, other.destination)})")
+      for load in loads.values():
+        if not self.register_disjoint_proven(load.data, store.destination):
+          guards.append(f"!({self.overlap(load.data, store.destination)})")
+    conditional = bool(guards)
+    self.opening("if (" + " && ".join(dict.fromkeys(guards)) + ") /* shared register outputs */"
+                 if conditional else "/* shared register outputs: private disjoint storage */")
+    snapshots = dict(self.snapshots)
+    for store in group.stores:
+      self.protect_store(store, future)
+      self.check_store(store)
+    previous_full, cache = getattr(self, "full_vector", False), self.chunk_cache
+    self.full_vector, self.chunk_cache = True, {}
+    def consume(index, tag, value):
+      store, output = group.stores[index], plan.program.outputs[index]
+      stride = store.destination.strides[0]
+      active, extent = self.scalar(store.destination.shape[0]), self.scalar(output.type.shape[0])
+      self.line(f'if (({active}) < 0 || ({active}) > ({extent})) throw std::invalid_argument("invalid register store prefix");')
+      options = f", vecops::vec::opt::first({active})"
+      if I.constant(stride) != 1:
+        options += f", vecops::vec::opt::strided({self.scalar(stride)})"
+      self.line(f"vecops::vec::store_convert({tag}{{}}, {self.pointer(store.destination)}, {value}{options});")
+
+    try:
+      self.register_program(
+        plan.program,
+        lambda index, own: self.vector(plan.program.inputs[index], own,
+                                      plan.program.inputs[index].type.shape, ("0",),
+                                      str(I.constant(plan.program.inputs[index].type.shape[0]))),
+        physical_tags=plan.tags,
+        consume_output=consume,
+      )
+    finally:
+      self.full_vector, self.chunk_cache = previous_full, cache
+    self.snapshots = snapshots
+    self.close()
+    if conditional:
+      self.opening("else /* overlapping register outputs retain sequential effects */")
+      self.block(I.Block(list(group.stores)))
+      self.close()
+    self.close()
+    return True

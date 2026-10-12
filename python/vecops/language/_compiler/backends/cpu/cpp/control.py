@@ -13,6 +13,8 @@ class ControlEmitter:
   def elementwise_group(self, group, future):
     body = I.Block(list(group.stores))
     self.protect_region(body, future)
+    if self.register_group_store(group, future):
+      return
     from ....ir.traversal import walk
 
     if any(

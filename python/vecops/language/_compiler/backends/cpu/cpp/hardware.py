@@ -62,6 +62,7 @@ class HardwareEmitter(SMEInstructionEmitter):
       elif isinstance(statement, I.If):
         roots.append(statement.condition)
       elif isinstance(statement, I.ArchitectureCall):
+        roots.extend(value for value in statement.operands if isinstance(value, I.Expr))
         if statement.vector is not None:
           roots.append(statement.vector.extent)
         if statement.slice_index is not None:

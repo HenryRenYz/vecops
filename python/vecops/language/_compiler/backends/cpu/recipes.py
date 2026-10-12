@@ -336,16 +336,6 @@ def expand_dot_recipes(ir, context):
 
               recipe = amx_dot if family == "amx" else sme_dot
               kwargs.pop("unroll")
-              # Static FP64 dot metadata already specializes the gather loops.
-              # Prepacking the 64x256x256 Const dot benchmark cost 5-6%; keep
-              # its existing strided leaf while Dynamic/library reuse benefits.
-              if (
-                family == "sme"
-                and not product.data.tiled
-                and product.type.dtype == "float64"
-                and all(I.constant(dim) is not None for operand in product.args[:2] for dim in operand.type.shape)
-              ):
-                kwargs["pack_raw_inputs"] = False
               # Capture the original initializer's broadcast domain before
               # source expansion turns it into a full matrix projection.
               if family == "sme" and len(product.args) > 2:
@@ -391,22 +381,18 @@ def expand_dot_recipes(ir, context):
                   source_b = b
                   while source_b.op == "cast":
                     source_b = source_b.args[0]
-                  full_k, full_n = (I.constant(v) for v in b.type.shape)
-                  # Adding full packing leaves to an unbounded Dynamic
-                  # kernel grew its cold CFG/stack and slowed the measured
-                  # tiny raw cases by 8–31%, despite faster medium inputs.
-                  # Keep the measured static full-panel specialization until
-                  # outlining preserves both workloads; a runtime size gate
-                  # alone does not remove that code-generation overhead.
-                  if (
-                    type(full_k) is int
-                    and type(full_n) is int
-                    and full_n % 16 == 0
-                    and full_k % (64 // ELEMENT_BYTES[a.type.dtype]) == 0
-                    and source_b.op == "load"
-                    and not source_b.args
-                    and source_b.data.region is not None
-                  ):
+                  # Direct dots share their matrix consumer across packing
+                  # layouts. Dynamic cache traversal keeps the materialized
+                  # fallback: extra runtime layouts grew GCC's frame and
+                  # regressed small BiasRelu kernels by 10-19%, also at a
+                  # 1.8 GHz cap. Exact full-panel metadata avoids that cost.
+                  # Every fast branch still retains the original producer,
+                  # conversion boundaries and captured-read identity.
+                  static_full_b = (type(I.constant(b.type.shape[0])) is int
+                                   and type(I.constant(b.type.shape[1])) is int
+                                   and I.constant(b.type.shape[0]) % (64 // ELEMENT_BYTES[a.type.dtype]) == 0
+                                   and I.constant(b.type.shape[1]) % 16 == 0)
+                  if (not product.data.tiled or static_full_b) and source_b.op == "load" and not source_b.args and source_b.data.region is not None:
                     kwargs["raw_b"] = source_b.data
                 elif family == "sme":
                   if raw(a):

@@ -276,3 +276,121 @@ def test_native_public_register_helper(compiler, rows, columns, dtype):
   compiled.operator.native(a, c)
   np.testing.assert_array_equal(c, a.T)
   assert "std::array<vecops::vec::" not in compiled.generated_source
+
+
+def shared_transpose_template(*, private=False, prefix=False):
+  columns = T.dynamic(lower=0, upper=16) if prefix else 16
+
+  @T.template
+  def kernel(A: T.Tensor((16, 16), dtype="uint32"),
+             C: T.Tensor((16, columns), dtype="uint32", access="output"), divisor: int = 1):
+    rows = ()
+    for row in T.unroll(16):
+      value = T.load(A[row, :]) // divisor if prefix else T.load(A[row, :])
+      rows = rows + (T.as_vector(value, T.Vector("uint32", N=16)),)
+    values = T.library.transpose_registers(rows)
+    if private:
+      destination = T.alloc((16, 16), dtype="uint32")
+      for once in T.serial(1):
+        for row in T.unroll(16):
+          T.store(destination[row, :], values[row][:columns])
+    else:
+      destination = C
+      for row in T.unroll(16):
+        T.store(destination[row, :], values[row][:columns])
+    if private:
+      T.store(C, T.load(destination))
+
+  return kernel
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_shared_register_outputs_have_one_combined_dag(private):
+  from vecops.language._compiler.ir.traversal import nodes
+
+  artifact = CPUBackend().lower(shared_transpose_template(private=private).ir, (), target="AVX512")
+  groups = [g for g in nodes(artifact.kernel.body) if isinstance(g, I.ElementwiseGroup)
+            and id(g) in artifact.backend_ir.register_programs]
+  assert groups
+  for group in groups:
+    plan = artifact.backend_ir.register_programs[id(group)]
+    members = [artifact.backend_ir.register_programs[id(s)] for s in group.stores]
+    assert len(plan.program.outputs) == 16
+    assert len(plan.program.inputs) == 16
+    assert len(plan.program.operations) < sum(len(p.program.operations) for p in members)
+  if private:
+    assert "shared register outputs: private disjoint storage" in artifact.source
+  else:
+    assert "overlapping register outputs retain sequential effects" in artifact.source
+
+
+def test_native_shared_register_outputs_preserve_inplace_transpose(tmp_path):
+  compiled = T.compile(shared_transpose_template(), compiler=make_compiler(
+    jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"))
+  for alias in [False, True]:
+    a = np.arange(256, dtype=np.uint32).reshape(16, 16)
+    expected = a.T.copy()
+    out = a if alias else np.empty_like(a)
+    compiled.operator.native(a, out, 1, **compiled._core.specialization_values)
+    np.testing.assert_array_equal(out, expected)
+
+
+def test_native_shared_register_empty_prefix_skips_exceptional_inputs(tmp_path):
+  compiled = T.compile(shared_transpose_template(prefix=True), compiler=make_compiler(
+    jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"))
+  a = np.arange(256, dtype=np.uint32).reshape(16, 16)
+  out = np.empty((16, 0), np.uint32)
+  compiled.operator.native(a, out, 0, **compiled._core.specialization_values)
+  out = np.empty_like(a)
+  compiled.operator.native(a, out, 2, **compiled._core.specialization_values)
+  np.testing.assert_array_equal(out, (a // 2).T)
+  with pytest.raises(Exception, match="division by zero"):
+    compiled.operator.native(a, out, 0, **compiled._core.specialization_values)
+
+
+def test_native_shared_register_duplicate_output_is_stored_twice(tmp_path):
+  @T.template
+  def kernel(A: T.Tensor((16,), dtype="uint32"), C: T.Tensor((2, 16), dtype="uint32", access="output")):
+    word = T.load(A, vector=T.Vector("uint32", N=16))
+    value = T.local_interleave_lower(word, word)
+    T.store(C[0, :], value)
+    T.store(C[1, :], value)
+
+  compiled = T.compile(kernel, compiler=make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"))
+  a = np.arange(16, dtype=np.uint32)
+  out = np.full((2, 16), 0xdeadbeef, dtype=np.uint32)
+  compiled.operator.native(a, out, **compiled._core.specialization_values)
+  expected = np.concatenate([np.repeat(a[start:start + 2], 2) for start in range(0, 16, 4)])
+  np.testing.assert_array_equal(out, np.stack([expected, expected]))
+
+
+@pytest.mark.parametrize("case, expected", [("adjacent", True), ("overlap", False),
+                                           ("clipped", False), ("stepped", False),
+                                           ("rebased", False), ("exact_overlap", False),
+                                           ("borrowed", False)])
+def test_private_register_partition_proof_rejects_ambiguous_views(case, expected):
+  from dataclasses import replace
+  from vecops.language._compiler.backends.cpu.cpp.memory import MemoryEmitter
+
+  root = I.View("scratch", "uint32", (I.literal(16), I.literal(16)),
+                (I.literal(16), I.literal(1)), I.literal(0), owned=True)
+  region = I.ViewRegion(root.shape, root.strides, (I.literal(0), I.literal(0)),
+                        (I.literal(1), I.literal(16)), (1, 1), (0, 1), (False, False))
+  a = replace(root, shape=region.widths, region=region)
+  other = replace(region, starts=(I.literal(1), I.literal(0)))
+  b = replace(a, offset=I.literal(16), region=other)
+  if case == "overlap":
+    b = a
+  elif case == "clipped":
+    b = replace(b, region=replace(other, clipped=(True, False)))
+  elif case == "stepped":
+    b = replace(b, region=replace(other, steps=(2, 1)))
+  elif case == "rebased":
+    b = replace(b, region=replace(other, root_strides=(I.literal(1), I.literal(16))))
+  elif case == "exact_overlap":
+    b = replace(b, region=replace(other, exact_starts=region.starts))
+  elif case == "borrowed":
+    a, b = replace(a, owned=False), replace(b, owned=False)
+  emitter = MemoryEmitter()
+  emitter.storage_views = {root.storage: root}
+  assert emitter.register_disjoint_proven(a, b) is expected

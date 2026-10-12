@@ -137,32 +137,38 @@ def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, ra
 
 @T.func
 def _input_b(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a, raw_b):
-  if raw_b is not None:
-    if b.shape[1] % 16 == 0 and b.shape[0] % kr == 0:
-      if raw_b.strides[0] == 1:
-        if raw_b.dtype == b.dtype:
-          _input_b_full_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
-        else:
-          _input_b_converting_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
-      elif raw_b.strides[1] == 1:
-        _input_b_full(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
-      else:
-        _input_b_padded(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
-    else:
-      _input_b_padded(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
-  else:
+  if raw_b is None:
     _input_b_padded(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
+  else:
+    _input_b_proven_layout(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a, raw_b)
 
 
 @T.func
-def _input_b_full(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
-  # Read a complete spatial word from each member of a K dword group and
-  # interleave directly into physical B panels. Pure pointwise producers
-  # (including conversions) stay on these loads: no full dense transpose,
-  # reread, or sixteen-register transpose network. Fringes retain the
-  # padded recipe below; producers are never evaluated on padding indices.
+def _input_b_proven_layout(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a, raw_b):
+  # Keep packing alternatives separate from their common consumer. Duplicating
+  # _input_a/_output in each layout branch inflated Dynamic kernels' CFG and
+  # stack even when only one branch executed. Complete panels read producers
+  # directly into one shared permutation DAG, including boundary conversion.
   panels = T.alloc((np // 16, kp // kr, 16, 16 * group), dtype=b.dtype)
-  for ni in T.serial(np // 16, unroll=1):
+  if raw_b is not None:
+    if b.shape[1] % 16 == 0 and b.shape[0] % kr == 0:
+      if raw_b.strides[0] == 1:
+        _pack_b_full_k(b, panels, kr)
+      elif raw_b.strides[1] == 1:
+        _pack_b_full(b, panels, kp, kr, group)
+      else:
+        _pack_b_fringe(b, panels, kp, kr, raw_b)
+    else:
+      _pack_b_fringe(b, panels, kp, kr, raw_b)
+  else:
+    _pack_b_fringe(b, panels, kp, kr, raw_b)
+  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
+
+
+@T.func
+def _pack_b_full(b, panels, kp, kr, group):
+  # A complete spatial word from each member of one K dword group.
+  for ni in T.serial(panels.shape[0], unroll=1):
     for kg in T.serial(kp // group, unroll=1):
       columns = ()
       for member in T.unroll(group):
@@ -170,46 +176,63 @@ def _input_b_full(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, gro
         value = T.as_vector(word, T.Vector(b.dtype, N=16))
         columns = columns + (value,)
       T.store(panels[ni, kg // 16, kg % 16, :], pack_interleave(columns)[0])
-  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
 
 
 @T.func
-def _input_b_full_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
-  # K-contiguous B already supplies the sixteen rows required by the
-  # dword transpose. Evaluate the producer directly into those registers.
-  panels = T.alloc((np // 16, kp // kr, 16, 16 * group), dtype=b.dtype)
-  for ni in T.serial(np // 16, unroll=1):
-    for ki in T.serial(kp // kr, unroll=1):
+def _pack_b_full_k(b, panels, kr):
+  # Each producer is evaluated once in the combined 16-output register DAG.
+  # A fixed one-word destination also bounds converting inputs to two FP32
+  # words, avoiding the unused wide aggregates of a generic row tail.
+  for ni in T.serial(panels.shape[0], unroll=1):
+    for ki in T.serial(panels.shape[1], unroll=1):
       rows = ()
       for row in T.unroll(16):
         word = T.reshape(b[ki * kr:ki * kr + kr, ni * 16 + row], (kr,))
         value = T.as_vector(word, T.Vector(b.dtype, N=kr))
         rows = rows + (T.bitcast(value, "uint32"),)
-      columns = transpose_dwords_512(rows)
+      transposed = transpose_dwords_512(rows)
       for column in T.unroll(16):
-        T.store(panels[ni, ki, column, :], T.bitcast(columns[column], b.dtype))
-  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
+        T.store(panels[ni, ki, column, :], T.bitcast(transposed[column], b.dtype))
 
 
 @T.func
-def _input_b_converting_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
-  # Convert one physical tile once. Directly placing a converting producer
-  # into each output column's register DAG repeated conversion and spills
-  # (the measured FP32->BF16 case was ~3.6x slower). This bounded tile cache
-  # preserves every rounding boundary and captured read without an NxK cache.
-  dense = T.alloc((16, kr), dtype=b.dtype)
-  panels = T.alloc((np // 16, kp // kr, 16, 16 * group), dtype=b.dtype)
-  for ni in T.serial(np // 16, unroll=1):
-    for ki in T.serial(kp // kr, unroll=1):
-      T.store(dense, T.transpose(b[ki * kr:ki * kr + kr, ni * 16:ni * 16 + 16]))
-      rows = ()
-      for row in T.unroll(16):
-        value = T.as_vector(T.load(dense[row, :]), T.Vector(b.dtype, N=kr))
-        rows = rows + (T.bitcast(value, "uint32"),)
-      columns = transpose_dwords_512(rows)
-      for column in T.unroll(16):
-        T.store(panels[ni, ki, column, :], T.bitcast(columns[column], b.dtype))
-  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
+def _stage_b_k_rows(b, dense, ni, ki, kr, columns, reduction):
+  # Explicit one-word vectors avoid constructing a two-word BF16/four-word
+  # FP32 tail for a row that is at most one physical AMX K word. All source
+  # coordinates remain inside the logical domain; the fringe fill supplies
+  # every absent storage element before the bit-level transpose.
+  for row in T.serial(columns, unroll=1):
+    word = T.reshape(b[ki * kr:ki * kr + kr, ni * 16 + row], (reduction,))
+    value = T.as_vector(word, T.Vector(b.dtype, N=kr))
+    T.store(dense[row, :reduction], value)
+
+
+@T.func
+def _pack_b_fringe(b, panels, kp, kr, raw_b):
+  # A bounded tile cache retains producer rounding and avoids a full NxK
+  # dense transpose. Preserve the register transpose for spatial-contiguous
+  # inputs instead of turning their rows into K-strided gathers.
+  if kp > 0:
+    dense = T.alloc((16, kr), dtype=b.dtype)
+    for ni in T.serial(panels.shape[0], unroll=1):
+      for ki in T.serial(panels.shape[1], unroll=1):
+        columns = T.min(16, b.shape[1] - ni * 16)
+        reduction = T.min(kr, b.shape[0] - ki * kr)
+        if columns != 16 or reduction != kr:
+          T.store(dense, T.zeros(dense.shape, dtype=b.dtype))
+        if raw_b is None:
+          T.store(dense[:columns, :reduction], T.transpose(b[ki * kr:ki * kr + kr, ni * 16:ni * 16 + 16]))
+        elif raw_b.strides[0] == 1:
+          _stage_b_k_rows(b, dense, ni, ki, kr, columns, reduction)
+        else:
+          T.store(dense[:columns, :reduction], T.transpose(b[ki * kr:ki * kr + kr, ni * 16:ni * 16 + 16]))
+        rows = ()
+        for row in T.unroll(16):
+          value = T.as_vector(T.load(dense[row, :]), T.Vector(b.dtype, N=kr))
+          rows = rows + (T.bitcast(value, "uint32"),)
+        transposed = transpose_dwords_512(rows)
+        for column in T.unroll(16):
+          T.store(panels[ni, ki, column, :], T.bitcast(transposed[column], b.dtype))
 
 
 @T.func

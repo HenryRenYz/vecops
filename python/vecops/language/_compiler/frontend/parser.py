@@ -172,6 +172,10 @@ class Frontend(
       if path in self.env:
         return self.env[path]
       obj = self.expression(node.value)
+      from .helpers import ValueFunction
+
+      if isinstance(obj, (ValueFunction, Body)) and node.attr == "streaming_selection":
+        return obj.streaming_selection if isinstance(obj, ValueFunction) else False
       if node.attr == "T" and isinstance(obj, I.Expr) and isinstance(obj.type, I.TileType):
         return self.primitive("transpose", [obj], {}, node)
       if isinstance(obj, ModuleType):

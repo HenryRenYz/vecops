@@ -25,7 +25,14 @@ class ExpressionsEmitter:
 
   def scalar_convert(self, dtype, expression, source_dtype=None):
     """Use the public scalar counterpart of vector conversion semantics."""
-    if dtype == source_dtype or dtype == "bool" or getattr(self, "hardware_scope", None) is not None:
+    metadata = (getattr(self, "hardware_scope", None) is not None
+                and not getattr(self, "streaming_selection_scope", False)
+                and dtype.startswith(("int", "uint"))
+                and source_dtype is not None and source_dtype.startswith(("int", "uint")))
+    # Instruction indices use native integer casts. Numeric scalar casts
+    # inside selection helpers retain public saturation/rounding semantics,
+    # just like their ordinary vector counterparts.
+    if dtype == source_dtype or dtype == "bool" or metadata:
       return f"static_cast<{CPP_TYPES[dtype]}>({expression})"
     return f"vecops::convert<{CPP_TYPES[dtype]}>({expression})"
 
