@@ -690,9 +690,11 @@ or writes a padded physical buffer and returns a packed logical tile. Formats
 are `dense`, `amx`, `sme`, or target-selected `auto`. `T.packed(buffer,
 logical_shape, side=..., format=...)` wraps an external packed buffer. Its
 physical storage must be dense, large enough and independent of the output;
-all physical slots beyond logical K must be zero, matching the public C++
-MatmulPack format contract. Wrapping external storage does not create or
-repair this padding. Shape/capacity/alias validation precedes hardware-state
+`T.pack` creates zero physical padding, matching public C++ MatmulPack output.
+Native DSL matrix recipes ignore external slots beyond logical K by masking
+or privately repairing the final instruction group; wrapping storage itself
+does not repair padding. This is a stronger input guarantee than a C++ leaf
+that requires packer-generated zero padding. Shape/capacity/alias validation precedes hardware-state
 entry. A/B formats
 are distinct: AMX A is row/K-blocked, B is dword-group/VNNI interleaved; SME
 uses spatial panels and K groups parameterized by SVL. Dense B stores `[N,K]`.
@@ -1923,8 +1925,14 @@ Packed ABI capacity, density and output-disjointness checks precede decoding.
 AMX and SME instruction families now stage source matrix recipes, including
 accumulators and pointwise producer/epilogue DAGs. Packing and fringes remain
 source algorithms; the terminal instruction printer owns no matrix/cache loop.
-Raw first-sink FP32/FP64 SME products retain strided reads and masked direct ZA
-stores; more general products preserve captured reads through private staging.
+Raw first-sink FP32/FP64 SME products use masked direct ZA stores and 2x2
+register reuse for complete spatial blocks. Moderate inputs spanning several
+register tiles and at least 64 K elements are privately packed within a
+two-L2 input budget; smaller/nonresident inputs retain strided reads. The
+general FP64 leaf retains strided reads for fully static `T.dot` metadata,
+whose address loops already specialize well enough that packing regressed the
+measured case. Packing is part of the operation, and aliased producers are
+captured before writes.
 SME native operands use the public panel-major packed layout, constructed by
 ZA storage-word transposes from logical producers. Complete spatial panels with K-contiguous raw views skip the intermediate
 dense copy; transformed, spatial-fringe or other-stride producers first
@@ -1932,21 +1940,44 @@ materialize their logical domain. Private storage rounds K to complete
 streaming chunks for bounded access proofs; MOPA consumes only the logical
 K groups, and no producer is evaluated at a padded index. Checked external
 SME packed A/B and AMX packed A/B are read directly when K contains complete instruction groups.
-Fractional K still decodes and zero-pads privately, so external padding is not
-a numerical promise. SME I16/I64 retains its separate four-halfword layout:
+Fractional K copies physical panels and selects zero for the invalid lanes of
+the final instruction group/tile, avoiding logical decoding and retransposing
+the whole operand. External K padding is not a numerical promise; discarded
+NaN/Inf payloads never participate in arithmetic. SME clears the last packed
+group's invalid lanes with byte group offsets, without constructing a wide
+int64 index mask or handling each packed dword through a scalar loop.
+SME I16/I64 retains its separate four-halfword layout:
 the public I16 packed ABI uses two halfwords per dword and is not compatible.
 The default resident library Matmul leaf preserves these direct-input paths;
 explicit cache phases use logical slices and preserve the initializer/epilogue
 once across all K phases. Native epilogues project over a whole logical row,
 letting ordinary vector legalization share layout checks and batch vector
 words instead of rebuilding a one-word scatter traversal for every word.
-SME callbacks snapshot invariant pointers and integer metadata into local SSA
+SME row/scalar broadcast initializers stage one private row and initialize ZA
+with bit-preserving row writes rather than a full matrix memory round trip.
+This preserves a bias alias of the output and negative zero/NaN payloads;
+arithmetic initialization with an outer product of ones is not equivalent.
+Owned-buffer forwarding may replace an initializer only for the same view.
+A zero-offset partial store first materializes a different previously
+forwarded view, preserving its surrounding elements and matrix padding.
+AMX and SME callbacks snapshot invariant pointers and integer metadata into local SSA
 values after preflight, so instruction memory clobbers do not reload captured
 descriptors inside K loops. Buffers may resize before ownership; their addresses
 are never cached across region invocations. Default cache panels reuse multiple
 register tiles within an L2 budget; explicit BM/BN/BK values remain exact.
+Pure integer metadata min/max and vector-tail clamps evaluate each operand once through an inline
+value helper; floating-point min/max semantics are unchanged. Same-dtype SME
+loads use public masked `load`, whose inactive lanes are zero, and known unit
+strides use contiguous addressing. Converting, unknown-stride and fringe
+loads retain their checked conversion/mask paths.
+JIT streaming geometry uses the adapter-validated captured SVL, independently
+of ordinary VL. This makes panel widths and their division/remainder constant;
+standalone sources without that contract retain the public runtime query.
+Unsigned casts of unit-step index sequences generate modulo-width indices
+directly, preserving wraparound while avoiding unnecessarily wide vectors.
 Moderate raw FP64 problems whose outputs fit half of L2 and whose inputs fit
-twice L2 use one strided resident leaf instead of repeated cache-panel packing.
+twice L2 use one resident leaf instead of repeated cache-panel packing. The
+leaf may pack its inputs once according to the same raw-input reuse policy.
 Pointwise epilogue loads retain their capture at the original whole-matrix
 store, including inline broadcast reads that alias an output row; row-wise
 stores cannot substitute values already overwritten by an earlier row.

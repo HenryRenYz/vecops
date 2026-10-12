@@ -103,7 +103,7 @@ class ExpressionsEmitter:
       dtype, format_, side = value.data
       return f"vecops_dsl::pack_offset<{CPP_TYPES[dtype]}, {FORMATS[format_]}, {'true' if side == 'B' else 'false'}>({', '.join(self.scalar(v) for v in value.args)})"
     if value.op == "streaming_lanes":
-      return f"vecops::vec::sme::streaming_lanes<{CPP_TYPES[value.data]}>()"
+      return f"vecops_dsl::streaming_lanes<{CPP_TYPES[value.data]}>()"
     if value.op == "literal":
       if isinstance(value.data, bool):
         return "true" if value.data else "false"
@@ -193,10 +193,12 @@ class ExpressionsEmitter:
         expr = f"(static_cast<{CPP_TYPES[value.type.dtype]}>({arguments[0]}) / {arguments[1]})"
       return expr
     if implementation.scalar_kind == "std_binary":
+      if value.op in {"min", "max"} and value.type.dtype.startswith(("int", "uint")):
+        return f"vecops_dsl::{value.op}_value<{CPP_TYPES[value.type.dtype]}>({', '.join(arguments)})"
       return f"std::{value.op}<{CPP_TYPES[value.type.dtype]}>({', '.join(arguments)})"
     if value.op == "broadcast_dim":
       if getattr(self, "matrix_validated", False):
-        return f"std::max<std::int64_t>({', '.join(arguments)})"
+        return f"vecops_dsl::max_value<std::int64_t>({', '.join(arguments)})"
       return f"vecops_dsl::broadcast_dim({', '.join(arguments)})"
     if implementation.lane_fallback:
       cpp = CPP_TYPES[value.type.dtype]

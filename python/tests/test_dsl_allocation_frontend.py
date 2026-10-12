@@ -52,3 +52,26 @@ def test_owned_allocation_duplicate_dtype_is_diagnosed_at_original_call(operatio
 
   with pytest.raises(TypeError, match="allocation expects a shape and optional dtype"):
     lower(kernel.ir)
+
+
+@pytest.mark.parametrize("shape,prefix", [((8,), (3,)), ((4, 8), (2, 3))])
+def test_owned_zero_offset_subview_preserves_surrounding_initializer(shape, prefix):
+  import numpy as np
+  from vecops.language._debug.interpreter import Interpreter
+
+  @T.template
+  def kernel(C: T.Tensor(shape, dtype="int32", access="output")):
+    storage = T.alloc(shape, dtype="int32")
+    T.store(storage, T.full(shape, 7, dtype="int32"))
+    if len(shape) == 1:
+      T.store(storage[:prefix[0]], T.full(prefix, 11, dtype="int32"))
+    else:
+      T.store(storage[:prefix[0], :prefix[1]], T.full(prefix, 11, dtype="int32"))
+    T.store(C, T.load(storage))
+
+  ir = lower(kernel.ir)
+  out = np.empty(shape, np.int32)
+  Interpreter(ir, {"C": out}).block(ir.body)
+  expected = np.full(shape, 7, np.int32)
+  expected[tuple(slice(0, extent) for extent in prefix)] = 11
+  np.testing.assert_array_equal(out, expected)

@@ -81,7 +81,7 @@ class SMEInstructionEmitter:
       self.line(f"auto {handle.name}_mask = {self.streaming_mask(tag, handle.dtype, handle.extent)};")
       stride = (
         f", vecops::vec::opt::strided({self.scalar(statement.view.strides[0])})"
-        if statement.operands == (True,)
+        if statement.operands == (True,) and I.constant(statement.view.strides[0]) != 1
         else ""
       )
       pointer = self.pointer(statement.view)
@@ -89,8 +89,12 @@ class SMEInstructionEmitter:
         pointer = self.storage_pointer(statement.view.storage)
       elif I.constant(handle.extent) is None:
         pointer = f"({self.scalar(handle.extent)}>0 ? {pointer} : {self.storage_pointer(statement.view.storage)})"
+      # Identical storage/compute types need no conversion or post-load blend.
+      # The public masked load already zeroes inactive lanes. A proven unit
+      # stride uses contiguous addressing, rather than constructing a gather.
+      operation = "load" if handle.dtype == statement.view.dtype else "load_convert"
       self.line(
-        f"auto {handle.name} = vecops::vec::load_convert({tag}{{}}, {pointer}, vecops::vec::opt::masked({handle.name}_mask){stride});"
+        f"auto {handle.name} = vecops::vec::{operation}({tag}{{}}, {pointer}, vecops::vec::opt::masked({handle.name}_mask){stride});"
       )
     elif statement.operation == "sme.store":
       handle = statement.vector

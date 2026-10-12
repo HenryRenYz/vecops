@@ -12,9 +12,9 @@ from .hardware_sme import SMEInstructionEmitter
 
 class HardwareEmitter(SMEInstructionEmitter):
   def snapshot_hardware_inputs(self, program):
-    """Snapshot invariant references inside the streaming callback.
+    """Snapshot invariant references inside the architectural callback.
 
-    SME memory clobbers otherwise force LLVM to reload reference-captured
+    Instruction memory clobbers otherwise force the compiler to reload reference-captured
     pointers and loop metadata on every instruction. Region-local immutable
     values keep their SSA identity without changing storage or ownership.
     No allocation or scalar mutation is legal during this lexical interval.
@@ -139,7 +139,7 @@ class HardwareEmitter(SMEInstructionEmitter):
     if kind == "amx":
       self.opening(f"{scope}.with_configuration({configuration}, [&](auto&) VECOPS_INLINE_LAMBDA_NOEXCEPT")
     prior_pointers, prior_scalars = self.parameter_pointers, self.hardware_scalar_bindings
-    if kind == "sme" and not any(isinstance(s, I.Store) for s in nodes(I.Block(statements))):
+    if not any(isinstance(s, I.Store) for s in nodes(I.Block(statements))):
       self.parameter_pointers = dict(prior_pointers)
       self.hardware_scalar_bindings = dict(prior_scalars)
       self.snapshot_hardware_inputs(I.Block(statements))

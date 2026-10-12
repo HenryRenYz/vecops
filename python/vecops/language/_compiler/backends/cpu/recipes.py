@@ -336,6 +336,21 @@ def expand_dot_recipes(ir, context):
 
               recipe = amx_dot if family == "amx" else sme_dot
               kwargs.pop("unroll")
+              # Static FP64 dot metadata already specializes the gather loops.
+              # Prepacking the 64x256x256 Const dot benchmark cost 5-6%; keep
+              # its existing strided leaf while Dynamic/library reuse benefits.
+              if (
+                family == "sme"
+                and not product.data.tiled
+                and product.type.dtype == "float64"
+                and all(I.constant(dim) is not None for operand in product.args[:2] for dim in operand.type.shape)
+              ):
+                kwargs["pack_raw_inputs"] = False
+              # Capture the original initializer's broadcast domain before
+              # source expansion turns it into a full matrix projection.
+              if family == "sme" and len(product.args) > 2:
+                shape = getattr(product.args[2].type, "shape", ())
+                kwargs["broadcast_acc"] = len(shape) < 2 or I.constant(shape[0]) == 1
               # Broadcast-domain validation can throw. Evaluate such shape
               # metadata before entering an architectural state owner; its
               # bounded logical domain remains identical for projection.

@@ -519,7 +519,7 @@ class VectorsEmitter:
           value = (
             self.vector_size(tag)
             if full
-            else f"std::clamp<vecops::nint_t>(({stop}) - {chunk}, 0, {self.vector_size(tag)})"
+            else f"vecops_dsl::clamp_value<vecops::nint_t>(({stop}) - {chunk}, 0, {self.vector_size(tag)})"
           )
           self.line(f"const auto {count} = {value};")
           active.append(count)

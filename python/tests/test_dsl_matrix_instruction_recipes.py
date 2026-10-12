@@ -252,12 +252,12 @@ def test_native_i16_vector_fallback_wraps_int64_accumulator(tmp_path):
   np.testing.assert_array_equal(out, expected)
 
 
-def external_ab_template(implementation, library=False):
+def external_ab_template(implementation, library=False, a_dtype="int8", b_dtype="uint8", acc_dtype="int32"):
   m, n, k, ca, cb = (T.dynamic(lower=0) for _ in range(5))
 
   @T.template
-  def kernel(AP: T.Tensor((ca,), dtype="int8"), BP: T.Tensor((cb,), dtype="uint8"),
-             Shape: T.Tensor((m, k), dtype="int8"), Prior: T.Tensor((1, n), dtype="int32"), C: T.Tensor((m, n), dtype="int32", access="output")):
+  def kernel(AP: T.Tensor((ca,), dtype=a_dtype), BP: T.Tensor((cb,), dtype=b_dtype),
+             Shape: T.Tensor((m, k), dtype=a_dtype), Prior: T.Tensor((1, n), dtype=acc_dtype), C: T.Tensor((m, n), dtype=acc_dtype, access="output")):
     a = T.packed(AP, (m, k), side="A", format=implementation)
     b = T.packed(BP, (k, n), side="B", format=implementation)
     if library:
@@ -295,9 +295,50 @@ def test_native_external_ab_accumulator_epilogue_and_invalid_capacity(library, t
     out = np.empty((m, n), np.int32)
     kernel.operator.native(ap, bp, a, prior, out, **kernel._core.specialization_values)
     np.testing.assert_array_equal(out, (a.astype(np.int32) @ b.astype(np.int32) + prior) * 2 + 1)
+    if k and kp > k:
+      pad_a, pad_b = np.zeros(aa.shape, bool), np.zeros(bb.shape, bool)
+      pad_a[:, k:], pad_b[:, k:] = True, True
+      if implementation == "amx":
+        pa = pad_a.reshape(mp // 16, 16, kp // 64, 64).transpose(0, 2, 1, 3).copy().ravel()
+        pb = pad_b.reshape(npad // 16, 16, kp // 64, 16, 4).transpose(0, 2, 3, 1, 4).copy().ravel()
+      else:
+        pa = pad_a.reshape(-1, panel, kp // 4, 4).transpose(0, 2, 1, 3).copy().ravel()
+        pb = pad_b.reshape(-1, panel, kp // 4, 4).transpose(0, 2, 1, 3).copy().ravel()
+      ap[pa], bp[pb] = 13, 251
+      kernel.operator.native(ap, bp, a, prior, out, **kernel._core.specialization_values)
+      np.testing.assert_array_equal(out, (a.astype(np.int32) @ b.astype(np.int32) + prior) * 2 + 1)
     if ap.size:
       with pytest.raises(RuntimeError, match="packed input buffer too small"):
         kernel.operator.native(ap[:-1], bp, a, prior, out, **kernel._core.specialization_values)
+
+
+@pytest.mark.parametrize("library", [False, True])
+def test_native_external_bf16_nan_k_padding_is_ignored(library, tmp_path):
+  import ml_dtypes
+
+  implementation = "amx" if platform.machine() == "x86_64" else "sme"
+  dtype = ml_dtypes.bfloat16
+  if implementation == "sme":
+    from vecops._arm_vector_state import get_vector_state
+    panel = 2 * get_vector_state().sme_bytes // 4
+  spatial = 32 if implementation == "amx" else panel
+  a = (np.arange(spatial * 17).reshape(spatial, 17) % 5 - 2).astype(dtype)
+  b = (np.arange(17 * spatial).reshape(17, spatial) % 7 - 3).astype(dtype)
+  kp = 32 if implementation == "amx" else 18
+  aa, bb = np.full((spatial, kp), np.nan, dtype), np.full((spatial, kp), np.nan, dtype)
+  aa[:, :17], bb[:, :17] = a, b.T
+  if implementation == "amx":
+    ap = aa.reshape(2, 16, 1, 32).transpose(0, 2, 1, 3).copy().ravel()
+    bp = bb.reshape(2, 16, 1, 16, 2).transpose(0, 2, 3, 1, 4).copy().ravel()
+  else:
+    ap = aa.reshape(1, panel, kp // 2, 2).transpose(0, 2, 1, 3).copy().ravel()
+    bp = bb.reshape(1, panel, kp // 2, 2).transpose(0, 2, 1, 3).copy().ravel()
+  prior = (np.arange(spatial) - 10).astype(np.float32).reshape(1, spatial)
+  out = np.empty((spatial, spatial), np.float32)
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  kernel = T.compile(external_ab_template(implementation, library, "bfloat16", "bfloat16", "float32"), compiler=compiler)
+  kernel.operator.native(ap, bp, a, prior, out, **kernel._core.specialization_values)
+  np.testing.assert_array_equal(out, (a.astype(np.float32) @ b.astype(np.float32) + prior) * 2 + 1)
 
 
 def test_native_converting_scalar_pack_preserves_overlapping_capture(tmp_path):
@@ -379,3 +420,33 @@ def test_native_default_fp64_cache_producers_prior_and_epilogue_alias(tmp_path):
   expected = ((a * 2) @ (b + 1) + old_prior) * 0.25 + old_prior
   compiled.operator.native(a, b, prior, out, **compiled._core.specialization_values)
   np.testing.assert_array_equal(out, expected)
+
+
+@pytest.mark.skipif(platform.machine() == "x86_64", reason="SME FP64 target required")
+@pytest.mark.parametrize("library", [False, True])
+def test_native_broadcast_za_seed_preserves_float_bits_and_alias(library, tmp_path):
+  m, n, k = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.template
+  def kernel(A: T.Tensor((m, k), dtype="float64"), B: T.Tensor((k, n), dtype="float64"),
+             Prior: T.Tensor((1, n), dtype="float64"), C: T.Tensor((m, n), dtype="float64", access="output")):
+    if library:
+      product = T.library.matmul(T.load(A), T.load(B), acc=T.load(Prior), implementation="sme")
+    else:
+      product = T.dot(T.load(A), T.load(B), acc=T.load(Prior), implementation="sme")
+    T.store(C, product)
+
+  compiled = T.compile(kernel, compiler=make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"))
+  # An arithmetic seed (e.g. MOPA with ones) changes -0 and can quiet NaNs.
+  # K=0 isolates initialization from multiply/accumulate semantics. Exercise
+  # complete register blocks, spatial fringes and a bias alias of the output.
+  bits = np.array([0, 0x8000000000000000, 0x7ff0000000000000, 0xfff0000000000000,
+                   0x7ff8000000001234, 0x7ff0000000004321], dtype=np.uint64)
+  for rows, columns in [(32, 32), (17, 19)]:
+    a, b = np.empty((rows, 0), np.float64), np.empty((0, columns), np.float64)
+    out = np.empty((rows, columns), np.float64)
+    out.view(np.uint64)[0] = np.resize(bits, columns)
+    prior = out[:1]
+    expected = np.broadcast_to(prior.view(np.uint64).copy(), (rows, columns))
+    compiled.operator.native(a, b, prior, out, **compiled._core.specialization_values)
+    np.testing.assert_array_equal(out.view(np.uint64), expected)

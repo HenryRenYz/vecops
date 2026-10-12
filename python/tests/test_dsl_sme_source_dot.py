@@ -3,12 +3,14 @@
 """Direct MOPA source algorithms retain strided views and checked ownership."""
 
 import os
+import re
 
 import numpy as np
 import pytest
 import vecops.language as T
 from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
 from vecops.language._compiler import ir as I
+from vecops.language._compiler.ir.traversal import walk_unique
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.dtypes import ELEMENT_BYTES
 from vecops.language._debug.interpreter import Interpreter
@@ -56,7 +58,15 @@ def test_raw_dot_dispatch_stages_direct_mopa_as_dsl_control(dtype):
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_source_za_preflight_accepts_clipped_and_empty_tiles(dtype):
   artifact = CPUBackend().lower(template(dtype).ir, (), target="SME")
-  plan = next(iter(artifact.backend_ir.hardware.values()))
+  # Packing is now another source-level hardware owner. Select the direct
+  # raw traversal by its writes to the public destination; private packing
+  # buffers have metadata that this parameter-only interpreter cannot model.
+  plans = [plan for plan in artifact.backend_ir.hardware.values()
+           if any(view.storage == "C" for view in plan.writes)
+           and all((expr.op not in {"local", "frozen"} or not expr.data.startswith("dsl_f_"))
+                   and (expr.op != "raw" or re.fullmatch(r"(?:A|B|C)\.(?:size|stride)\(\d+\)", expr.data))
+                   for condition, _ in plan.checks for expr in walk_unique(condition) if isinstance(expr, I.Expr))]
+  assert plans
   for streaming_bytes in (16, 32, 64, 128):
 
     class MetadataInterpreter(Interpreter):
@@ -72,8 +82,9 @@ def test_source_za_preflight_accepts_clipped_and_empty_tiles(dtype):
         artifact.kernel,
         {"A": np.empty((m, k), dtype=dtype), "B": np.empty((k, n), dtype=dtype), "C": np.empty((m, n), dtype=dtype)},
       )
-      for condition, message in plan.checks:
-        assert reference.value(condition), (streaming_bytes, m, n, k, message)
+      for plan in plans:
+        for condition, message in plan.checks:
+          assert reference.value(condition), (streaming_bytes, m, n, k, message)
 
 
 @pytest.mark.skipif(os.uname().machine.lower() not in {"aarch64", "arm64"}, reason="native SME target required")
@@ -82,7 +93,8 @@ def test_source_za_preflight_accepts_clipped_and_empty_tiles(dtype):
 def test_native_source_mopa_strides_empty_tails_and_overlap(dtype, dot, tmp_path):
   compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   kernel = T.compile(template(dtype, dot=dot), compiler=compiler)
-  for m, n, k in [(0, 19, 17), (19, 0, 17), (7, 19, 0), (1, 1, 17), (7, 19, 17), (33, 65, 31)]:
+  for m, n, k in [(0, 19, 17), (19, 0, 17), (7, 19, 0), (1, 1, 17), (7, 19, 17), (33, 65, 31),
+                  (32, 64, 64), (64, 256, 256)]:
     for reverse in [False, True]:
       a = (np.arange(m * k).reshape(m, k) % 7).astype(dtype) / 16
       b = (np.arange(k * n).reshape(k, n) % 11).astype(dtype) / 16
@@ -99,3 +111,10 @@ def test_native_source_mopa_strides_empty_tails_and_overlap(dtype, dot, tmp_path
   expected = a.copy() @ b
   kernel.operator.native(a, b, a[:, :19], **kernel._core.specialization_values)
   np.testing.assert_array_equal(a[:, :19], expected)
+  for alias in ("A", "B"):
+    a = (np.arange(32 * 64).reshape(32, 64) % 7).astype(dtype) / 16
+    b = (np.arange(64 * 32).reshape(64, 32) % 11).astype(dtype) / 16
+    expected = a.copy() @ b.copy()
+    out = a[:, :32] if alias == "A" else b[:32, :]
+    kernel.operator.native(a, b, out, **kernel._core.specialization_values)
+    np.testing.assert_array_equal(out, expected)

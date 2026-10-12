@@ -389,6 +389,37 @@ def _wrapper(source, strong=False):
   )
 
 
+def test_native_integer_scalar_minmax_signed_extremes(compiler):
+  @T.template
+  def kernel(C: T.Tensor((3,), dtype="int64", access="output"), left: int, right: int):
+    T.store(C[0], T.min(left, right))
+    T.store(C[1], T.max(left, right))
+    T.store(C[2], T.min(T.max(left, -7), 13))
+
+  compiled = T.compile(kernel, compiler=compiler)
+  out = np.empty(3, np.int64)
+  minimum, maximum = -(1 << 63), (1 << 63) - 1
+  for left, right in ((minimum, maximum), (maximum, minimum), (minimum, minimum),
+                      (maximum, maximum), (-1, 0), (0, -1)):
+    compiled(out, left, right)
+    np.testing.assert_array_equal(out, (min(left, right), max(left, right), min(max(left, -7), 13)))
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32"])
+def test_native_unsigned_sequence_cast_wraps_at_storage_width(dtype, compiler):
+  @T.template
+  def kernel(C: T.Tensor((131,), dtype=dtype, access="output"), start: int):
+    T.store(C, T.cast(T.arange(start, start + 131), dtype))
+
+  compiled = T.compile(kernel, compiler=compiler)
+  out = np.empty(131, dtype=dtype)
+  modulus = 1 << (out.itemsize * 8)
+  for start in (-256, -3, 0, 250, 65530, (1 << 32) - 5):
+    compiled(out, start)
+    expected = np.array([(start + index) % modulus for index in range(131)], dtype=dtype)
+    np.testing.assert_array_equal(out, expected)
+
+
 @pytest.mark.parametrize("vl,svl,strong", ((16, 64, False), (64, 16, False), (64, 64, True)))
 def test_real_cross_promoted_integer_epilogue_inline_owners_no_register_arrays(vl, svl, strong, tmp_path):
   source = (

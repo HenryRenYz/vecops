@@ -54,7 +54,7 @@ def finish_matrix(storage, output, *, epilogue=None):
 @T.func
 def blocked_matrix(inputs, output, leaf, *, acc=None, acc_dtype="float32", epilogue=None,
                    BM=None, BN=None, BK=None, span=32, quantum=32, packing="auto",
-                   raw_a=None, raw_b=None, packed_a=None, packed_b=None):
+                   raw_a=None, raw_b=None, packed_a=None, packed_b=None, broadcast_acc=False):
   """Cache phases: initializer once, continuation, epilogue once.
 
   Logical slicing keeps producer DAGs and already-packed logical operands
@@ -68,15 +68,19 @@ def blocked_matrix(inputs, output, leaf, *, acc=None, acc_dtype="float32", epilo
     if (packing == "auto" and BM is None and BN is None and BK is None and (
         (m <= T.cache_bytes("L2") // 4 // T.itemsize(acc_dtype) // n and
          k <= T.cache_bytes("L2") // 2 // (m * T.itemsize(a.dtype) + n * T.itemsize(b.dtype))) or
-        # Raw FP64 needs no instruction layout conversion. For moderate
-        # working sets, one strided owner beats repeated packed cache phases:
+        # For moderate raw FP64 working sets, one resident leaf (with an
+        # optional private pack) avoids repeating packed cache phases:
         # the measured 64x256x256 Dynamic case was ~2 ms versus ~350 us dot.
         # Keep large problems and explicit cache policies on the tiled path.
         (acc_dtype == "float64" and raw_a is not None and raw_b is not None and
          m <= T.cache_bytes("L2") // 2 // T.itemsize(acc_dtype) // n and
          k <= 2 * T.cache_bytes("L2") // (m * T.itemsize(a.dtype) + n * T.itemsize(b.dtype))))):
-      leaf((a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue,
-           raw_a=raw_a, raw_b=raw_b, packed_a=packed_a, packed_b=packed_b)
+      if broadcast_acc:
+        leaf((a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue,
+             raw_a=raw_a, raw_b=raw_b, packed_a=packed_a, packed_b=packed_b, broadcast_acc=True)
+      else:
+        leaf((a, b), output, acc=acc, acc_dtype=acc_dtype, epilogue=epilogue,
+             raw_a=raw_a, raw_b=raw_b, packed_a=packed_a, packed_b=packed_b)
     else:
       bm = span if BM is None else BM
       bn = span if BN is None else BN

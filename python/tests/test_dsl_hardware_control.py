@@ -414,35 +414,56 @@ def test_hardware_prefetch_retains_scalar_index_bounds():
   assert any(not reference.value(condition) for condition, _ in plans[0].checks)
 
 
-@pytest.mark.parametrize("dtype", ["uint8", "int8", "float16", "float32"])
+@pytest.mark.parametrize("dtype", ["uint8", "int8", "float16", "float32", "float64"])
 @pytest.mark.parametrize("side", ["A", "B"])
-def test_native_sme_dsl_full_word_packing(dtype, side, tmp_path):
+def test_native_sme_dsl_full_word_packing(dtype, side, tmp_path, matrix_recipe=False):
   from vecops.language._compiler.dtypes import ELEMENT_BYTES
+  from vecops.language._library.sme_matmul import _pack_dense
 
   state = get_vector_state()
   if state.sme_bytes is None:
     pytest.skip("actual SME target required")
-  panel = 2 * (state.sme_bytes // 4)
+  panel = 2 * (state.sme_bytes // (8 if dtype == "float64" else 4))
   quantum = max(1, 4 // ELEMENT_BYTES[dtype])
-  spatial, k = panel + 5, 3 * (state.sme_bytes // ELEMENT_BYTES[dtype]) + 1
+  spatial, k = panel + 5, 5 * (state.sme_bytes // ELEMENT_BYTES[dtype]) + 1
   capacity = ((spatial + panel - 1) // panel) * ((k + quantum - 1) // quantum) * panel * quantum
   shape, strides = ((spatial, k), (k, 1)) if side == "A" else ((k, spatial), (1, k))
 
   @T.template
   def kernel(A: T.Tensor(shape, strides, dtype), O: T.Tensor((capacity,), dtype=dtype, access="output")):
-    T.pack(A, O, side=side, format="sme")
+    if matrix_recipe:
+      packed = T.reshape(O, ((spatial + panel - 1) // panel, (k + quantum - 1) // quantum, panel * quantum))
+      _pack_dense(T.load(A), side, packed, dtype, quantum)
+    else:
+      T.pack(A, O, side=side, format="sme")
 
   compiler = make_compiler(target="Native", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   compiled = T.compile(kernel, compiler=compiler)
   data = ((np.arange(spatial * k) % 13) / (4 if dtype.startswith("float") else 1)).astype(dtype).reshape(spatial, k)
+  if dtype == "float64":
+    # Raw 64-bit ZA transposes must not quiet a signaling NaN, flush a tiny
+    # value or change negative zero. Compare storage bits, not float equality.
+    payloads = np.array([0x8000000000000000, 1, 0x0010000000000000,
+                         0x7ff0000000000000, 0x7ff8000000001234, 0x7ff0000000004321], np.uint64)
+    data.view(np.uint64).reshape(-1)[:len(payloads)] = payloads
   output = np.empty(capacity, dtype=dtype)
   compiled.operator.native(data if side == "A" else data.T, output, **compiled._core.specialization_values)
   expected = np.zeros(((spatial + panel - 1) // panel, (k + quantum - 1) // quantum, panel, quantum), dtype=dtype)
   for row in range(spatial):
     for column in range(k):
-      expected[row // panel, column // quantum, row % panel, column % quantum] = data[row, column]
-  np.testing.assert_array_equal(output, expected.reshape(-1))
-  assert "sme_packing_" in compiled.generated_source
+      if dtype == "float64":
+        expected.view(np.uint64)[row // panel, column // quantum, row % panel, column % quantum] = data.view(np.uint64)[row, column]
+      else:
+        expected[row // panel, column // quantum, row % panel, column % quantum] = data[row, column]
+  np.testing.assert_array_equal(output.view(np.uint64) if dtype == "float64" else output,
+                                expected.reshape(-1).view(np.uint64) if dtype == "float64" else expected.reshape(-1))
+  if matrix_recipe:
+    assert "sme::load_hor<" in compiled.generated_source
+
+
+@pytest.mark.parametrize("side", ["A", "B"])
+def test_native_sme_recipe_float64_packing_preserves_storage_bits(side, tmp_path):
+  test_native_sme_dsl_full_word_packing("float64", side, tmp_path, matrix_recipe=True)
 
 
 @pytest.mark.parametrize(

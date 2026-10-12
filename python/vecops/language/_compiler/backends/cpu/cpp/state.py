@@ -80,7 +80,7 @@ class StateEmitter:
     return tuple(
       str(piece.lanes)
       if piece.lanes
-      else f"std::clamp<vecops::nint_t>(({self.scalar(plan.state.type.shape[-1])}) - ({c[-1]}), 0, {self.vector_size(tag)})"
+      else f"vecops_dsl::clamp_value<vecops::nint_t>(({self.scalar(plan.state.type.shape[-1])}) - ({c[-1]}), 0, {self.vector_size(tag)})"
       for piece, tag, c in zip(plan.pieces, self.state_tags(plan, plan.state.type.dtype), self.state_coordinates(plan))
     )
 

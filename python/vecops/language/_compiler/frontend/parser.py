@@ -627,6 +627,12 @@ class Frontend(
         if isinstance(value.type, I.TileType)
         else I.ScalarType(dtype)
       )
+      if value.op == "arange" and value.type.dtype == "int64" and dtype.startswith("uint"):
+        # Unsigned conversion commutes with the sequence's unit increment:
+        # generate modulo-width indices directly instead of building wide
+        # int64 vectors and narrowing them. Do not apply this to float casts
+        # (rounding) or signed sequences (signed overflow semantics).
+        return I.Expr(typ, "arange", value.args, value.data)
       return I.Expr(typ, "cast", (value,))
     if operation == "tile":
       view = args[0]
@@ -776,8 +782,19 @@ class Frontend(
       mask = self.freeze_tile(self.value(kwargs["mask"], node)) if "mask" in kwargs else None
       if mask is not None and not (mask.type.dtype == "bool" or isinstance(mask.type, I.TileType) and mask.type.mask):
         self.error(node, "memory mask must be a predicate")
+      previous = self.promoted.get(destination.storage)
+      same_forwarded_view = previous is None or (
+        I.same_expr(destination.offset, previous[0].offset)
+        and len(destination.shape) == len(previous[0].shape)
+        and all(I.same_expr(a, b) for a, b in zip(destination.shape, previous[0].shape))
+        and all(I.same_expr(a, b) for a, b in zip(destination.strides, previous[0].strides))
+      )
       if (
         destination.owned
+        # Replacing a forwarded whole buffer with a partial view would drop
+        # its still-live padding/other elements. Materialize that old view
+        # before the partial store, even when both views start at offset zero.
+        and same_forwarded_view
         and mask is None
         and not self.control_depth
         and destination.offset.op == "literal"
