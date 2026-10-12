@@ -6,7 +6,6 @@ import re
 
 import numpy as np
 import pytest
-import vecops
 import vecops.language as T
 from dsl_test_utils import make_compiler
 
@@ -159,6 +158,36 @@ def test_value_reshape(compiler, strides):
   np.testing.assert_array_equal(compiled(a), (a * 2 + 1).reshape(7, 3))
   if strides == (7, 1):
     assert "reshape_lane" not in compiled.generated_source
+
+
+def test_native_rank_one_reshape_keeps_conversion_capture_stride_and_count_checks(compiler):
+  import ml_dtypes
+
+  count, stride, output_stride = T.dynamic(lower=0), T.dynamic(), T.dynamic()
+
+  @T.template
+  def kernel(A: T.Tensor((count,), (stride,), "float32", access="inout"),
+             C: T.Tensor((16,), (output_stride,), "float32", access="output")):
+    original = T.load(A, dtype="bfloat16")
+    T.store(A, T.load(A) + 1)
+    word = T.reshape(original[:16], (16,))
+    T.store(C, T.cast(word, "float32"))
+
+  compiled = T.compile(kernel, compiler=compiler)
+  for reverse in (False, True):
+    for alias in (False, True):
+      a = np.linspace(-3.7, 4.1, 33, dtype=np.float32)
+      if reverse:
+        a = a[::-1]
+      expected = a[:16].astype(ml_dtypes.bfloat16).astype(np.float32)
+      output = a[:16] if alias else np.full(16, -91, np.float32)
+      compiled.operator.native(a, output, **compiled._core.specialization_values)
+      np.testing.assert_array_equal(output, expected)
+  output = np.full(16, -91, np.float32)
+  with pytest.raises(RuntimeError, match="reshape changes element count"):
+    compiled.operator.native(np.arange(15, dtype=np.float32), output, **compiled._core.specialization_values)
+  np.testing.assert_array_equal(output, -91)
+  assert "reshape_lane" not in compiled.generated_source
 
 
 def test_indexed_negative_stride_and_bounds(compiler):

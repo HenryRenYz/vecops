@@ -3,14 +3,46 @@
 """Lexical hardware ownership; all throwing preparation precedes entry."""
 
 import json
+from dataclasses import replace
 
 from .... import ir as I
-from ....ir.traversal import nodes, walk_unique
 from ....dtypes import ELEMENT_BYTES
+from ....ir.traversal import nodes, walk_unique
 from .hardware_sme import SMEInstructionEmitter
 
 
 class HardwareEmitter(SMEInstructionEmitter):
+  def immutable_owner_geometry(self, value, seen=(), budget=8):
+    """Rebuild SVL queries/aliases, never caller-dependent scalar work.
+
+    The JIT validates captured SVL before entry; streaming_lanes also keeps
+    its public runtime fallback for standalone source. Reissuing this pure
+    query inside the owner preserves constants across the SME trampoline.
+    Do not extend this to ordinary VL (which changes on streaming entry),
+    tensor reads, arbitrary arithmetic, or multiply assigned locals. A small
+    multiplication/positive literal division tree covers physical word sizes
+    and pitches without expanding general metadata DAGs.
+    """
+    if type(I.constant(value)) is int or value.op == "streaming_lanes":
+      return value
+    if budget <= 0:
+      return None
+    if value.op in {"local", "frozen"} and value.data not in seen:
+      definition = self.hardware_geometry_definitions.get(value.data)
+      if definition is not None:
+        return self.immutable_owner_geometry(definition, (*seen, value.data), budget - 1)
+    if value.type.dtype in {"int32", "int64"} and (
+      value.op == "mul"
+      and any(type(I.constant(v)) is int for v in value.args)
+      or value.op == "floordiv"
+      and type(I.constant(value.args[1])) is int
+      and I.constant(value.args[1]) > 0
+    ):
+      arguments = tuple(self.immutable_owner_geometry(v, seen, budget - 1) for v in value.args)
+      if all(v is not None for v in arguments):
+        return replace(value, args=arguments)
+    return None
+
   def snapshot_hardware_inputs(self, program):
     """Snapshot invariant references inside the architectural callback.
 
@@ -40,6 +72,18 @@ class HardwareEmitter(SMEInstructionEmitter):
         views.append(statement.view)
     for view in views:
       roots.extend((view.offset, *view.shape, *view.strides))
+    operands = [s.view for s in statements if isinstance(s, I.ArchitectureCall)
+                and s.operation == "sme.load" and s.view is not None]
+    borrowed_panels = bool(operands) and all(
+      not view.owned and view.storage in self.storage_views and len(self.storage_views[view.storage].shape) == 1
+      and view.region is not None and len(view.region.root_shape) >= 3
+      for view in operands
+    )
+    # Reconstruct instruction-private geometry. Fully borrowed physical
+    # panels keep the original snapshots: changing their tiny outlined leaf
+    # cost ~5 ns at 16x16x8, with no packing work to amortize that cost.
+    # Pointers still receive local SSA snapshots and poison-padding repair
+    # retains ownership, so the private repaired path remains eligible.
     references = {}
     for root in roots:
       for value in walk_unique(root):
@@ -48,7 +92,8 @@ class HardwareEmitter(SMEInstructionEmitter):
           references.setdefault((value.op, value.data), value)
     for key, value in sorted(references.items()):
       owned = self.unique("hardware_metadata")
-      self.line(f"const auto {owned} = {self.scalar(value)};")
+      geometry = None if borrowed_panels else self.immutable_owner_geometry(value)
+      self.line(f"const auto {owned} = {self.scalar(geometry if geometry is not None else value)};")
       self.hardware_scalar_bindings[key] = owned
     for storage in sorted({view.storage for view in views}):
       owned = self.unique("hardware_pointer")

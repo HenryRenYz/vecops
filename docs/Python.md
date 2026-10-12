@@ -1965,6 +1965,32 @@ values after preflight, so instruction memory clobbers do not reload captured
 descriptors inside K loops. Buffers may resize before ownership; their addresses
 are never cached across region invocations. Default cache panels reuse multiple
 register tiles within an L2 budget; explicit BM/BN/BK values remain exact.
+Single-definition immutable streaming-length aliases and bounded literal
+multiplication/division chains are reconstructed inside
+the owner, preserving the adapter-validated SVL facts across the outlined
+trampoline. Ordinary VL, mutable aliases and runtime tensor metadata are not
+substituted. Static SME recipes also specialize their integer interval proofs
+with captured SVL; Dynamic recipes retain scoped runtime bounds. Private packed
+SME views of instruction-private panels expose each panel's two complete words
+as separate axes, avoiding repeated clipped slices without changing the public
+packing ABI or K repair. BF16 private panels and externally packed inputs keep
+their existing slices: additional reshape/preflight work regressed their tiny
+resident leaves. Fully borrowed physical panels also retain their original
+scalar snapshots, while pointers keep region-local SSA values; poisoned K
+padding still receives private repair. These measured scope limits affect
+lowering alone, not input validation or numerical semantics.
+For statically complete AMX B panels with coordinate-preserving inputs and a known unit
+K or spatial stride, packing reads the original producer into the
+transpose/interleave registers. K-contiguous converting inputs use a single
+physical tile cache, avoiding repeated conversion in each transpose output
+column without retaining a whole NxK dense cache. Fringes and other producers
+retain the padded dense path. A checked rank-one value reshape preserves coordinates
+and uses vector loads rather than lane-wise load/set; its element-count check,
+conversion rounding and historical read captures remain intact.
+Unbounded Dynamic AMX kernels keep the original packing leaf: embedding the
+additional full leaves in one function slowed measured tiny raw cases despite
+medium-case gains. A future extension must separate hot/cold code and pass
+both workloads, rather than adding only a runtime size gate.
 Pure integer metadata min/max and vector-tail clamps evaluate each operand once through an inline
 value helper; floating-point min/max semantics are unchanged. Same-dtype SME
 loads use public masked `load`, whose inactive lanes are zero, and known unit

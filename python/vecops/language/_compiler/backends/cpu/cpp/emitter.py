@@ -67,6 +67,16 @@ class CPUEmitter(
     self.reduction_materialized = {}
     self.hardware_scope = None
     self.hardware_scalar_bindings = {}
+    # Only singly defined, immutable geometry may be reconstructed across
+    # an outlined architectural owner. Runtime metadata stays snapshotted.
+    assignments = {}
+    for statement in nodes(self.ir.body):
+      if isinstance(statement, (I.Assign, I.For)):
+        assignments.setdefault(statement.target, []).append(statement)
+    self.hardware_geometry_definitions = {
+      name: definitions[0].value for name, definitions in assignments.items()
+      if len(definitions) == 1 and isinstance(definitions[0], I.Assign) and definitions[0].declare
+    }
     self.uses_streaming_math_policy = False
     self.buffer_declarations = {}
     self.parallel_depth = 0

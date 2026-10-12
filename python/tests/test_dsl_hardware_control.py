@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Hardware loops retain one owner and preflight all metadata before entry."""
 
+import re
+
 import numpy as np
 import pytest
 import vecops.language as T
@@ -59,6 +61,47 @@ def test_hardware_loop_preflight_source():
   assert "vecops::vec::amx::store<0>" in owner
   assert source.index("hardware view index is outside") < source.index(".with_resources(")
   assert "VECOPS_INLINE_LAMBDA_NOEXCEPT" in owner
+
+
+def test_streaming_geometry_is_reconstructed_but_runtime_extent_stays_captured():
+  count = T.dynamic(lower=1)
+
+  @T.template
+  def kernel(A: T.Tensor((count,), dtype="int32"), C: T.Tensor((count,), dtype="int32", access="output")):
+    width = (2 * T.sme.streaming_lanes("int32")) // 2
+    extent = A.shape[0]
+    with T.sme.region():
+      for i in T.serial(0, extent):
+        value = T.sme.load(A[i:i + width])
+        T.sme.store(value, C[i:i + width])
+
+  source = CPUBackend().lower(kernel.ir, (), target="SME").source
+  owner = source.split("VECOPS_INLINE_LAMBDA_NOEXCEPT", 1)[1].split("#else", 1)[0]
+  assert "vecops_dsl::streaming_lanes<std::int32_t>()" in owner
+  assert "hardware_metadata" in owner
+  assert "throw" not in owner
+  # A runtime shape cannot be substituted by the observed native lane count.
+  assert re.search(r"hardware_metadata_\d+ = (?!vecops_dsl::streaming_lanes)[^;]+;", owner)
+
+
+def test_mutable_streaming_geometry_is_not_reconstructed_from_its_initializer():
+  count = T.dynamic(lower=1)
+
+  @T.template
+  def kernel(A: T.Tensor((count,), dtype="int32"), C: T.Tensor((count,), dtype="int32", access="output"),
+             short: bool):
+    width = T.sme.streaming_lanes("int32")
+    if short:
+      width = 1
+    with T.sme.region():
+      for i in T.serial(0, A.shape[0]):
+        value = T.sme.load(A[i:i + width])
+        T.sme.store(value, C[i:i + width])
+
+  source = CPUBackend().lower(kernel.ir, (), target="SME").source
+  owner = source.split("VECOPS_INLINE_LAMBDA_NOEXCEPT", 1)[1].split("#else", 1)[0]
+  assert "= vecops_dsl::streaming_lanes<std::int32_t>();" not in owner
+  assert re.search(r"hardware_metadata_\d+ = dsl_f_width_\d+;", owner)
 
 
 def test_owned_hardware_view_and_immutable_metadata():

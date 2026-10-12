@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "benchmarks"))
 
 import dsl_matmul_source_catalog as runner
+from dsl_matmul_artifact_ab import adapter_contract, template_contract
 from vecops.language._compiler.frontend.parser import lower
 
 CASES = runner.load_cases(svl_bytes=64)
@@ -22,6 +23,38 @@ SCHEMAS = {}
 for _scenario in EXECUTIONS:
   if _scenario.mode == "Dynamic" or _scenario.case.catalog == "MatmulOrientation":
     SCHEMAS.setdefault(_scenario.compilation_key, _scenario)
+
+
+def test_artifact_contract_distinguishes_const_dynamic_dtype_access_and_relations():
+  scenario = next(s for s in EXECUTIONS if s.mode == "Const" and not s.batched and s.packing == "raw")
+  const, _ = template_contract(runner.source_templates(scenario)[0][1])
+  dynamic, _ = template_contract(runner.source_templates(replace(scenario, mode="Dynamic"))[0][1])
+  assert const != dynamic
+  assert dynamic[1] and not const[1]
+  # These templates accept the same numerical shape, but different shape
+  # contracts must not become interchangeable benchmark references.
+  assert const[0][0][8][0][0] == "VECOPS_DIM_CONST"
+  assert dynamic[0][0][8][0][0] == "VECOPS_DIM_DYNAMIC"
+
+  descriptor = '''
+static constexpr VecopsDimensionConstraint sizes_0[] = {
+  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_DYNAMIC, 0, 1, INT64_MAX, 4},
+};
+static constexpr VecopsDimensionConstraint strides_0[] = {
+  {sizeof(VecopsDimensionConstraint), VECOPS_DIM_CONST, 1, 0, 0, 1},
+};
+static const VecopsParameterDescriptor parameters[] = {
+  {sizeof(VecopsParameterDescriptor), VECOPS_VALUE_TENSOR, "A", {.tensor={sizeof(VecopsTensorParameter), 32ULL, 1, -1, 1, 0, sizeof(VecopsDimensionConstraint), sizes_0, strides_0, VECOPS_TENSOR_READ}}},
+  {sizeof(VecopsParameterDescriptor), VECOPS_VALUE_SCALAR, "repeat", {.scalar={sizeof(VecopsScalarParameter), 128ULL}}},
+};
+if (call->values[1].value.tensor.sizes[0] != call->values[0].value.tensor.sizes[0]) {}
+'''
+  actual = adapter_contract(descriptor)
+  assert actual[0][0] == ('TENSOR', 'A', 32, 1, -1, 1, 0, 1,
+                         (('VECOPS_DIM_DYNAMIC', 0, 1, 2**63-1, 4),), (('VECOPS_DIM_CONST', 1, 0, 0, 1),))
+  for old, new in [('32ULL', '64ULL'), ('VECOPS_TENSOR_READ', 'VECOPS_TENSOR_WRITE'),
+                   ('INT64_MAX, 4', 'INT64_MAX, 1'), ('if (call->values[1]', 'if (call->values[2]')]:
+    assert adapter_contract(descriptor.replace(old, new)) != actual
 
 
 def test_numerical_diagnostic_identifies_reference_failure_before_dsl():

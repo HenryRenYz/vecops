@@ -127,6 +127,45 @@ def test_native_cache_phases_signed_strides_broadcast_and_output_alias(tmp_path)
     np.testing.assert_array_equal(storage[:, 2:2 * n + 1:2], -777)
 
 
+@pytest.mark.skipif(platform.machine() != "x86_64", reason="native AMX target required")
+@pytest.mark.parametrize("converting", [False, True])
+def test_native_amx_full_k_pack_preserves_column_stride_and_output_alias(converting, tmp_path):
+  import ml_dtypes
+
+  native_a, native_b = ("bfloat16", "bfloat16") if converting else ("int8", "uint8")
+  memory_b, accumulator = ("float32", "float32") if converting else ("uint8", "int32")
+  bs, cs0, cs1 = T.dynamic(), T.dynamic(), T.dynamic()
+
+  @T.template
+  def kernel(A: T.Tensor((32, 64), dtype=native_a), B: T.Tensor((64, 32), (1, bs), memory_b),
+             C: T.Tensor((32, 32), (cs0, cs1), accumulator, access="output")):
+    value = T.dot(T.load(A), T.load(B, dtype=native_b), acc_dtype=accumulator, implementation="amx")
+    T.store(C, value)
+
+  compiler = make_compiler(jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(kernel, compiler=compiler)
+  for reversed_columns in (False, True):
+    for alias in (False, True):
+      a = (np.arange(32 * 64).reshape(32, 64) % 7 - 3).astype(ml_dtypes.bfloat16 if converting else np.int8)
+      if converting:
+        b = np.asfortranarray((np.arange(64 * 32).reshape(64, 32) % 13 - 6).astype(np.float32) / 3)
+      else:
+        backing = np.empty(32 * 32 * 4, np.uint8)
+        b = np.ndarray((64, 32), np.uint8, backing, strides=(1, 64))
+        b[:] = (np.arange(64 * 32).reshape(64, 32) % 19 + 230).astype(np.uint8)
+      if reversed_columns:
+        b = b[:, ::-1]
+      compute_b = b.astype(ml_dtypes.bfloat16).astype(np.float32) if converting else b.astype(np.int64)
+      expected = a.astype(np.float32 if converting else np.int64) @ compute_b
+      if alias:
+        output = b.T[:, :32] if converting else np.ndarray((32, 32), np.int32, backing)
+      else:
+        output = np.empty((32, 32), dtype=accumulator)
+      compiled.operator.native(a, b, output, **compiled._core.specialization_values)
+      np.testing.assert_array_equal(output, expected.astype(accumulator))
+  assert "vecops::vec::amx::dot<" in compiled.generated_source
+
+
 def packed_b_template():
   m, n, k, capacity = (T.dynamic(lower=0) for _ in range(4))
 

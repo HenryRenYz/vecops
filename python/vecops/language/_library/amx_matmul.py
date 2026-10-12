@@ -10,7 +10,7 @@ Packing/prologues and output conversion/epilogues remain ordinary DSL.
 from .. import amx
 from .. import dsl as T
 from .matrix_recipe import finish_matrix, seed_accumulator
-from .registers import transpose_dwords_512
+from .registers import pack_interleave, transpose_dwords_512
 
 
 @T.func
@@ -132,11 +132,88 @@ def dot_into(inputs, output, *, acc=None, acc_dtype="float32", epilogue=None, ra
         _repair_b_tail(source, repaired_b, k, kr, group)
         _input_a(a, raw_a, repaired_b, output, acc, acc_dtype, epilogue, mp, np, kp, kr, packed_a)
     else:
-      _input_b(a, b, raw_a, output, acc, acc_dtype, epilogue, mp, np, kp, kr, group, packed_a)
+      _input_b(a, b, raw_a, output, acc, acc_dtype, epilogue, mp, np, kp, kr, group, packed_a, raw_b)
 
 
 @T.func
-def _input_b(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
+def _input_b(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a, raw_b):
+  if raw_b is not None:
+    if b.shape[1] % 16 == 0 and b.shape[0] % kr == 0:
+      if raw_b.strides[0] == 1:
+        if raw_b.dtype == b.dtype:
+          _input_b_full_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
+        else:
+          _input_b_converting_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
+      elif raw_b.strides[1] == 1:
+        _input_b_full(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
+      else:
+        _input_b_padded(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
+    else:
+      _input_b_padded(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
+  else:
+    _input_b_padded(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a)
+
+
+@T.func
+def _input_b_full(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
+  # Read a complete spatial word from each member of a K dword group and
+  # interleave directly into physical B panels. Pure pointwise producers
+  # (including conversions) stay on these loads: no full dense transpose,
+  # reread, or sixteen-register transpose network. Fringes retain the
+  # padded recipe below; producers are never evaluated on padding indices.
+  panels = T.alloc((np // 16, kp // kr, 16, 16 * group), dtype=b.dtype)
+  for ni in T.serial(np // 16, unroll=1):
+    for kg in T.serial(kp // group, unroll=1):
+      columns = ()
+      for member in T.unroll(group):
+        word = T.reshape(b[kg * group + member, ni * 16:ni * 16 + 16], (16,))
+        value = T.as_vector(word, T.Vector(b.dtype, N=16))
+        columns = columns + (value,)
+      T.store(panels[ni, kg // 16, kg % 16, :], pack_interleave(columns)[0])
+  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
+
+
+@T.func
+def _input_b_full_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
+  # K-contiguous B already supplies the sixteen rows required by the
+  # dword transpose. Evaluate the producer directly into those registers.
+  panels = T.alloc((np // 16, kp // kr, 16, 16 * group), dtype=b.dtype)
+  for ni in T.serial(np // 16, unroll=1):
+    for ki in T.serial(kp // kr, unroll=1):
+      rows = ()
+      for row in T.unroll(16):
+        word = T.reshape(b[ki * kr:ki * kr + kr, ni * 16 + row], (kr,))
+        value = T.as_vector(word, T.Vector(b.dtype, N=kr))
+        rows = rows + (T.bitcast(value, "uint32"),)
+      columns = transpose_dwords_512(rows)
+      for column in T.unroll(16):
+        T.store(panels[ni, ki, column, :], T.bitcast(columns[column], b.dtype))
+  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
+
+
+@T.func
+def _input_b_converting_k(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
+  # Convert one physical tile once. Directly placing a converting producer
+  # into each output column's register DAG repeated conversion and spills
+  # (the measured FP32->BF16 case was ~3.6x slower). This bounded tile cache
+  # preserves every rounding boundary and captured read without an NxK cache.
+  dense = T.alloc((16, kr), dtype=b.dtype)
+  panels = T.alloc((np // 16, kp // kr, 16, 16 * group), dtype=b.dtype)
+  for ni in T.serial(np // 16, unroll=1):
+    for ki in T.serial(kp // kr, unroll=1):
+      T.store(dense, T.transpose(b[ki * kr:ki * kr + kr, ni * 16:ni * 16 + 16]))
+      rows = ()
+      for row in T.unroll(16):
+        value = T.as_vector(T.load(dense[row, :]), T.Vector(b.dtype, N=kr))
+        rows = rows + (T.bitcast(value, "uint32"),)
+      columns = transpose_dwords_512(rows)
+      for column in T.unroll(16):
+        T.store(panels[ni, ki, column, :], T.bitcast(columns[column], b.dtype))
+  _input_a(a, raw_a, panels, output, acc, dtype, epilogue, mp, np, kp, kr, packed_a)
+
+
+@T.func
+def _input_b_padded(a, b, raw_a, output, acc, dtype, epilogue, mp, np, kp, kr, group, packed_a):
   # Reinterpret each spatial row's K groups as 16 dwords, then transpose
   # sixteen registers. This is the historical DSL/C++ AMX packing schedule:
   # ordinary rank-three reshape/transpose falls back to costly scalar gathers.

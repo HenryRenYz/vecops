@@ -155,6 +155,13 @@ class PrimitivesEmitter:
         for i, a in enumerate(axes):
           mapped[a] = own[i]
         return transformed(tuple(mapped), axes[own_axis])
+      if kind == "reshape" and len(source.type.shape) == len(value.type.shape) == 1:
+        # A validated rank-one reshape preserves every coordinate. The
+        # frontend's element-count assertion remains before consumption;
+        # changing the extent's spelling does not require lane-wise gather
+        # and set, even when a full word was obtained from a clipped slice.
+        # Keep the original producer/capture and its conversion boundaries.
+        return transformed(own, own_axis)
       # General reshape can cross row boundaries within one physical vector.
       # Lane-wise fallback remains register-only; contiguous reads are folded
       # into a view by a separate pass rather than a hidden emitter optimizer.

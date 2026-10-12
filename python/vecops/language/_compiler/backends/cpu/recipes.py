@@ -381,16 +381,44 @@ def expand_dot_recipes(ir, context):
               if all(isinstance(item, (I.BindTile, I.Assert, I.Assign, I.Allocate)) for item in output):
                 a, b = product.args[:2]
                 raw = lambda v: v.op == "load" and not v.args and v.data.dtype == v.type.dtype and v.data.region is not None
-                if family == "amx" and raw(a):
-                  kwargs["raw_a"] = a.data
+                if family == "amx":
+                  if raw(a):
+                    kwargs["raw_a"] = a.data
+                  # A cast chain preserves source coordinates and capture
+                  # identity. Pass only its layout as a packing proof; the
+                  # recipe still evaluates every conversion on the original
+                  # producer, rather than loading raw_b as native storage.
+                  source_b = b
+                  while source_b.op == "cast":
+                    source_b = source_b.args[0]
+                  full_k, full_n = (I.constant(v) for v in b.type.shape)
+                  # Adding full packing leaves to an unbounded Dynamic
+                  # kernel grew its cold CFG/stack and slowed the measured
+                  # tiny raw cases by 8–31%, despite faster medium inputs.
+                  # Keep the measured static full-panel specialization until
+                  # outlining preserves both workloads; a runtime size gate
+                  # alone does not remove that code-generation overhead.
+                  if (
+                    type(full_k) is int
+                    and type(full_n) is int
+                    and full_n % 16 == 0
+                    and full_k % (64 // ELEMENT_BYTES[a.type.dtype]) == 0
+                    and source_b.op == "load"
+                    and not source_b.args
+                    and source_b.data.region is not None
+                  ):
+                    kwargs["raw_b"] = source_b.data
                 elif family == "sme":
                   if raw(a):
                     kwargs["raw_a"] = a.data
                   if raw(b):
                     kwargs["raw_b"] = b.data
                 for side, operand in (("a", a), ("b", b)):
-                  if (operand.op == "packed_load" and operand.data.format in {family, "auto"}
-                      and (family == "sme" and product.type.dtype != "int64" or family == "amx")):
+                  if (
+                    operand.op == "packed_load"
+                    and operand.data.format in {family, "auto"}
+                    and (family == "sme" and product.type.dtype != "int64" or family == "amx")
+                  ):
                     view = operand.data.view
                     count = I.Expr(I.ScalarType("int64"), "checked_shape", view.shape)
                     name = f"dsl_recipe_dot_{serial}_packed_{side}_capacity"
@@ -458,10 +486,16 @@ def expand_dot_recipes(ir, context):
               body = [I.If(I.Expr(I.ScalarType("bool"), "compile_feature", data=guard), I.Block(body), I.Block(fallback))]
               ir.diagnostics.append(f"staged {family.upper()} matrix instruction recipe from DSL library")
               native_rewritten.add(id(product))
+            captured_svl = vector_state.sme_bytes if family == "sme" else None
             if family != "blocked" and all(
               type(I.constant(v)) is int for v in (*product.type.shape, product.args[0].type.shape[1])
             ):
-              body = simplify_loop_metadata(I.Block(body)).statements
+              # The adapter validates SVL before entering this generated
+              # kernel. Propagate it through immutable recipe geometry before
+              # proving full-panel slices, rather than asking LLVM to recover
+              # captured widths through a noinline streaming trampoline.
+              # Ordinary VL and unknown cross-target SVL remain unrelated.
+              body = simplify_loop_metadata(I.Block(body), streaming_bytes=captured_svl).statements
             output.extend(body)
             rewritten.add(id(product))
             if family in {"streaming", "blocked", "amx", "sme"}:
