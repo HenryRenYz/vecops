@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-from dsl_test_utils import assert_no_vec_mask_arrays
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered
 from vecops._arm_vector_state import VectorState
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
@@ -43,9 +43,9 @@ def test_projection_ab_only_changes_dsl_packing_request(monkeypatch, mode, packi
   variant = runner.online_ab_template(scenario, dsl)
   assert variant.ir.annotations == dsl.ir.annotations
   assert cpp.ir.canonical() == before
-  assert cpp.ir.source == ROOT / "benchmarks/dsl_matmul_source_reference.cpp"
+  assert cpp.ir.source == Path(catalog.__file__).resolve().with_name("dsl_matmul_source_reference.cpp")
   backend = CPUBackend().lower(variant.ir, (), target="SME", options={"_vector_state": VectorState(32, 64)})
-  assert not backend.backend_ir.matmuls
+  assert_source_algorithms_lowered(backend.backend_ir)
   assert "packed-layout recipe" in "\n".join(backend.kernel.diagnostics)
   assert "dsl_recipe_dot_" in backend.source
   assert_no_vec_mask_arrays(backend.source)

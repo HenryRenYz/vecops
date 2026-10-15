@@ -17,7 +17,7 @@ from vecops._arm_vector_state import VectorState, get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
 
-OPTION = "cpu_sve_runtime_quant"
+OPTION = "cpu_runtime_quant_int8"
 MARKER = "/* ordinary-SVE runtime-quantized packed-B dot */"
 
 

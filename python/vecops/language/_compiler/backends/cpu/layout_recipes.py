@@ -72,8 +72,5 @@ def expand_layout_recipes(ir, context):
 
   visit(ir.body)
   if serial:
-    from ...passes.kernel.transforms import fold_value_transforms
-
-    ir = fold_value_transforms(ir, context)
     ir.diagnostics.append(f"staged {serial} register transpose traversal(s) from DSL library")
   return PassResult(ir, changed=bool(serial))

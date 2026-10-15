@@ -12,6 +12,16 @@ from dataclasses import replace
 from .. import ir as I
 
 
+def broadcast_coordinate(extent, coordinate):
+  """Project one broadcast dimension, retaining a dynamic singleton guard."""
+  known = I.constant(extent)
+  if known == 1:
+    return I.literal(0)
+  if known is not None:
+    return coordinate
+  return I.Expr(I.ScalarType("int64"), "where", (I.binary("eq", extent, I.literal(1)), I.literal(0), coordinate))
+
+
 def streaming_selection_supported(value, basis_dtype, *, staged=False):
   """A closed selection/conversion DAG fitting one native compute word.
 
@@ -22,16 +32,42 @@ def streaming_selection_supported(value, basis_dtype, *, staged=False):
   from ..dtypes import ELEMENT_BYTES
   from ..ir.traversal import walk_unique
 
-  allowed = {"vector_ref", "literal", "raw", "symbol", "local", "frozen", "cast", "min", "max", "where",
-             "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "xor", "not", "mask_xor",
-             "bit_and", "bit_or", "bit_xor"}
+  allowed = {
+    "vector_ref",
+    "literal",
+    "raw",
+    "symbol",
+    "local",
+    "frozen",
+    "cast",
+    "min",
+    "max",
+    "where",
+    "eq",
+    "ne",
+    "lt",
+    "le",
+    "gt",
+    "ge",
+    "and",
+    "or",
+    "xor",
+    "not",
+    "mask_xor",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+  }
   if staged:
     allowed.add("region_argument")
   return all(
-    node.op in allowed and (
-      not isinstance(node.type, I.TileType) or node.type.mask
+    node.op in allowed
+    and (
+      not isinstance(node.type, I.TileType)
+      or node.type.mask
       or ELEMENT_BYTES[node.type.dtype] <= ELEMENT_BYTES[basis_dtype]
-    ) for node in walk_unique(value)
+    )
+    for node in walk_unique(value)
   )
 
 
@@ -58,14 +94,27 @@ def pointwise_row_projection(value, boundary, reference, row, column, extent, ca
     if not 1 <= len(shape) <= 2:
       raise TypeError("pointwise row projection requires rank-one/two operands")
     width = I.literal(1) if I.constant(shape[-1]) == 1 else extent
-    typ = (I.VectorType(value.type.dtype, (width,), value.type.mask, reference.type.tag)
-           if isinstance(reference.type, I.VectorType) else I.TileType(value.type.dtype, (width,), value.type.mask))
+    typ = (
+      I.VectorType(value.type.dtype, (width,), value.type.mask, reference.type.tag)
+      if isinstance(reference.type, I.VectorType)
+      else I.TileType(value.type.dtype, (width,), value.type.mask)
+    )
     if catalog.has(value, Trait.MEMORY_READ):
       if value.op != "load":
         raise TypeError("opaque memory projection is unsupported")
       starts = ((I.literal(0) if I.constant(shape[0]) == 1 else row),) if len(shape) == 2 else ()
       starts += (I.literal(0) if I.constant(shape[-1]) == 1 else column,)
       result = I.Expr(typ, "value_transform", (value, *starts), ("slice", (len(shape) - 1,)))
+    elif value.op == "arange":
+      # A matrix epilogue's row projection changes both rank and origin.
+      # Index generators need an explicit coordinate map; retagging a rank-2
+      # column index as rank-1 leaves an invalid axis, and a row index must
+      # become a broadcast scalar rather than an iota over columns.
+      axis = value.data if value.data is not None else len(shape) - 1
+      coordinate = column if axis == len(shape) - 1 else row
+      coordinate = broadcast_coordinate(shape[axis], coordinate)
+      start = I.binary("add", value.args[0], coordinate)
+      result = I.Expr(typ, "arange", (start,), 0) if axis == len(shape) - 1 else I.Expr(typ, "fill", (start,))
     elif catalog.has(value, Trait.ELEMENTWISE):
       result = replace(value, type=typ, args=tuple(visit(a) for a in value.args))
     else:
@@ -115,6 +164,7 @@ def scalar_memory_projection(value, indices, *, blocked=()):
     mapped = (axes, *coordinates)
   elif kind == "broadcast_to":
     mapped = coordinates[len(coordinates) - len(source.type.shape) :]
+    mapped = tuple(broadcast_coordinate(extent, index) for extent, index in zip(source.type.shape, mapped))
   else:
     return None
   return scalar_memory_projection(source, tuple(mapped), blocked=blocked)

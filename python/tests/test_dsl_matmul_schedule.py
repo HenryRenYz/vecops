@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 import vecops.language as T
-from dsl_test_utils import make_compiler
+from dsl_test_utils import assert_source_algorithms_lowered, make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
 
@@ -53,7 +53,7 @@ def _assert_pipeline_schedule(artifact, mode):
   from vecops.language._compiler import ir as I
   from vecops.language._compiler.ir.traversal import nodes
 
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert not any(isinstance(node, I.Expr) and node.op == "dot" for node in nodes(artifact.kernel.body))
   diagnostics = "\n".join(artifact.kernel.diagnostics)
   if mode != "off":
@@ -77,7 +77,7 @@ def test_pipeline_codegen_contract_matches_backend_strategy(target, mode, dtype)
 def test_native_pipeline_semantics(compiler, mode, dtype):
   kernel = _pipeline_template(dtype)
   compiled = T.compile(kernel, compiler=compiler, pass_options={"cpu_matmul_pipeline": mode})
-  assert not compiled.backend_ir.matmuls
+  assert_source_algorithms_lowered(compiled.backend_ir)
   if mode != "off":
     assert "CPU two-stage pipeline" in "\n".join(compiled.kernel_ir.diagnostics)
   rng = torch.Generator().manual_seed(38)

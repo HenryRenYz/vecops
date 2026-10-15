@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import amx_available_for_test, make_compiler
+from dsl_test_utils import amx_available_for_test, assert_source_algorithms_lowered, make_compiler
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.planning import snapshot_strides
@@ -29,7 +29,7 @@ def test_explicit_cache_sizes_are_source_loop_steps_not_native_family_parameters
   artifact = CPUBackend().lower(kernel.ir, (), target=target)
   steps = {I.constant(n.step) for n in nodes(artifact.kernel.body) if isinstance(n, I.For)}
   assert {32, 48, 64} <= steps
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "matmul_blocks(" not in artifact.source
   assert "ops::Matmul" not in artifact.source
 
@@ -189,6 +189,7 @@ def test_partially_static_amx_families_have_no_empty_instruction_tiles(tmp_path)
 @pytest.mark.parametrize("target,implementation", [("AVX512", "amx"), ("SME", "sme")])
 def test_read_alias_preparation_is_independent_of_ir_object_addresses(target, implementation):
   from dataclasses import replace
+
   from vecops.language._compiler.ir.traversal import rewrite_expressions
 
   @T.template

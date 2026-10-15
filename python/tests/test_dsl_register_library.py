@@ -7,7 +7,7 @@ import re
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import make_compiler
+from dsl_test_utils import assert_source_algorithms_lowered, make_compiler
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.registers import register_transpose, x86_dword_transpose
@@ -108,10 +108,11 @@ def test_nonmatrix_kernels_do_not_prepare_matrix_packing_recipes(monkeypatch, re
       T.store(C, value)
 
   prepared = CPUBackend().lower(kernel.ir, (), target="AVX512").backend_ir
-  assert not prepared.matmuls
+  assert_source_algorithms_lowered(prepared)
 
 
-def test_products_stage_source_algorithms_without_native_packing_networks(monkeypatch):
+@pytest.mark.parametrize("size,expected", [(4, "vector_dot_into"), (32, "blocked_dot_into")])
+def test_products_stage_source_algorithms_without_native_packing_networks(monkeypatch, size, expected):
   from vecops.language._compiler.backends.cpu import recipes
 
   calls = []
@@ -125,17 +126,17 @@ def test_products_stage_source_algorithms_without_native_packing_networks(monkey
 
   @T.template
   def kernel(
-    A: T.Tensor((4, 4), dtype="float32"),
-    B: T.Tensor((4, 4), dtype="float32"),
-    C: T.Tensor((4, 4), dtype="float32", access="output"),
-    D: T.Tensor((4, 4), dtype="float32", access="output"),
+    A: T.Tensor((size, size), dtype="float32"),
+    B: T.Tensor((size, size), dtype="float32"),
+    C: T.Tensor((size, size), dtype="float32", access="output"),
+    D: T.Tensor((size, size), dtype="float32", access="output"),
   ):
     T.library.matmul((T.load(A), T.load(B)), C, implementation="vector")
     T.library.matmul((T.load(B), T.load(A)), D, implementation="vector")
 
   prepared = CPUBackend().lower(kernel.ir, (), target="AVX512").backend_ir
-  assert not prepared.matmuls
-  assert calls == ["blocked_dot_into", "blocked_dot_into"]
+  assert_source_algorithms_lowered(prepared)
+  assert calls == [expected, expected]
 
 
 @pytest.mark.parametrize("dtype,count", [("uint8", 4), ("int8", 4), ("float16", 2), ("bfloat16", 2)])
@@ -370,6 +371,7 @@ def test_native_shared_register_duplicate_output_is_stored_twice(tmp_path):
                                            ("borrowed", False)])
 def test_private_register_partition_proof_rejects_ambiguous_views(case, expected):
   from dataclasses import replace
+
   from vecops.language._compiler.backends.cpu.cpp.memory import MemoryEmitter
 
   root = I.View("scratch", "uint32", (I.literal(16), I.literal(16)),

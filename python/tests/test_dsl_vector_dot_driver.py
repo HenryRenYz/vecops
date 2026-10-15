@@ -5,7 +5,7 @@
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered, make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._library.matmul import vector_dot_into
 
@@ -36,7 +36,7 @@ def template(dtype="float32", *, seed=False, affine=False):
 
 def test_streaming_vector_driver_is_ordinary_ir_not_opaque_dot():
   artifact = CPUBackend().lower(template(seed=True, affine=True).ir, (), target="AVX512")
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert artifact.backend_ir.states and all(plan.pieces for plan in artifact.backend_ir.states.values())
   assert "vecops::vec::fmadd" in artifact.source
   assert "clipped SIMD extent" in artifact.source

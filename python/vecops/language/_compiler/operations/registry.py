@@ -52,6 +52,8 @@ class OpDef:
   reduction: str | None = None
   fold: object = None
   version: str = "1"
+  may_trap: bool = True
+  speculatable: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,8 @@ def register_operation(definition):
     raise ValueError("invalid operation effect")
   if definition.traits & Trait.CSE and definition.effects != "none":
     raise ValueError("effectful operations cannot promise unconditional CSE")
+  if definition.speculatable and (definition.may_trap or definition.effects != "none"):
+    raise ValueError("speculatable operations must be effect-free and nontrapping")
   global _snapshot
   with _lock:
     if definition.name in _definitions:
@@ -133,6 +137,8 @@ def snapshot():
         definition.keywords,
         definition.reduction,
         definition.version,
+        definition.may_trap,
+        definition.speculatable,
         getattr(definition.fold, "__qualname__", None),
       )
       for name, definition in sorted(definitions.items())

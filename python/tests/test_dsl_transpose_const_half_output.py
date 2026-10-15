@@ -231,7 +231,9 @@ def test_cross_complete_owner_preserves_public_inline_and_old_typed_input(tmp_pa
   cpp.with_suffix(".log").write_text(process.stdout + process.stderr)
   cpp.with_suffix(".command.json").write_text(json.dumps(command, indent=2) + "\n")
   assert process.returncode == 0, process.stderr[-6000:]
-  dump = subprocess.check_output(["/usr/bin/aarch64-linux-gnu-objdump", "-Cd", str(object_file)], text=True)
+  from dsl_test_utils import arm_objdump_command
+
+  dump = subprocess.check_output(arm_objdump_command(object_file), text=True)
   cpp.with_suffix(".dump").write_text(dump)
   assembly_path = cpp.with_suffix(".s")
   assembly_command = ["-S" if token == "-c" else token for token in command[:-1]] + [str(assembly_path)]
@@ -317,7 +319,9 @@ def test_cross_original_cpp_constant_shape_reference_owner(tmp_path, vl, svl, pi
   cpp.with_suffix(".log").write_text(process.stdout + process.stderr)
   cpp.with_suffix(".command.json").write_text(json.dumps(command, indent=2) + "\n")
   assert process.returncode == 0, process.stderr[-6000:]
-  dump = subprocess.check_output(["/usr/bin/aarch64-linux-gnu-objdump", "-Cd", str(object_file)], text=True)
+  from dsl_test_utils import arm_objdump_command
+
+  dump = subprocess.check_output(arm_objdump_command(object_file), text=True)
   cpp.with_suffix(".dump").write_text(dump)
   assembly_path = cpp.with_suffix(".s")
   assembly_command = ["-S" if token == "-c" else token for token in command[:-1]] + [str(assembly_path)]

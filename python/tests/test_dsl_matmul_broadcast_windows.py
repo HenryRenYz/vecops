@@ -122,7 +122,9 @@ def test_real_cross_dynamic_prior_windows_keep_inline_sme_owners(tmp_path, shape
   assembly = _cross(tmp_path, source, lambda value: _wrapper(value, shape=shape), vl=vl, svl=svl)
   owners = _owners(assembly, vl=vl, svl=svl)
   assert owners
-  _assert_inlined_owners(assembly, len(owners), vl=vl, svl=svl)
+  # The BK cache driver also emits raw narrow-input ZA packing owners.
+  # Validate those roles separately while requiring real matrix owners.
+  _assert_inlined_owners(assembly, len(owners), vl=vl, svl=svl, allow_packing=True)
   assert all(not re.search(r"^\s*(?:str|ldr|stp|ldp)\s+(?:z\d|p\d)", owner, re.MULTILINE) for owner in owners)
 
 

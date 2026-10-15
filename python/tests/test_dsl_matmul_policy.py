@@ -4,6 +4,7 @@
 
 import pytest
 import vecops.language as T
+from dsl_test_utils import assert_source_algorithms_lowered
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.cost import estimate
@@ -49,7 +50,7 @@ def test_reload_cost_across_helper_calls(columns, expensive, materialized):
     T.dot((a, B), C, implementation="vector")
 
   artifact = CPUBackend().lower(kernel.ir, (), target="AVX512")
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   cached = [
     statement
     for statement in nodes(artifact.kernel.body)
@@ -79,7 +80,7 @@ def test_expensive_packed_b_tail_is_materialized_before_cache_traversal():
 
   artifact = plans(kernel)
   assert any(statement.destination.storage.endswith("_1_input_cache") for statement in caches(artifact))
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "packed-layout recipe" in "\n".join(artifact.kernel.diagnostics)
   assert not caches(plans(kernel, "always"))
   assert caches(plans(kernel, "never"))
@@ -137,7 +138,7 @@ def test_layernorm_statistics_not_recomputed_in_dot_operand():
     T.library.matmul((a, B), C, packing="A")
 
   artifact = plans(kernel, "never")
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   cached = caches(artifact)
   assert cached
   assert any(e.op in {"mul", "add", "sub"} for e in walk(cached[0].value))

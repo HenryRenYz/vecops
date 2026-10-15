@@ -18,6 +18,7 @@ from vecops.language._debug.report import DebugInfo
 @pytest.mark.parametrize("state", [VectorState(None, None), VectorState(32, 64)])
 def test_snapshot_is_independent_of_mutable_compiler_policy(monkeypatch, state):
   monkeypatch.setattr("vecops._arm_vector_state.get_vector_state", lambda: state)
+  monkeypatch.setattr("vecops._compiler_compat.scalable_sink_flags", lambda _: ())
   compiler = Compiler(
     target="Native",
     cflags=("-O2",),
@@ -55,6 +56,7 @@ def test_snapshot_is_independent_of_mutable_compiler_policy(monkeypatch, state):
 def test_jit_cache_validator_tracks_source_compiler_policy(monkeypatch, tmp_path, state):
   """The cache guard follows the caller's policy; the built core owns a copy."""
   monkeypatch.setattr("vecops._arm_vector_state.get_vector_state", lambda: state)
+  monkeypatch.setattr("vecops._compiler_compat.scalable_sink_flags", lambda _: ())
   monkeypatch.setattr(driver, "_source_identity", lambda _ir: "source-id")
   monkeypatch.setattr(driver, "_build_definition", lambda *_args, **_kwargs: (object(), {}, ()))
   monkeypatch.setattr(driver, "_CompiledCore", type("FakeCore", (), {"__init__": lambda self, *args: None}))

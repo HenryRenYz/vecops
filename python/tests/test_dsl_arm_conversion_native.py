@@ -117,7 +117,9 @@ def test_small_float_conversion_transpose_tails_and_strides(compiler):
 
   rng = np.random.default_rng(51)
   for source_dtype, destination_dtype, compiled in requests:
-    assert any(isinstance(region, TransposePlan) for region in compiled.vector_ir.regions)
+    assert any(isinstance(region, TransposePlan) for region in compiled.vector_ir.regions) or any(
+      "register transpose traversal" in diagnostic for diagnostic in compiled.kernel_ir.diagnostics
+    )
     assert_no_vec_mask_arrays(compiled.generated_source)
     source_np, destination_np = _np_dtype(source_dtype), _np_dtype(destination_dtype)
     for rows, columns in ((5, 7), (17, 19), (31, 33)):

@@ -4,7 +4,7 @@
 
 import pytest
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.environment import freeze
 
@@ -25,7 +25,7 @@ def test_matmul_codegen_architecture_is_independent_of_cost_overrides(target, co
   environment = freeze(options, target=target)
   assert environment.codegen_target.architecture == {"SME": "arm", "AVX512": "x86", "generic": "generic"}[target]
   artifact = CPUBackend().lower(kernel.ir, (), target=target, options=options)
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "dsl_recipe_dot_" in artifact.source
   assert "vecops::ops::Matmul" not in artifact.source
   assert_no_vec_mask_arrays(artifact.source)
@@ -55,7 +55,7 @@ def test_source_dot_seed_and_epilogue_support_signed_output_layout(dtype, acc_dt
     T.store(C, T.max(value, 0))
 
   artifact = CPUBackend().lower(kernel.ir, (), target="SME")
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "dsl_recipe_dot_" in artifact.source
   assert "vecops::vec::max(" in artifact.source
   assert_no_vec_mask_arrays(artifact.source)
@@ -79,5 +79,5 @@ def test_sme_packed_tail_is_checked_and_uses_named_registers(dtype, acc_dtype, k
   artifact = CPUBackend().lower(kernel.ir, (), target="SME")
   assert "packed input buffer too small" in artifact.source
   assert "pack_offset" in artifact.source
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert_no_vec_mask_arrays(artifact.source)

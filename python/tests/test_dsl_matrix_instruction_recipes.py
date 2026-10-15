@@ -7,7 +7,7 @@ import platform
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import make_compiler
+from dsl_test_utils import assert_source_algorithms_lowered, make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
 BYTE_PAIRS = [(a, b, "int32") for a in ("int8", "uint8") for b in ("int8", "uint8")]
@@ -41,7 +41,7 @@ def matrix_template(a_dtype, b_dtype, acc_dtype, *, implementation="auto", fusio
 def test_sme_families_are_source_instruction_programs_with_fusion(family):
   artifact = CPUBackend().lower(matrix_template(*family, implementation="sme").ir, (), target="SME")
   assert artifact.backend_ir.hardware
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "vecops::vec::sme::mopa<0" in artifact.source
   assert "vecops::vec::sme::load_hor<0>" in artifact.source
   assert "staged SME matrix instruction recipe" in "\n".join(artifact.kernel.diagnostics)
@@ -51,7 +51,7 @@ def test_sme_families_are_source_instruction_programs_with_fusion(family):
 def test_amx_families_are_source_instruction_programs_with_fusion(family):
   artifact = CPUBackend().lower(matrix_template(*family, implementation="amx").ir, (), target="AVX512")
   assert artifact.backend_ir.hardware
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "vecops::vec::amx::dot<" in artifact.source
   assert "vecops::vec::amx::load<0>" in artifact.source
   assert "staged AMX matrix instruction recipe" in "\n".join(artifact.kernel.diagnostics)
@@ -104,7 +104,7 @@ def blocked_template(implementation="auto"):
 def test_cache_phases_stage_instruction_leaves_and_final_epilogue(target, implementation):
   artifact = CPUBackend().lower(blocked_template(implementation).ir, (), target=target)
   assert artifact.backend_ir.hardware
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert f"vecops::vec::{implementation}::" in artifact.source
 
 

@@ -66,6 +66,8 @@ def main():
   parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
   parser.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-state")
   parser.add_argument("--output", type=Path)
+  parser.add_argument("--prepare-only", action="store_true", help="Build and validate without timing")
+  parser.add_argument("--cache-only", action="store_true", help="Require retained native artifacts")
   args = parser.parse_args()
   if min(args.width + [args.count, args.repeat, args.rounds]) <= 0:
     parser.error("shapes and repetition counts must be positive")
@@ -80,6 +82,7 @@ def main():
     jobs=6,
     cache_dir=args.build_dir / "cache",
     build_dir=args.build_dir / "build",
+    cache_mode="cache-only" if args.cache_only else "read-write",
   )
   results = []
   try:
@@ -92,8 +95,14 @@ def main():
       for _ in range(args.count):
         expected = expected + 1 + expected * np.float32(0.25)
       for kernel in variants:
-        kernel(a, c, args.count, 1)
+        # External C++ references specialize Parallelism. Prepare the same
+        # serial budget used after timing affinity is narrowed to one CPU.
+        with vecops.cpu_thread_limit(1):
+          kernel(a, c, args.count, 1)
         np.testing.assert_allclose(c, expected, rtol=3e-6, atol=3e-6)
+      if args.prepare_only:
+        results.append({"width": width, "count": args.count, "validated": True, "timed": False})
+        continue
       os.sched_setaffinity(0, {args.cpu})
       calls = tuple(
         lambda k=k, a=a, c=c: k.operator.native(a, c, args.count, args.repeat, **k._core.specialization_values)

@@ -36,10 +36,26 @@ def _unconditionally_evaluated_reductions(expression, catalog):
 
 @register_pass("plan-computation-reuse", after=("expression-cse",))
 def plan_computation_reuse(ir, context):
+  # Every invocation owns a fresh plan. Rewrites/unrolling can replace value
+  # identities; a pipeline can repeat this planner without a separate refresh
+  # shim or retaining stale materialization boundaries.
+  ir.materializations.clear()
   environment = context.environment
   catalog, costs = environment.operations, environment.costs
 
   def visit(block):
+    # Reverse ownership traversal computes the last lexical use of the shared
+    # expression DAG once. Re-scanning the whole suffix at every binding was
+    # quadratic for long generated recipe blocks.
+    last_use = {}
+    for index in reversed(range(len(block.statements))):
+      pending = list(values(I.Block([block.statements[index]])))
+      while pending:
+        value = pending.pop()
+        if id(value) in last_use:
+          continue
+        last_use[id(value)] = index
+        pending.extend(value.args)
     for index, statement in enumerate(block.statements):
       bindings = (
         statement.assignments
@@ -49,11 +65,10 @@ def plan_computation_reuse(ir, context):
         else ()
       )
       for binding in bindings:
-        future = {id(e) for value in values(I.Block(block.statements[index + 1 :])) for e in walk_unique(value)}
         for reduction in _unconditionally_evaluated_reductions(binding.value, catalog):
           source = reduction.args[0]
           if (
-            id(source) not in future
+            last_use.get(id(source), -1) <= index
             or any(catalog.has(e, Trait.STATE_REFERENCE) for e in walk_unique(source))
             or source.type.dtype not in {"float32", "float64"}
             or estimate(source, costs, boundaries=ir.materializations).compute_cycles

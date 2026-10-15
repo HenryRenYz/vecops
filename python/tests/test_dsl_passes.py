@@ -3,7 +3,6 @@
 """Pass registration, explicit Vector IR, unroll grouping and fusion contracts."""
 import numpy as np
 import pytest
-import vecops
 import vecops.language as T
 from dsl_test_utils import make_compiler
 from vecops.language._compiler import ir as I
@@ -70,6 +69,7 @@ def test_registered_builtin_stages_and_operation_major_vector_ir():
     "legalize-vector-types",
     "cpu-legalize-math",
     "cpu-plan-native-word-tails",
+    "verify-vector",
   ]
   assert all(isinstance(op.type, I.VectorType) for op in region.operations)
 

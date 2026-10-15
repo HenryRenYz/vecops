@@ -9,9 +9,11 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import amx_tile_available_for_test, make_compiler
+from dsl_test_utils import amx_tile_available_for_test, assert_source_algorithms_lowered, make_compiler
+from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.transpose import TransposePlan
+from vecops.language._compiler.ir.traversal import nodes
 
 
 @pytest.fixture(scope="module")
@@ -61,8 +63,17 @@ def test_dtype_shapes_and_layouts(compiler, ad, cd, compute):
         c = c[::-1]
       k.operator.native(x, c, **k._core.specialization_values)
       np.testing.assert_array_equal(c, x.astype(dtype(compute)).astype(dtype(cd)).T)
-  assert "register transpose traversal" in "\n".join(k.kernel_ir.diagnostics)
-  assert "local_interleave" in k.generated_source
+  assert_source_algorithms_lowered(k.backend_ir)
+  # The source butterfly and a CPU ZA/register schedule are alternative
+  # legalizations. Inspect the emitted schedule, rather than a diagnostic
+  # string that only the source butterfly expansion produces.
+  source_permutation = any(
+    isinstance(value, I.Expr) and value.op in {"interleave", "local_interleave_lower", "local_interleave_upper"}
+    for value in nodes(k.kernel_ir.body)
+  )
+  emitted_plans = [region for region in k.vector_ir.regions if isinstance(region, TransposePlan)]
+  assert source_permutation or emitted_plans
+  assert all(plan.variants or plan.sme_program is not None for plan in emitted_plans)
   assert "vecops::ops::" not in k.generated_source
   assert not re.search(r"std::(?:array|vector)\s*<\s*vecops::vec::(?:Vec|Mask)", k.generated_source)
 

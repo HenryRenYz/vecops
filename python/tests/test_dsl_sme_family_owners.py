@@ -121,15 +121,49 @@ def _owners(assembly, *, vl, svl):
   return list(assert_sme_owners(assembly, count, equal_domains=vl == svl).values())
 
 
-def _assert_inlined_owners(assembly, count, *, vl, svl):
+def _assert_inline_owner(body, index):
+  calls = re.findall(r"^\s*(?:bl|blr)\b[^\n]*", body, re.MULTILINE)
+  assert not calls, f"owner {index} still contains non-inlined calls: {calls[:12]}"
+  spills = re.findall(r"^\s*(?:str|ldr|stp|ldp)\s+(?:z\d|p\d)[^\n]*\[sp[^\n]*", body, re.MULTILINE)
+  assert not spills, f"owner {index} spills scalable vector state: {spills[:12]}"
+
+
+def _assert_packing_owner(body, index):
+  """Recognize a ZA horizontal-load/vertical-transfer packing program.
+
+  Storage-width ZA views alias the same physical rows: byte/halfword loads
+  followed by word reads do not require a particular numbered word tile.
+  Owner state boundaries are checked by assert_sme_owners before this helper.
+  """
+  _assert_inline_owner(body, index)
+  assert not re.search(r"^\s*\w*mopa\b", body, re.MULTILINE), f"packing owner {index} contains matrix compute"
+  assert re.search(r"^\s*ld1[bhwd]\s+.*\bza\d+h\.", body, re.MULTILINE), (
+    f"packing owner {index} lost its horizontal ZA input"
+  )
+  assert re.search(r"^\s*(?:mov|mova|st1[bhwd])\s+.*\bza\d+v\.", body, re.MULTILINE), (
+    f"packing owner {index} lost its vertical ZA output"
+  )
+
+
+def _assert_inlined_owners(assembly, count, *, vl, svl, allow_packing=False):
+  """Check the complete family, retaining a nonempty matrix compute subset.
+
+  Only callers whose source algorithm includes packing opt into packing-only
+  owners; all other family tests continue to require MOPA in every owner.
+  """
   owners = assert_sme_owners(assembly, count, equal_domains=vl == svl)
+  matrix_owners = []
   for index, owner in enumerate(owners.values()):
+    _assert_inline_owner(owner, index)
+    if allow_packing and not re.search(r"^\s*\w*mopa\b", owner, re.MULTILINE):
+      _assert_packing_owner(owner, index)
+      continue
     assert re.search(r"^\s*\w*mopa\b", owner, re.MULTILINE), f"owner {index} lost its matrix instructions"
+    matrix_owners.append(owner)
     assert len(re.findall(r"^\s*smstart\b", owner, re.MULTILINE)) == 1
     assert re.search(r"^\s*smstop\b", owner, re.MULTILINE)
-    calls = re.findall(r"^\s*(?:bl|blr)\b[^\n]*", owner, re.MULTILINE)
-    assert not calls, f"owner {index} still contains non-inlined calls: {calls[:12]}"
     assert re.search(r"\bza[0-9][hv]\.", owner), f"owner {index} lost accumulator input/output"
+  assert matrix_owners, "the emitted family lost all matrix compute owners"
 
 
 def _matrix(shape, dtype, *, reversed_axes=False):

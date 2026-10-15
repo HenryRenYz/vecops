@@ -7,11 +7,12 @@ from dataclasses import replace
 from ... import ir as I
 from ...ir.traversal import nodes, rewrite_expressions
 from ...operations import Trait
-from ..manager import register_pass
+from ..manager import PassResult, register_pass
 
 
 @register_pass("fold-value-transforms", after=("decompose-row-maps",), before=("canonicalize-memory",))
 def fold_value_transforms(ir, context):
+  changed = False
   # A later window of a previously bound value must still select that value's
   # historical snapshot. Its view may depend on indices defined only later,
   # so moving the projected load into the old binding is not generally legal.
@@ -61,7 +62,10 @@ def fold_value_transforms(ir, context):
         return I.Expr(typ, "load", data=replace(view, shape=shape, strides=tuple(strides), region=None))
     if value.op == "fill":
       return replace(value, type=typ)
-    if context.environment.operations.has(value, Trait.ELEMENTWISE) and all(
+    # Index generators depend on the coordinate system, not just their scalar
+    # operands. Retain the transform so its coordinate map updates the index
+    # axis/start; simply retagging arange corrupts slices/transposes/reshapes.
+    if value.op != "arange" and context.environment.operations.has(value, Trait.ELEMENTWISE) and all(
       isinstance(a.type, I.ScalarType)
       or len(a.type.shape) == len(value.type.shape)
       and all(I.same_expr(x, y) for x, y in zip(a.type.shape, value.type.shape))
@@ -71,8 +75,19 @@ def fold_value_transforms(ir, context):
     return I.Expr(typ, "value_transform", (value, *starts), (kind, axes))
 
   def rewrite(value):
+    nonlocal changed
     if value.op == "value_transform" and value.data[0] in {"reshape", "transpose", "slice", "expand_dims", "squeeze"}:
-      return transform(value.args[0], *value.data, value.type.shape, value.args[1:])
+      result = transform(value.args[0], *value.data, value.type.shape, value.args[1:])
+      if (
+        result.op == value.op
+        and result.data == value.data
+        and result.type == value.type
+        and len(result.args) == len(value.args)
+        and all(a is b for a, b in zip(result.args, value.args))
+      ):
+        return value
+      changed = True
+      return result
     return value
 
-  return rewrite_expressions(ir, rewrite)
+  return PassResult(rewrite_expressions(ir, rewrite), changed=changed)

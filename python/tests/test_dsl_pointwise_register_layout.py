@@ -14,7 +14,12 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import (
+  arm_cross_cxx_include_flags,
+  assert_no_vec_mask_arrays,
+  assert_source_algorithms_lowered,
+  make_compiler,
+)
 from test_dsl_store_snapshot_regions import scope
 from vecops._arm_vector_state import VectorState
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
@@ -45,11 +50,11 @@ def test_hardware_matmul_plans_are_not_pointwise_regions_when_reprepared(target,
   else:
     options["cpu_pointwise_register_layout_policy"] = policy
   artifact = CPUBackend().lower(kernel.ir, (), target=target, options=options)
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   # Matrix recipes now produce ordinary states/loops. Re-preparation must
   # retain those and never invent an opaque matrix or pointwise instruction.
   repeated = prepare(artifact.lowered)
-  assert not repeated.matmuls
+  assert_source_algorithms_lowered(repeated)
   assert set(repeated.states) == set(artifact.backend_ir.states)
 
 

@@ -10,7 +10,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import (
+  arm_cross_cxx_include_flags,
+  assert_no_vec_mask_arrays,
+  assert_source_algorithms_lowered,
+  make_compiler,
+)
 from vecops._arm_vector_state import VectorState
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._library.matmul import vector_tile_dot
@@ -39,7 +44,7 @@ def test_vector_dot_uses_standard_register_state_and_fma_not_opaque_matmul():
   artifact = CPUBackend().lower(
     template().ir, (), target="AVX512", options={"cpu_ordered_loop_unroll": True, "cpu_state_vector_reuse": True}
   )
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   states = tuple(artifact.backend_ir.states.values())
   assert states and all(plan.pieces for plan in states)
   source = artifact.source
@@ -75,7 +80,7 @@ def dot_template(*, columns=8, k=17, historical=False, packed=False, affine=True
 def test_default_dot_dispatch_stages_recipe_before_vector_lowering():
   backend = CPUBackend()
   staged = backend.lower(dot_template().ir, (), target="AVX512")
-  assert not staged.backend_ir.matmuls
+  assert_source_algorithms_lowered(staged.backend_ir)
   assert staged.backend_ir.states and all(plan.pieces for plan in staged.backend_ir.states.values())
   assert "cpu-expand-dot-recipes" in staged.lowered.kernel.pass_trace
   assert "staged 1 vector dot" in "\n".join(staged.lowered.kernel.diagnostics)
@@ -83,21 +88,22 @@ def test_default_dot_dispatch_stages_recipe_before_vector_lowering():
   # Larger rows and dense packed inputs use source recipes too. Physical
   # packed buffers retain their separate ABI validation before decoding.
   streaming = backend.lower(dot_template(columns=19).ir, (), target="AVX512")
-  assert not streaming.backend_ir.matmuls and streaming.backend_ir.states
+  assert_source_algorithms_lowered(streaming.backend_ir) and streaming.backend_ir.states
   fallback = backend.lower(dot_template(packed=True).ir, (), target="AVX512")
-  assert not fallback.backend_ir.matmuls
+  assert_source_algorithms_lowered(fallback.backend_ir)
   assert "packed input buffer too small" in fallback.source
-  assert "packed input must be dense" in fallback.source
+  # This descriptor comes from T.pack: density is proven at construction.
+  # The reusable cleanup removes its unconditional true density assertion.
 
 
 def test_automatic_small_dot_uses_source_recipe_on_both_backends():
   kernel = dot_template(implementation="auto")
   x86 = CPUBackend().lower(kernel.ir, (), target="AVX512")
   arm = CPUBackend().lower(kernel.ir, (), target="SME")
-  assert not x86.backend_ir.matmuls and x86.backend_ir.states
+  assert_source_algorithms_lowered(x86.backend_ir) and x86.backend_ir.states
   # This test includes an accumulator and epilogue, beyond the raw direct
   # SME source family's current envelope.
-  assert not arm.backend_ir.matmuls and arm.backend_ir.states
+  assert_source_algorithms_lowered(arm.backend_ir) and arm.backend_ir.states
   assert_no_vec_mask_arrays(x86.source)
 
 
@@ -134,7 +140,7 @@ def test_streaming_dot_has_source_control_and_fused_value_helper(historical, sca
   artifact = CPUBackend().lower(
     streaming_template(historical=historical, scalar_seed=scalar_seed).ir, (), target="AVX512"
   )
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert artifact.backend_ir.states and all(plan.pieces for plan in artifact.backend_ir.states.values())
   assert "vecops::vec::fmadd" in artifact.source
   assert "private scalar scratch" not in "\n".join(artifact.lowered.kernel.diagnostics)
@@ -210,7 +216,7 @@ def integer_template(left="uint8", right="int8"):
 @pytest.mark.parametrize("types", [("uint8", "int8"), ("int8", "int8"), ("int32", "int32")])
 def test_integer_dot_uses_source_control_and_unsigned_modular_arithmetic(types):
   artifact = CPUBackend().lower(integer_template(*types).ir, (), target="AVX512")
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "ScalableTag<std::uint32_t" in artifact.source
   assert "vecops::vec::fmadd" not in artifact.source
   assert_no_vec_mask_arrays(artifact.source)

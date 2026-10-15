@@ -66,7 +66,7 @@ mm_cmd=("$mm_python" "$mm_snapshot/benchmarks/dsl_matmul_full_suite.py"
 "${mm_cmd[@]}" --phase report
 ```
 
-ARM在`ssh 920f-4`后先`source ~/.bashrc`和`conda activate af3`，项目为`/home/ryz/vecops-neo`。使用arm清单、`--architecture arm --feature sme_f64 --cpu 181`；显式编译器为`/home/ryz/BiShengCompiler-5.1.0.2-aarch64-linux/bin/clang`与项目内`build-math-unify/clangxx-gcc15`。构建核心需根据共享主机当前负载选择；不能照搬x86核心集合。正式计时保持静默、同主机、同CPU、同轮数，所有本任务构建/guard退出后执行。
+ARM在`ssh 920f-4`后先`source ~/.bashrc`和`conda activate af3`，项目为`/home/ryz/vecops-neo`。使用arm清单、`--architecture arm --cpu 181`；省略`--feature`会选择清单所需的`HAS_SME`与`HAS_SME_F64F64`，也可以明确传入这两个宏名。`sme_f64`不是注册器识别的宏名，会遗漏FP64配置。显式编译器为`/home/ryz/BiShengCompiler-5.1.0.2-aarch64-linux/bin/clang`与项目内`build-math-unify/clangxx-gcc15`。构建核心需根据共享主机当前负载选择；不能照搬x86核心集合。正式计时保持静默、同主机、同CPU、同轮数，所有本任务构建/guard退出后执行。
 
 ## 补充目录执行
 
@@ -99,6 +99,61 @@ python benchmarks/dsl_matmul_regression_compare.py \
 
 比较器拒绝缺失、重复、未通过、架构/metadata变化、非有限耗时及准入证据无效的结果，输出绑定输入SHA。每项同时报告DSL新/旧、C++新/旧、相对DSL/C++变化和绝对ns；总体geo/median不覆盖逐项回退。默认单实现耗时增长同时**超过10%且超过50ns**即要求review，C++单独回退也会被列出。编译器细调可用`--relative 0.05 --absolute-ns 0`，对很小的耗时变化保持敏感，但须处理测量噪声。
 
+主机频率或运行环境变化后，不要把历史耗时直接当作当前基线。
+`dsl_matmul_paired_regression.py`可以复用两份已构建suite中的保留二进制，
+在当前环境重新交替测量baseline、candidate与C++，同时保留独立数值与packing
+ABI检查。它验证精确配置、源码清单、build证据和二进制SHA，不修改旧suite，
+不读取旧耗时作为比较值；输出还记录可读的CPU频率信息。所有构建及验证worker
+结束后执行，例如：
+
+```bash
+python benchmarks/dsl_matmul_paired_regression.py \
+  --root "$mm_snapshot" --baseline-suite build-matmul-opt-20261015/x86-packed-checked \
+  --candidate-suite "$mm_run" --selection "$mm_sets/main.json" \
+  --architecture x86 --cpu 54 --rounds 12 --output build-my-change/paired-current-frequency
+```
+
+疑似回退在新的输出目录独立复测；不能通过复用旧结果或覆写原结果消除回退。
+
+如果仅前端继续修正，而希望复用先前候选的本机编译产物，必须先对全部选中编译组
+使用`dsl_matmul_source_equivalence.py --phase emit`分别重新生成两版程序，再以
+`--phase compare --baseline <old-emission> --candidate <new-emission>
+--native-suite <old-suite> --output <proof.json>`核对。证明绑定完整C++源码、ABI、
+捕获参数、有效编译选项、SDK、原生扩展与工具链，并逐项检查实际构建归档内的源码、
+adapter和specialization；任一程序输入变化，都必须重新编译该组。只有全部一致，
+才可给paired工具传入`--source-equivalence <proof.json>`，把旧二进制作为最终前端
+输出的精确C++回放。报告应保留两个快照身份，不能把回放称作最终快照的新编译。
+
+补充目录可用`dsl_matmul_supplemental_paired.py`在独立输出目录重测：提供
+`--root`、两份`--baseline-suite/--candidate-suite`、原始构建快照
+`--baseline-root/--candidate-root`、精确`--selection`、
+`--architecture`、
+`--cpu`和`--rounds 12`。它成对校验并交错测量四个实现（旧/新DSL与旧/新C++），
+重新执行完整SDK/工具链pre/post guard，guard记录写入新输出目录，保留原生构建
+checkpoint不变。完整guard在各自原始快照的独立进程中执行，恢复checkpoint中
+记录的外部编译环境。如果`--root`就是`--candidate-root`，直接验证该原始前端；
+否则必须提供最终前端与候选原生源码的`--source-equivalence`证明，不能替换旧guard的
+Python实现身份。packing采用双poison逐字节oracle，lifecycle保留原数值oracle。
+它的结果格式独立于原来的supplemental timing chain，不能直接冒充旧格式交给summary。
+
+已有`dsl_state.py`、`dsl_iteration.py`、`dsl_grid.py`、`dsl_attention_catalog.py`
+也提供`--prepare-only`（构建并验证，不计时）与`--cache-only`（缺失原生产物即失败）。
+两阶段使用相同驱动、参数、构建目录和环境；grid目前只在单进程驱动支持此模式。
+
+通用优化使用固定的`dsl_compiler_optimizations.py`：5 类程序分别覆盖循环不变量、
+不变分支、scratch 生命周期、融合压力和私有死写，宽度为17/257/4096。
+`--phase build`记录源码、构建成本并验证数值；`--phase time`只允许已有缓存。
+两版使用同一驱动、参数及各自独立的`--work-dir`，静默后按旧/新/新/旧顺序测量。
+
+`dsl_scratch_lifetimes.py`另外覆盖晚期存储规划：两个顶层循环使用互不重叠的
+私有buffer，宽度17/257/4096、行数1/32共6项。原有优化benchmark的重复循环
+会使保守顶层区间重叠，不能据此验证slot复用；这个补充程序将重复放在计时驱动中。
+同样先`--phase build`再`--phase time`，必需参数为`--work-dir`、`--output`、
+`--cpu`、`--cc`、`--cxx`，默认11轮。准备阶段检查负stride输入和两个输出，
+并记录instrumented scratch峰值与物理slot数；计时阶段重新核对全部身份和数值。
+峰值指DSL scratch，不是进程RSS；耗时包含Python循环和原生ABI调用开销，
+不能与仅测内核循环的benchmark直接比较。以上均为固定评测，不搜索编译参数。
+
 有疑似回退时，在独立run目录、相同负载条件下复测，使用`--confirmation <independent-run>`；重复超阈值才标`repeated_regression`。退出码0为本集合未触发阈值，1为疑似回退需要review，2为证据或配置错误。0不表示所有未选shape无回退；12轮也不自动提供统计独立性或环境无漂移保证。C++漂移须单独观察，不能仅用相对比值除掉DSL真实变慢。
 
 ## 编译器正确性与编译成本
@@ -107,7 +162,10 @@ python benchmarks/dsl_matmul_regression_compare.py \
 
 编译器变化还应分别记录lowering时间、native编译时间、生成源码/DSO体积、峰值内存和运行性能。冷构建与缓存命中分开，不能用仅执行旧产物的性能测试证明新编译器生成速度。ARM超大TU代表项已纳入extended；完整旧/新输入与编译预算需保存。
 
-## 本次工具验证
+## 清单工具初次验证
+
+本节记录建立清单工具时的验证，不作为后续编译器改动的性能证据；频率或编译策略
+变化后，仍需按前述方式重新成对测量新旧版本。
 
 相关单元测试61项通过；实际x86主目录和补充目录的plan-only筛选通过，包括相对选择路径；两平台主结果和两平台补充packing的严格self-compare通过，ARM补充比较在920f-4读取原始证据。x86历史结果已按四档共同通过项回放。所有选中配置均来自本轮完整正式测量，没有额外重复构建四档，也没有测得各档端到端耗时。
 

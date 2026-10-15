@@ -55,16 +55,19 @@ def test_quant_auto_native_pair_capture_does_not_require_arm_or_compile(level, b
   # Exercise the very same capture entry as the ARM fixture, without its
   # hardware skip or any native compilation/execution. Storage-free metadata
   # cannot be executed. SME source lowering itself needs neither ARM hardware
-  # nor an ARM compiler; the off/on sources must remain distinct here too.
+  # nor an ARM compiler. Explicit library packing/BK choices must retain the
+  # generic schedule; identical outputs may share one compiled artifact.
   compiler = make_compiler(target="SME", cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   template = _template(level=level, bk=bk, output="int32", pipeline="relu")
   kernels = {
     enabled: T.compile(template, compiler=compiler, pass_options={OPTION: enabled}) for enabled in (False, True)
   }
   requests = _collect_auto_native_pair(kernels, 32)
-  assert len(requests) == 2
-  for kernel, request in zip(kernels.values(), requests, strict=True):
-    assert request.operator is kernel.operator.native
+  assert len(requests) == (2 if level == "dot" else 1)
+  for request in requests:
+    matching = [kernel for kernel in kernels.values() if request.operator is kernel.operator.native]
+    assert matching
+    kernel = matching[0]
     vecops._C.bind_kernel_call(kernel.operator.kernel_def._native(), request.call)
   assert not compiler.build_events
   assert not compiler.build_dir.exists()
@@ -153,7 +156,7 @@ def test_quant_arm_native_auto_fallback_and_accepted_split_k(level, bk, tmp_path
     enabled: T.compile(template, compiler=compiler, pass_options={OPTION: enabled}) for enabled in (False, True)
   }
   requests = _collect_auto_native_pair(kernels, panel)
-  assert len(requests) == 2
+  assert len(requests) == (2 if level == "dot" else 1)
   vecops.compile_batch(requests, parallelism=compiler.jobs, execution_parallelism=1)
   for shape in AUTO_NATIVE_SHAPES:
     for layout, reverse_a in (("row", False), ("negative", True)):

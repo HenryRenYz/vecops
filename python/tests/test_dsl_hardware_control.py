@@ -378,6 +378,7 @@ def test_sme_full_word_packing_is_source_parsed_and_operation_ordered():
 def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
   from vecops.language._compiler.backends.cpu.cpp.emitter import generate
   from vecops.language._compiler.frontend import helpers
+  from vecops.language._compiler.ir.traversal import nodes
 
   capacity = T.dynamic(lower=0)
 
@@ -387,7 +388,11 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
 
   artifact = CPUBackend().lower(kernel.ir, (), target="SME")
   assert "staged 1 packed-layout recipe" in "\n".join(artifact.kernel.diagnostics)
-  assert not artifact.backend_ir.hardware
+  # Native source recipes may own hardware regions. Every such region is
+  # planned before printing; the emitter must not stage another algorithm.
+  assert set(artifact.backend_ir.hardware) == {
+    id(value) for value in nodes(artifact.kernel.body) if isinstance(value, I.HardwareRegion)
+  }
 
   def forbidden(*args, **kwargs):
     raise AssertionError("packing algorithms must be staged before terminal printing")
@@ -395,7 +400,7 @@ def test_sme_packing_stages_executable_library_before_emission(monkeypatch):
   monkeypatch.setattr(helpers, "expand_helper", forbidden)
   source, _ = generate(artifact.backend_ir)
   assert "dsl_pack_" in source
-  assert "pack_offset<" in source
+  assert "vecops::vec::" in source
   assert "std::array<vecops::vec::" not in source
 
 

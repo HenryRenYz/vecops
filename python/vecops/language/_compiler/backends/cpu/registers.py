@@ -122,9 +122,9 @@ def plan_register_programs(prepared, context):
         supported = True
         for expression in operations:
           for domain in context.environment.implementations.get(expression.op).half_domains:
-            value = expression if domain == -1 else expression.args[domain]
-            descriptor = tags[id(value)]
-            if descriptor.N is None and (16 // ELEMENT_BYTES[value.type.dtype]) >> max(0, 1 - descriptor.pow) == 0:
+            domain_value = expression if domain == -1 else expression.args[domain]
+            descriptor = tags[id(domain_value)]
+            if descriptor.N is None and (16 // ELEMENT_BYTES[domain_value.type.dtype]) >> max(0, 1 - descriptor.pow) == 0:
               supported = False
         if not supported:
           # Actual VL may fit the result while C++ Half<Tag> is unrepresentable

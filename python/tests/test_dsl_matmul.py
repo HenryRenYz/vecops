@@ -9,8 +9,10 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import amx_available_for_test, make_compiler
+from dsl_test_utils import amx_available_for_test, assert_source_algorithms_lowered, make_compiler
+from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
+from vecops.language._compiler.ir.traversal import nodes
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +80,15 @@ def test_reduction_layout_uses_automatic_transpose(compiler):
   compiled.operator.native(a, c)
   np.testing.assert_array_equal(c, a.sum(axis=1))
   assert "normalize-reduction-layout" in compiled.kernel_ir.pass_trace
-  assert "register transpose traversal" in "\n".join(compiled.kernel_ir.diagnostics)
+  # Normalize the column-contiguous input into row-contiguous scratch. A
+  # target may execute that copy with a register butterfly or a ZA plan.
+  assert any(
+    isinstance(node, (I.Allocate, I.WorkspaceAllocate))
+    and tuple(I.constant(value) for value in node.view.shape) == (17, 19)
+    and tuple(I.constant(value) for value in node.view.strides) == (19, 1)
+    for node in nodes(compiled.kernel_ir.body)
+  )
+  assert_source_algorithms_lowered(compiled.backend_ir)
 
 
 def test_invalid_shapes_and_packing():
@@ -198,7 +208,7 @@ def test_nested_func_normalization_fusion(compiler, packing):
   np.testing.assert_allclose(c, expected, rtol=3e-5, atol=3e-5)
   assert "decompose-row-maps" in compiled.kernel_ir.pass_trace
   from vecops.language._compiler import ir as I
-  from vecops.language._compiler.ir.traversal import nodes, walk_unique
+  from vecops.language._compiler.ir.traversal import nodes
 
   statistics = {
     statement.view.storage
@@ -206,12 +216,15 @@ def test_nested_func_normalization_fusion(compiler, packing):
     if isinstance(statement, I.Allocate) and tuple(I.constant(n) for n in statement.view.shape) == (17,)
   }
   assert len(statistics) == 2  # mean and inverse stddev, not a full normalized tile
-  products = [node for node in nodes(compiled.kernel_ir.body) if isinstance(node, I.Expr) and node.op == "dot"]
-  assert products and statistics <= {
+  # Products have become executable source recipes by this boundary. Verify
+  # that actual consumers still read the two row statistics, without requiring
+  # an obsolete opaque dot node to survive lowering.
+  assert not any(isinstance(node, I.Expr) and node.op == "dot" for node in nodes(compiled.kernel_ir.body))
+  assert statistics <= {
     load.data.storage
-    for product in products
-    for value in walk_unique(product.args[0])
-    for load in I.loads_unique(value)
+    for statement in nodes(compiled.kernel_ir.body)
+    if isinstance(statement, (I.Assign, I.Store, I.DeclareState, I.UpdateState))
+    for load in I.loads_unique(statement.value)
   }
 
 
@@ -352,7 +365,9 @@ def test_noncontiguous_layernorm_tail_fuses_through_func(compiler, fusion):
   expected = np.maximum(((norm * 2 + 1).astype(bf).astype(np.float32) @ b.astype(bf).astype(np.float32)) * 0.75 + 1, 0)
   compiled.operator.native(a, b, c)
   np.testing.assert_allclose(c, expected, rtol=2e-4, atol=2e-4)
-  assert "local_interleave" in compiled.generated_source
+  # The complete normalization/matmul/helper pipeline must reach executable
+  # IR; the chosen target need not spell its transpose as local_interleave.
+  assert_source_algorithms_lowered(compiled.backend_ir)
 
 
 @pytest.mark.parametrize("dtype", ["bfloat16", "int8"])

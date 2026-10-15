@@ -9,7 +9,6 @@ from ...analysis.loops import trivial_true
 from ...ir.traversal import children
 from ...operations import Trait
 from ..manager import register_pass
-from .reuse import plan_computation_reuse
 
 
 @register_pass("unroll-serial", after=("fuse-elementwise",))
@@ -78,11 +77,3 @@ def unroll_serial(ir, context):
 
   visit(ir.body)
   return ir
-
-
-@register_pass("refresh-computation-reuse", after=("unroll-serial",))
-def refresh_computation_reuse(ir, context):
-  # Operation copies have independent expression identities and lifetimes.
-  # Never share a row's cached exponential with another unrolled row.
-  ir.materializations.clear()
-  return plan_computation_reuse(ir, context)

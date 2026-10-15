@@ -11,6 +11,7 @@ from dataclasses import replace
 
 from ... import ir as I
 from ...analysis.loops import trivial_true
+from ...analysis.projection import broadcast_coordinate
 from ...ir.traversal import children, nodes, walk
 from ...operations import Trait
 from ..manager import register_pass
@@ -101,13 +102,7 @@ def fuse_loop_consumers(ir, context):
           offset = e.data.offset
           own = coords[len(coords) - len(e.data.shape) :]
           for coord, extent, stride in zip(own, e.data.shape, e.data.strides):
-            coord = (
-              I.literal(0)
-              if I.constant(extent) == 1
-              else coord
-              if I.constant(extent) is not None
-              else I.Expr(I.ScalarType("int64"), "where", (I.binary("eq", extent, I.literal(1)), I.literal(0), coord))
-            )
+            coord = broadcast_coordinate(extent, coord)
             offset = I.binary("add", offset, I.binary("mul", coord, stride))
           return I.Expr(
             I.ScalarType(e.type.dtype), "load", e.args, replace(e.data, shape=(), strides=(), offset=offset)

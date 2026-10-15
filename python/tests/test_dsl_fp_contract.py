@@ -21,6 +21,9 @@ from vecops.language._debug.report import DebugInfo
 @pytest.mark.parametrize("state", (VectorState(None, None), VectorState(32, 64)))
 def test_strict_dsl_target_is_an_independent_frozen_compiler(monkeypatch, state):
   monkeypatch.setattr("vecops._arm_vector_state.get_vector_state", lambda: state)
+  # This policy unit supplies synthetic ARM state even on x86. Compatibility
+  # probing belongs to the native toolchain tests, not this frozen-copy check.
+  monkeypatch.setattr("vecops._compiler_compat.scalable_sink_flags", lambda _: ())
   original = Compiler(cflags=("-O3", "-ffp-contract=fast"), environment={"CXXFLAGS": "-fno-math-errno"})
   frozen = original.snapshot()
   handle = object()
@@ -51,6 +54,9 @@ def test_compile_policy_only_applies_to_generated_dsl(monkeypatch, tmp_path, gen
 
   template = T.template(kernel) if generated else T.template(source=source)(kernel)
   compiler = Compiler(cflags=("-ffp-contract=on",), cache_dir=tmp_path / "cache")
+  # Snapshot may add a target/compiler compatibility flag on ARM. Strict DSL
+  # rounding appends its policy after that existing, shared configuration.
+  source_flags = compiler.snapshot().cflags
   monkeypatch.setattr(driver, "_source_identity", lambda _ir: "fp-policy-source")
   monkeypatch.setattr(driver, "_build_definition", lambda *_args, **_kwargs: (object(), {}, ()))
   monkeypatch.setattr(driver, "_CompiledCore", type("FakeCore", (), {"__init__": lambda self, *args: None}))
@@ -74,9 +80,8 @@ def test_compile_policy_only_applies_to_generated_dsl(monkeypatch, tmp_path, gen
   monkeypatch.setattr(identity, "source_inputs", lambda *_args, **_kwargs: (("source", "same"),))
   driver._compile_cache.clear()
   result = driver.compile(template, compiler=compiler)
-  assert result.debug.compiler.cflags == (
-    ("-ffp-contract=on", "-ffp-contract=off") if generated else ("-ffp-contract=on",)
-  )
+  expected_flags = (*source_flags, "-ffp-contract=off") if generated else source_flags
+  assert result.debug.compiler.cflags == expected_flags
   assert compiler.cflags == ("-ffp-contract=on",)
   assert result.debug._validate_cache()
   compiler.cflags = ("-O2",)

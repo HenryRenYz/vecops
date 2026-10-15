@@ -46,7 +46,7 @@ class Case:
 
 def catalog():
   source = (ROOT / "benchmarks/ops/AttentionBench.cpp").read_text()
-  body = re.search(r"constexpr Case Cases\[\] = \{(.*?)\n\};", source, re.S).group(1)
+  body = re.search(r"constexpr Case Cases\[\] = \{(.*?)\n\};", source, re.DOTALL).group(1)
   records = []
   for group, name, m, n, d, v, am, an in re.findall(
       r'\{"([^"]+)", "([^"]+)", (\d+), (\d+), (\d+), (\d+), (true|false), (true|false)\}', body):
@@ -92,7 +92,7 @@ def kernels(compiler, case, block_sizes):
           T.library.scaled_dot_product_attention(
             T.cast(T.load(Q[row:end, :]), "bfloat16"), T.cast(T.load(K), "bfloat16"),
             T.cast(T.load(Value), "bfloat16"), O[row:end, :],
-            scale=scale, block_k=Block, probability_dtype="bfloat16", accuracy="fast")
+            scale=scale, block_k=Block, probability_dtype="bfloat16", accuracy="fast")  # noqa: B023 -- T.template freezes captures now
         T.compiler_fence()
 
     result[f"dsl_k{block}"] = T.compile(dsl, compiler=compiler)
@@ -104,7 +104,7 @@ def kernels(compiler, case, block_sizes):
             Value: T.Tensor((N, V), dtype=VType), O: T.Tensor((M, V), dtype=OType, access="output"),
             Scratch: T.Tensor((W,), dtype="uint8", access="inout"), Info: T.Tensor((1,), dtype="int64", access="output"),
             scale: float, repeat: int):
-      Strategy  # noqa: B018 - source specialization
+      Strategy  # noqa: B018,B023 -- T.template freezes source specialization now
 
     result[f"cpp_{name}"] = T.compile(cpp, compiler=compiler)
   return result
@@ -160,6 +160,8 @@ def main():
   parser.add_argument("--sdk", type=Path, help="explicit installed SDK; source tree otherwise")
   parser.add_argument("--jobs", type=int, default=8)
   parser.add_argument("--rounds", type=int, default=12)
+  parser.add_argument("--prepare-only", action="store_true", help="Build and validate without timing")
+  parser.add_argument("--cache-only", action="store_true", help="Require retained native artifacts")
   args = parser.parse_args()
   cases = [c for c in catalog() if not args.case or c.name in args.case or c.group in args.case]
   if args.list:
@@ -176,7 +178,8 @@ def main():
       return config
 
   compiler = Compiler(cc=args.cc, cxx=args.cxx, jobs=args.jobs, cache_dir=args.output / "cache",
-                      build_dir=args.output / "build", cflags=("-ffp-contract=off",))
+                      build_dir=args.output / "build", cflags=("-ffp-contract=off",),
+                      cache_mode="cache-only" if args.cache_only else "read-write")
   groups = {}
   with vecops.collect_compile_requests() as collector:
     for case in cases:
@@ -226,6 +229,10 @@ def main():
           expected = reference(q, k, v, int(name[5:]))
           np.testing.assert_allclose(o.astype(np.float64), expected, rtol=0.02, atol=0.0006)
         errors[name] = error
+      if args.prepare_only:
+        rows.append({"case": asdict(case), "max_abs_error": errors, "validated": True, "timed": False})
+        (args.output / "prepared.json").write_text(json.dumps(rows, indent=2))
+        continue
       # Native ABI dispatch has fixed overhead. Calibrate each implementation
       # separately to >=25 ms: equal tiny repeat counts severely overstate the
       # cost of a fast C++ kernel relative to the original AttentionBench.

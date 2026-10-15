@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 from pathlib import Path
 
 import vecops
@@ -59,6 +60,19 @@ def arm_cross_cxx_include_flags(sysroot):
   return flags
 
 
+def arm_objdump_command(object_file):
+  """Disassemble ARM objects on cross hosts and native ARM test machines."""
+  tool = (
+    os.environ.get("VECOPS_TEST_ARM_OBJDUMP")
+    or shutil.which("aarch64-linux-gnu-objdump")
+    or shutil.which("llvm-objdump")
+  )
+  if tool is None:
+    raise FileNotFoundError("set VECOPS_TEST_ARM_OBJDUMP to an ARM-capable objdump")
+  features = ["--mattr=+sve,+sme,+sme-fa64,+sme-f64f64,+bf16"] if "llvm-objdump" in Path(tool).name else []
+  return [tool, *features, "-Cd", str(object_file)]
+
+
 def amx_available_for_test() -> bool:
   """Whether the selected test target is the x86 AMX-capable path."""
   if not amx_tile_available_for_test():
@@ -97,6 +111,26 @@ def x86_target_available_for_test() -> bool:
 def assert_no_vec_mask_arrays(source: str) -> None:
   """Enforce the DSL invariant against std::array/vector of register values."""
   assert not re.search(r"std::(?:array|vector)\s*<\s*vecops::vec::(?:Vec|Mask)", source)
+
+
+def assert_source_algorithms_lowered(prepared) -> None:
+  """Require terminal executable IR rather than obsolete empty planner fields."""
+  import copy
+  from dataclasses import replace
+
+  from vecops.language._compiler.backends.cpu.transpose import TransposePlan
+  from vecops.language._compiler.ir.vector import VectorRegion
+  from vecops.language._compiler.ir.verification import verify_prepared
+
+  # The emitter appends the CPU transpose schedules it actually used to the
+  # debug region list. The phase-boundary verifier runs before that emission.
+  # Reconstruct its vector-only view while checking the debug additions are
+  # known CPU schedules, rather than treating them as portable vector IR.
+  vectors = copy.copy(prepared.vectors)
+  assert all(isinstance(region, (VectorRegion, TransposePlan)) for region in vectors.regions)
+  vectors.regions = [region for region in vectors.regions if isinstance(region, VectorRegion)]
+
+  verify_prepared(replace(prepared, vectors=vectors))
 
 
 def parameter_snapshot_name(source: str, expression: str) -> str:

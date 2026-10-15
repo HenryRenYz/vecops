@@ -3,9 +3,8 @@
 """Transpose/packing/broadcast fusion uses global, not local panel coordinates."""
 import numpy as np
 import pytest
-import vecops
 import vecops.language as T
-from dsl_test_utils import make_compiler
+from dsl_test_utils import assert_source_algorithms_lowered, make_compiler
 
 
 @pytest.fixture(scope='module')
@@ -39,7 +38,7 @@ def test_dense_pack_overlap_and_plain_transpose_plan(compiler):
              P:T.Tensor((19*23,),dtype='float32',access='output')):
     T.pack(B,P,side='B',format='dense')
   compiled=T.compile(kernel,compiler=compiler)
-  assert 'transpose_vec' in compiled.generated_source
+  assert_source_algorithms_lowered(compiled.backend_ir)
   b=np.arange(19*23,dtype=np.float32).reshape(19,23)
   expected=b.T.ravel().copy()
   compiled.operator.native(b,b.ravel())

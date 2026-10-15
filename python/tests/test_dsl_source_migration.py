@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered, make_compiler
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.ir.traversal import nodes
@@ -138,7 +138,7 @@ def test_native_source_packing_uses_saturating_scalar_conversion(tmp_path):
   compiled.operator.native(a, output)
   expected = np.clip(np.nan_to_num(a, nan=0, posinf=127, neginf=-128), -128, 127).astype(np.int8)
   np.testing.assert_array_equal(output, expected)
-  assert "vecops::convert<std::int8_t>" in compiled.generated_source
+  assert_source_algorithms_lowered(compiled.backend_ir)
 
 
 @T.func

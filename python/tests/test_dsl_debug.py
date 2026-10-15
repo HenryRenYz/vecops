@@ -116,19 +116,26 @@ def test_memory_lifetimes_and_interpreter(tmp_path):
 
 def test_multithreaded_print_records(tmp_path, capfd):
   @T.template
-  def kernel(C: T.Tensor((8,), dtype=T.float32, access="output")):
+  def kernel(C: T.Tensor((9,), dtype=T.float32, access="output")):
     with T.team(8) as worker:
       for step in T.serial(4):
         T.print(f"worker={worker},step={step}", flush=True)
       C[worker] = float(worker)
+      if worker == 0:
+        C[8] = float(T.worker_count())
 
   compiler = make_compiler(output="quiet", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   compiled = T.compile(kernel, compiler=compiler, out_idx=-1)
-  output = np.empty(8, dtype=np.float32)
+  output = np.full(9, -1, dtype=np.float32)
   compiled(output)
-  np.testing.assert_array_equal(output, np.arange(8))
+  # A requested team size is a maximum; a validation shard may have fewer
+  # resident workers than eight. Every actual worker must still emit records.
+  workers = int(output[8])
+  assert 1 <= workers <= 8
+  np.testing.assert_array_equal(output[:workers], np.arange(workers))
+  np.testing.assert_array_equal(output[workers:8], -1)
   lines = capfd.readouterr().out.splitlines()
-  assert sorted(lines) == sorted(f"worker={w},step={s}" for w in range(8) for s in range(4))
+  assert sorted(lines) == sorted(f"worker={w},step={s}" for w in range(workers) for s in range(4))
 
 
 def test_metadata_only_and_correctness_utilities():

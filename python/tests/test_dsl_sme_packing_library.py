@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import vecops.language as T
 from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_arrays, make_compiler
+from test_dsl_sme_family_owners import _assert_packing_owner, _owners
 from vecops._arm_vector_state import get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
@@ -397,10 +398,15 @@ def test_sme_packing_arm_cross_codegen(dtype, svl, tmp_path):
   cpp.with_suffix(".log").write_text(result.stdout + result.stderr)
   assert result.returncode == 0, result.stderr[-6000:]
   code = assembly.read_text()
-  assert re.search(r"^\s*smstart\b", code, re.MULTILINE)
-  assert re.search(r"^\s*smstop\b", code, re.MULTILINE)
-  assert re.search(r"\bza[01][hv]\.", code)
-  if ELEMENT_BYTES[dtype] <= 4:
-    assert re.search(r"\bza[23][hv]\.s", code)
+  owners = _owners(code, vl=16, svl=svl)
+  assert owners
+  for index, body in enumerate(owners):
+    _assert_packing_owner(body, index)
+    # Fringes load through the storage-width horizontal view and extract
+    # packed words vertically. They need no second ping-pong pair ZA2/3.
+    storage = {"uint8": ("b", "b"), "float16": ("h", "h"), "float64": ("d", "d")}[dtype]
+    assert re.search(rf"^\s*ld1{storage[0]}\s+.*\bza\d+h\.{storage[1]}", body, re.MULTILINE)
+    word = "d" if ELEMENT_BYTES[dtype] == 8 else "s"
+    assert re.search(rf"\bza\d+v\.{word}\b", body)
   assert not re.search(r"^\s*\w*mopa\b", code, re.MULTILINE)
   assert_no_vec_mask_arrays(source)

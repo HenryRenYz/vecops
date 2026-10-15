@@ -168,7 +168,7 @@ def test_operator_preserves_complete_kernel_def_and_source(tmp_path: Path) -> No
     cxx=_TEST_CXX,
   )
   kernel = make_test_kernel(compiler)
-  assert kernel.source == VECOPS_ROOT / "tests/runtime/TestKernel.cpp"
+  assert kernel.source == (VECOPS_ROOT / "tests/runtime/TestKernel.cpp").resolve()
   assert kernel.kernel_def.values == {
     "B": vecops.Const,
     "D": vecops.Const,
@@ -460,11 +460,13 @@ def test_cache_only_does_not_discover_tools_or_create_directories(tmp_path: Path
   cache = tmp_path / "absent-cache"
   build = tmp_path / "absent-build"
   compiler = vecops.Compiler(cache_mode="cache-only", cache_dir=cache, build_dir=build, cc="missing", cxx="missing")
-  kernel = make_test_kernel(compiler)
   assert compiler.native is None
   input = np.ones((2, 4), dtype=np.float32)
   output = np.zeros_like(input)
   with pytest.raises(ImportError, match="cache-only"):
+    # ARM snapshots require a retained scalable-vector compatibility policy.
+    # With an absent cache they may reject declaration before invocation.
+    kernel = make_test_kernel(compiler)
     kernel(input, output)
   assert not cache.exists()
   assert not build.exists()
@@ -473,7 +475,7 @@ def test_cache_only_does_not_discover_tools_or_create_directories(tmp_path: Path
 def test_generated_torch_bridge_uses_mutable_out_schema() -> None:
   from vecops._schema_bridge import _generate_torch_source, _torch_schema
 
-  definition = make_test_kernel(vecops.Compiler(cache_mode="cache-only")).kernel_def._native()
+  definition = make_test_kernel(vecops.Compiler(target="Scalar", cache_mode="cache-only")).kernel_def._native()
   schema = _torch_schema("run", definition)
   assert "Tensor(a!) output" in schema
   assert schema.endswith("-> ()")
@@ -696,7 +698,7 @@ def test_native_thread_pool_region_is_scoped_and_nestable(monkeypatch) -> None:
     lambda: events.append(("end", None)),
     raising=False,
   )
-  with vecops.native_thread_pool_region(7):
+  with vecops.native_thread_pool_region(7):  # noqa: SIM117 -- assertions observe the inner exit before the outer exit
     with vecops.native_thread_pool_region(7):
       events.append(("body", None))
   assert events == [

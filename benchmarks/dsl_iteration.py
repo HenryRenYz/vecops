@@ -84,6 +84,8 @@ def main():
   parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
   parser.add_argument("--output", type=Path)
   parser.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-iteration")
+  parser.add_argument("--prepare-only", action="store_true", help="Build and validate without timing")
+  parser.add_argument("--cache-only", action="store_true", help="Require retained native artifacts")
   args = parser.parse_args()
   if min([*args.size, args.repeat, args.rounds]) <= 0:
     parser.error("sizes/repetition counts must be positive")
@@ -92,7 +94,8 @@ def main():
   build_affinity = os.sched_getaffinity(0)
   compiler = vecops.Compiler(
     target=args.target, cc=args.cc, cxx=args.cxx, jobs=6,
-    build_dir=args.build_dir / "build", cache_dir=args.build_dir / "cache"
+    build_dir=args.build_dir / "build", cache_dir=args.build_dir / "cache",
+    cache_mode="cache-only" if args.cache_only else "read-write",
   )
   cases = []
   with vecops.collect_compile_requests() as collector:
@@ -112,12 +115,18 @@ def main():
         a, b, c, r = (aligned_empty((n,), "float32") for n in (size, size, size, 2))
         a[:] = np.linspace(-0.25, 0.25, size)
         for kernel in variants:
-          kernel(a, b, c, r, 1)
+          # Match compile_batch(execution_parallelism=1) and single-CPU
+          # timing instead of building a second C++ reference specialization.
+          with vecops.cpu_thread_limit(1):
+            kernel(a, b, c, r, 1)
           if kind == 1:
             np.testing.assert_allclose(r, [a.sum(), np.square(a).sum()], rtol=2e-5, atol=3e-4)
           else:
             expected = (a * 2 + 1) * 3 - 1 if kind == 0 else np.cumsum(a * 2) * 3 + 1
             np.testing.assert_allclose(c, expected, rtol=1e-5, atol=3e-3)
+        if args.prepare_only:
+          results.append({"kind": kind, "size": size, "validated": True, "timed": False})
+          continue
         os.sched_setaffinity(0, {args.cpu})
         calls = tuple(
           lambda k=k, a=a, b=b, c=c, r=r: k.operator.native(a, b, c, r, args.repeat, **k._core.specialization_values)

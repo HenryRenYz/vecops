@@ -5,6 +5,7 @@
 #include "vecops/vec/Vec.h"
 #include <algorithm>
 #include <bit>
+#include <type_traits>
 
 template <class Tag>
 VECOPS_ALWAYS_INLINE void state_step(vecops::vec::Vec<Tag>& x) {
@@ -20,10 +21,28 @@ template <vecops::nint_t Offset, vecops::nint_t End, class... Tags>
 VECOPS_ALWAYS_INLINE void state_reference(const float* a, float* c, vecops::nint_t count,
                                           vecops::vec::Vec<Tags>&... values) {
   if constexpr (Offset < End) {
+    // The native ABI binds the captured SVE width and rejects mismatched
+    // execution state. A VLA runtime size query is not a constant expression.
+#if defined(VECOPS_KERNEL_SVE_BYTES)
+    constexpr vecops::nint_t native = VECOPS_KERNEL_SVE_BYTES / sizeof(float);
+#else
     constexpr auto native = vecops::vec::size(vecops::vec::ScalableTag<float>{});
+#endif
     constexpr auto lanes =
       std::bit_floor(static_cast<std::make_unsigned_t<vecops::nint_t>>(std::min(End - Offset, native)));
+#if defined(VECOPS_KERNEL_SVE_BYTES)
+    using Tag = typename decltype([] {
+      if constexpr (lanes * sizeof(float) > 16) {
+        constexpr int power = std::countr_zero(lanes) -
+                              std::countr_zero(static_cast<decltype(lanes)>(native));
+        return std::type_identity<vecops::vec::ScalableTag<float, power>>{};
+      } else {
+        return std::type_identity<vecops::vec::FixedTag<float, lanes>>{};
+      }
+    }())::type;
+#else
     using Tag = vecops::vec::FixedTag<float, lanes>;
+#endif
     auto x = vecops::vec::load(Tag{}, a + Offset);
     state_reference<Offset + lanes, End, Tags..., Tag>(a, c, count, values..., x);
     vecops::vec::store(Tag{}, c + Offset, x);

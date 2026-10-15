@@ -13,7 +13,8 @@ ELEMENTWISE = T.ELEMENTWISE | T.CSE | T.TRANSPOSE_STREAMABLE
 def define(names, family, traits=ELEMENTWISE, **kwargs):
   for name in names.split():
     own_traits = traits | T.HARDWARE_SCALAR if name in _HARDWARE_SCALARS else traits
-    register_operation(OpDef(name, family, own_traits, **kwargs))
+    safe = name in _TOTAL_OPERATIONS
+    register_operation(OpDef(name, family, own_traits, may_trap=not safe, speculatable=safe, **kwargs))
 
 
 # Integer/boolean metadata operations that need no allocation, exceptions or
@@ -45,6 +46,43 @@ _HARDWARE_SCALARS = frozenset(
     "symbol",
     "streaming_lanes",
   )
+)
+
+# Semantic promises used by motion/DCE, distinct from CSE eligibility. Memory,
+# shape validation, shifts/division and unknown plugin operations remain
+# conservative. Expression analysis additionally excludes floating speculation
+# and mutable/hardware references, and validates raw ABI metadata leaves.
+_TOTAL_OPERATIONS = frozenset(
+  {
+    "add",
+    "sub",
+    "mul",
+    "min",
+    "max",
+    "lt",
+    "le",
+    "gt",
+    "ge",
+    "eq",
+    "ne",
+    "and",
+    "or",
+    "not",
+    "neg",
+    "identity",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "bit_not",
+    "literal",
+    "fill",
+    "local",
+    "frozen",
+    "symbol",
+    "raw",
+    "region_argument",
+    "register_input",
+  }
 )
 
 
@@ -160,8 +198,12 @@ define("scatter", "indexed_memory", T.NONE, effects="write", keywords=("mask", "
 define("value_transform", "transform", T.VECTOR_BOUNDARY)
 define("shuf local_shuf", "register", T.REGISTER_TRANSFORM, keywords=())
 define("sve.iota", "sve_register", T.VECTOR_BOUNDARY, keywords=())
-define("sve.join_k_groups sve.broadcast_segment sve.row_pair sve.mmla", "sve_register",
-       T.REGISTER_TRANSFORM | T.VECTOR_BOUNDARY, keywords=())
+define(
+  "sve.join_k_groups sve.broadcast_segment sve.row_pair sve.mmla",
+  "sve_register",
+  T.REGISTER_TRANSFORM | T.VECTOR_BOUNDARY,
+  keywords=(),
+)
 define(
   "bitcast lower upper lower_half upper_half concat interleave local_interleave_lower local_interleave_upper block_shuffle",
   "register_geometry",

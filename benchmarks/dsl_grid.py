@@ -16,7 +16,6 @@ from pathlib import Path
 import numpy as np
 import vecops
 import vecops.language as T
-
 from dsl_transpose import aligned_empty, measure
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,7 +114,11 @@ def main():
   parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
   parser.add_argument("--build-dir", type=Path, default=ROOT / "build-dsl-grid")
   parser.add_argument("--output", type=Path)
+  parser.add_argument("--prepare-only", action="store_true", help="Build and validate without timing")
+  parser.add_argument("--cache-only", action="store_true", help="Require retained native artifacts")
   args = parser.parse_args()
+  if args.multiprocess and (args.prepare_only or args.cache_only):
+    parser.error("prepare/cache-only currently require the single-process driver")
   cpus = sorted(args.cpus or os.sched_getaffinity(0))[: max(args.threads) * max(1, args.multiprocess)]
   available = os.sched_getaffinity(0)
   if not set(cpus) <= available:
@@ -155,6 +158,7 @@ def main():
       jobs=6,
       cache_dir=args.build_dir / "cache",
       build_dir=args.build_dir / "build",
+      cache_mode="cache-only" if args.cache_only else "read-write",
     )
     results = []
     rng = np.random.default_rng(42)
@@ -193,12 +197,19 @@ def main():
         os.sched_setaffinity(0, set(cpus))
         for threads in args.threads:
           with vecops.cpu_thread_limit(threads):
-            calls = tuple(lambda k=k: k.operator.native(a, b, c, args.repeat) for _, k in variants)
-            times = measure(calls, args.repeat, args.rounds)
+            calls = tuple(lambda k=k, a=a, b=b, c=c: k.operator.native(a, b, c, args.repeat) for _, k in variants)
+            times = None if args.prepare_only else measure(calls, args.repeat, args.rounds)
             # Check every budget/provider path, outside the timing window.
             for _, compiled in variants:
               compiled.operator.native(a, b, c, 1)
               check_outputs(a, b, c, operation)
+            if times is None:
+              results.extend(
+                {"operation": operation, "rows": rows, "width": args.width, "threads": threads,
+                 "schedule": name, "validated": True, "timed": False}
+                for name, _ in variants
+              )
+              continue
             for (name, _), elapsed in zip(variants, times):
               row = {
                 "operation": operation,

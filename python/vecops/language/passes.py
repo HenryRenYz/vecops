@@ -4,6 +4,8 @@
 
 from ._compiler.passes.manager import (
   PassContext,
+  PassGroup,
+  PassInvocation,
   PassManager,
   PassResult,
   PassSpec,
@@ -15,6 +17,8 @@ from ._compiler.passes.manager import (
 for _public_symbol in (
   PassManager,
   PassContext,
+  PassGroup,
+  PassInvocation,
   PassResult,
   PassSpec,
   register_pass,

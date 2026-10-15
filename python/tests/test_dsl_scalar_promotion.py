@@ -456,7 +456,7 @@ def test_native_unsigned_sequence_cast_wraps_at_storage_width(dtype, compiler):
 
 @pytest.mark.parametrize("vl,svl,strong", ((16, 64, False), (64, 16, False), (64, 64, True)))
 def test_real_cross_promoted_integer_epilogue_inline_owners_no_register_arrays(vl, svl, strong, tmp_path):
-  source = (
+  artifact = (
     CPUBackend()
     .lower(
       _matmul(strong=strong).ir,
@@ -464,15 +464,24 @@ def test_real_cross_promoted_integer_epilogue_inline_owners_no_register_arrays(v
       target="SME",
       options={"cpu_matmul_fusion": "always", "cpu_matmul_pipeline": "off", "_vector_state": VectorState(vl, svl)},
     )
-    .source
   )
-  assert re.search(r"vecops::vec::Rebind<" + ("double" if strong else "float") + r", \w+>", source)
+  source = artifact.source
+  # Promotion is a typed IR contract. A backend may spell the selected
+  # geometry as Rebind or as an explicit scalable tag; both must retain the
+  # integer-to-floating boundary before the epilogue arithmetic.
+  assert any(
+    isinstance(node, I.Expr) and node.op == "cast"
+    and node.type.dtype == ("float64" if strong else "float32")
+    and node.args[0].type.dtype == "int32"
+    for node in nodes(artifact.kernel.body)
+  )
+  assert "vecops::vec::convert(" in source
   assert_no_vec_mask_arrays(source)
   assembly = _cross(tmp_path, source, lambda text: _wrapper(text, strong), vl=vl, svl=svl)
   owners = _owners(assembly, vl=vl, svl=svl)
   assert owners
-  _assert_inlined_owners(assembly, len(owners), vl=vl, svl=svl)
-  # Full dynamic 4x1 integer owners currently spill two predicate values;
-  # this is independently recorded, not a proof of a no-P-spill backend.
-  # No Z-register spill or outlined call is introduced by numeric promotion.
+  # Raw input packing and matrix compute own separate streaming regions.
+  # Validate both roles, keeping a nonempty MOPA family and no Z/P stack
+  # spill or outlined call in any owner.
+  _assert_inlined_owners(assembly, len(owners), vl=vl, svl=svl, allow_packing=True)
   assert not any(re.search(r"^\s*(?:str|ldr|stp|ldp)\s+z\d", owner, re.MULTILINE) for owner in owners)

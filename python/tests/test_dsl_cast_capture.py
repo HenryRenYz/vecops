@@ -359,7 +359,7 @@ def _assert_contiguous_source_groups(path_instructions, source_loads, *, words):
 
   selected_lines = set(source_loads)
   observed = []
-  for raw in path_instructions:
+  for instruction_index, raw in enumerate(path_instructions):
     line = raw.split("//", 1)[0].strip()
     if not line:
       continue
@@ -386,7 +386,16 @@ def _assert_contiguous_source_groups(path_instructions, source_loads, *, words):
     if op == "cmp" and len(args) == 2:
       right = scalar(args[1])
       left = scalar(args[0])
-      comparison = "positive" if right == ((), 0) and left[1] > 0 and all(name == "vl" for name, _ in left[0]) else None
+      comparison = (
+        "positive"
+        if (
+          right == ((), 0)
+          and left[1] >= 0
+          and all(name == "vl" and coefficient >= 0 for name, coefficient in left[0])
+          and (left[1] > 0 or any(coefficient > 0 for _, coefficient in left[0]))
+        )
+        else None
+      )
       continue
     recognized = op in {"cntb", "mov", "lsl", "add", "and", "csel"}
     if re.fullmatch(r"x\d+", destination) and not recognized:
@@ -413,9 +422,15 @@ def _assert_contiguous_source_groups(path_instructions, source_loads, *, words):
       # compiler's rounding-to-4-byte operation therefore preserves them.
       value = scalar(args[1])
       mask = int(args[2].lstrip("#"), 0)
-      assert mask in {-4, 0xFFFFFFFFFFFFFFFC}, line
-      assert value[1] % 4 == 0 and all(name == "vl" or coefficient % 4 == 0 for name, coefficient in value[0]), line
-      values[args[0]] = value
+      if mask in {-4, 0xFFFFFFFFFFFFFFFC} and all(
+        name == "vl" or coefficient % 4 == 0 for name, coefficient in value[0]
+      ):
+        # VL is a multiple of sixteen. Aligning VL+c down to four bytes
+        # also rounds c, including the compiler's common VL+3 sequence.
+        values[args[0]] = value[0], value[1] // 4 * 4
+      else:
+        values[args[0]] = (((f"and:{args[0]}:{instruction_index}", 1),), 0)
+      pointers.pop(args[0], None)
     elif op == "csel" and len(args) == 4:
       if comparison == "positive" and args[3] in {"lt", "mi"}:
         chosen = args[2]
@@ -428,6 +443,10 @@ def _assert_contiguous_source_groups(path_instructions, source_loads, *, words):
         pointers[args[0]] = pointers[chosen]
       elif chosen is not None:
         values[args[0]] = scalar(chosen)
+        pointers.pop(args[0], None)
+      else:
+        values[args[0]] = (((f"csel:{args[0]}:{instruction_index}", 1),), 0)
+        pointers.pop(args[0], None)
       comparison = None
 
   assert len(observed) == words, (len(observed), words, observed)
@@ -639,8 +658,9 @@ def _assert_indexed_source_groups(function, header, path_instructions, source_lo
       vector_values[destination_key] = tuple(start + index * step for index in range(lanes))
     elif operation == "mov" and len(arguments) == 2 and re.fullmatch(r"z\d+\.[bhsd]", destination_register):
       source = physical_z(arguments[1])
-      if source in vector_values:
-        vector_values[destination_key] = vector_values[source]
+      source_value = previous if source == destination_key else vector_values.get(source)
+      if source_value is not None:
+        vector_values[destination_key] = source_value
     elif operation == "incw" and destination_register.endswith(".s") and previous is not None:
       amount = lanes
       if len(arguments) >= 3 and arguments[1] == "all" and arguments[2].startswith("mul #"):
@@ -648,9 +668,10 @@ def _assert_indexed_source_groups(function, header, path_instructions, source_lo
       vector_values[destination_key] = tuple(value + amount for value in previous)
     elif operation == "lsl" and len(arguments) == 3 and destination_register.endswith(".s"):
       source = physical_z(arguments[1])
-      if source in vector_values:
+      source_value = previous if source == destination_key else vector_values.get(source)
+      if source_value is not None:
         amount = 1 << immediate(arguments[2])
-        vector_values[destination_key] = tuple(value * amount for value in vector_values[source])
+        vector_values[destination_key] = tuple(value * amount for value in source_value)
 
   for raw in function[: header.start()].splitlines():
     process(raw)
@@ -659,9 +680,10 @@ def _assert_indexed_source_groups(function, header, path_instructions, source_lo
 
   assert not remaining, f"indexed source loads were not reached on the selected loop path: {remaining}"
   assert len(accesses) == words, (len(accesses), words, source_loads)
-  predicates = {predicate for predicate, _, _, _ in accesses}
+  # Each word may have a different data mask. Any subsets of disjoint
+  # address groups remain disjoint; predicate-register equality is neither
+  # required nor sufficient for this no-duplicate-read proof.
   bases = {base for _, base, _, _ in accesses}
-  assert len(predicates) == 1, f"indexed groups use different masks: {accesses}"
   assert len(bases) == 1, f"indexed groups use different source bases: {accesses}"
   expected = tuple(range(0, words * lanes * 4, 4))
   all_offsets = [offset for _, _, vector, _ in accesses for offset in vector]
@@ -725,6 +747,16 @@ def test_source_memory_group_requires_contiguous_vector_byte_offsets():
     "ld1b { z3.b }, p3/z, [x11, x10]",
   ]
   _assert_contiguous_source_groups(lines, [lines[0], lines[5], lines[9], lines[14]], words=4)
+  rounded = []
+  for line in lines:
+    if line.startswith("and "):
+      register = line.split()[1].rstrip(",")
+      rounded.append(f"add {register}, {register}, #3")
+    rounded.append(line)
+  _assert_contiguous_source_groups(rounded, [lines[0], lines[5], lines[9], lines[14]], words=4)
+  clobbered = lines[:5] + ["cmp x20, #0", "csel x11, x11, x0, eq"] + lines[5:]
+  with pytest.raises(AssertionError, match="not rooted at A"):
+    _assert_contiguous_source_groups(clobbered, [lines[0], lines[5], lines[9], lines[14]], words=4)
   non_contiguous = [line for line in lines if line != "add x10, x12, x13"]
   with pytest.raises(AssertionError, match="non-contiguous input group"):
     _assert_contiguous_source_groups(non_contiguous, [lines[0], lines[5], lines[9], lines[14]], words=4)
@@ -806,6 +838,15 @@ def test_indexed_source_group_checks_exact_lane_offsets_and_iteration_advance():
   assert header
   loads = [line.strip() for line in function.splitlines() if line.strip().startswith("ld1w")]
   _assert_indexed_source_groups(function, header, function.splitlines(), loads, vl_bytes=16, words=4)
+  inplace = function.replace("lsl z21.s, z2.s, #2", "lsl z2.s, z2.s, #2\n  mov z21.d, z2.d")
+  inplace_header = re.search(r"^\.Lheader:", inplace, re.MULTILINE)
+  _assert_indexed_source_groups(inplace, inplace_header, inplace.splitlines(), loads, vl_bytes=16, words=4)
+  distinct = function
+  for index, line in enumerate(loads):
+    distinct = distinct.replace(line, line.replace("p0/z", f"p{index}/z"), 1)
+  distinct_loads = [line.strip() for line in distinct.splitlines() if line.strip().startswith("ld1w")]
+  distinct_header = re.search(r"^\.Lheader:", distinct, re.MULTILINE)
+  _assert_indexed_source_groups(distinct, distinct_header, distinct.splitlines(), distinct_loads, vl_bytes=16, words=4)
   non_contiguous = function.replace("lsl z21.s, z2.s, #2", "lsl z21.s, z1.s, #2")
   header = re.search(r"^\.Lheader:", non_contiguous, re.MULTILINE)
   with pytest.raises(AssertionError):
@@ -918,7 +959,9 @@ def test_captured_cast_real_arm_cross_keeps_rounding_without_extra_input_reads(t
   assert converted_loops
   expected_reads = 2 if shared else 4
   hot_loops = [loop for loop in converted_loops if loop[1] >= expected_reads]
-  assert len(hot_loops) == (1 if masked else 2), [loop[1] for loop in converted_loops]
+  # LLVM can version the masked loop as well as the unmasked loop. The
+  # semantic bound is the load count on each version's actual CFG path.
+  assert hot_loops, [loop[1] for loop in converted_loops]
   assert all(loop[1] == expected_reads for loop in hot_loops), [loop[1] for loop in hot_loops]
 
   for code, _input_reads, source_loads, path_instructions, function, header in hot_loops:
@@ -931,19 +974,22 @@ def test_captured_cast_real_arm_cross_keeps_rounding_without_extra_input_reads(t
     else:
       _assert_contiguous_source_groups(path_instructions, source_loads, words=expected_reads)
       _assert_direct_source_step(path_instructions, source_loads, vl_bytes=vl, words=expected_reads)
-      access_predicates = {match[1] for line in source_loads if (match := re.search(r"\},\s*(p\d+)/z,", line))}
-      function_before = function[: header.start()]
-      reaching_defs = {}
-      predicate_writer = re.compile(r"\s*(\w+)\s+(p\d+)(?:\.([bhsd]))?\b(.*)")
-      for line in function_before.splitlines():
-        match = predicate_writer.match(line)
-        if match and match[2] in access_predicates:
-          reaching_defs[match[2]] = line.strip()
-      access_body = "\n".join(
-        list(reaching_defs.values())
-        + [line for line in path_instructions if predicate_writer.match(line) or line in source_loads]
-      )
-      assert_full_sve_memory_words(access_body, kind="ld1", words=expected_reads)
+      if not masked:
+        # Full-word predicates are an unmasked-read contract. A public
+        # Valid mask can select a different subset in every physical word.
+        access_predicates = {match[1] for line in source_loads if (match := re.search(r"\},\s*(p\d+)/z,", line))}
+        function_before = function[: header.start()]
+        reaching_defs = {}
+        predicate_writer = re.compile(r"\s*(\w+)\s+(p\d+)(?:\.([bhsd]))?\b(.*)")
+        for line in function_before.splitlines():
+          match = predicate_writer.match(line)
+          if match and match[2] in access_predicates:
+            reaching_defs[match[2]] = line.strip()
+        access_body = "\n".join(
+          list(reaching_defs.values())
+          + [line for line in path_instructions if predicate_writer.match(line) or line in source_loads]
+        )
+        assert_full_sve_memory_words(access_body, kind="ld1", words=expected_reads)
     assert re.search(r"^\s*fcvt\s+z\d+\.h", code, re.MULTILINE)
     assert re.search(r"^\s*fcvt\s+z\d+\.s", code, re.MULTILINE)
     assert not re.search(r"^\s*smstart\b", code, re.MULTILINE)

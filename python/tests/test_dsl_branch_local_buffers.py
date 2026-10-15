@@ -10,7 +10,7 @@ import vecops.language as T
 from dsl_test_utils import make_compiler
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.backends.cpu.cpp.emitter import branch_buffer_scopes
+from vecops.language._compiler.backends.cpu.storage import branch_buffer_scopes
 
 
 def view():

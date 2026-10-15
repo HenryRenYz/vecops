@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: MIT
 """Source lifecycle selectors and representative paired native numerics."""
 
-import os
+import platform
 import sys
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+from dsl_test_utils import make_compiler
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "benchmarks"))
@@ -16,8 +17,8 @@ import dsl_matmul_source_catalog as source
 from dsl_matmul_artifact_ab import template_contract
 
 
-def executions():
-  return list(source.scenarios(source.load_cases(architecture="x86", complete_registration=True)))
+def executions(architecture="x86"):
+  return list(source.scenarios(source.load_cases(architecture=architecture, complete_registration=True)))
 
 
 def test_lifecycle_selector_is_separate_from_execution_identity():
@@ -65,7 +66,8 @@ def test_native_reference_bound_and_sidecar_oracle(kind, tmp_path):
   import vecops
   import vecops.language as T
 
-  rows = executions()
+  architecture = "arm" if platform.machine().lower() in {"aarch64", "arm64"} else "x86"
+  rows = executions(architecture)
   if kind == "bound_plain":
     scenario = next(
       s
@@ -89,19 +91,20 @@ def test_native_reference_bound_and_sidecar_oracle(kind, tmp_path):
       and s.mode == "Const"
     )
   else:
-    scenario = next(
+    candidates = [
       s
       for s in rows
       if s.reference_compensated_pack
       and not s.batched
-      and s.case.m == 19
+      and (architecture != "x86" or s.case.m == 19)
       and s.packing == "onlinepackedb"
       and s.mode == "Dynamic"
-    )
-  compiler = vecops.Compiler(
+    ]
+    if not candidates:
+      pytest.skip("the native source catalog does not register compensated online-packed-B references")
+    scenario = candidates[0]
+  compiler = make_compiler(
     target="Native",
-    cc=os.environ.get("VECOPS_TEST_CC", "/usr/bin/gcc"),
-    cxx=os.environ.get("VECOPS_TEST_CXX", "/usr/bin/g++"),
     jobs=1,
     cache_dir=tmp_path / "cache",
     build_dir=tmp_path / "build",

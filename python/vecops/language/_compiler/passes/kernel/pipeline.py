@@ -14,7 +14,7 @@ from ...ir.traversal import children, values, walk
 from ..manager import register_pass
 
 
-@register_pass("plan-software-pipeline", after=("refresh-computation-reuse",))
+@register_pass("plan-software-pipeline", after=("unroll-serial",))
 def plan_software_pipeline(ir, context):
   def visit(block):
     for index, statement in enumerate(block.statements):

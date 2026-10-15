@@ -215,7 +215,9 @@ def test_cross_named_full_input_and_typed_fringe_owner(tmp_path, vl, svl, source
   cpp.with_suffix(".log").write_text(process.stdout + process.stderr)
   cpp.with_suffix(".command.json").write_text(json.dumps(command, indent=2) + "\n")
   assert process.returncode == 0, process.stderr[-6000:]
-  dump = subprocess.check_output(["/usr/bin/aarch64-linux-gnu-objdump", "-Cd", str(object_file)], text=True)
+  from dsl_test_utils import arm_objdump_command
+
+  dump = subprocess.check_output(arm_objdump_command(object_file), text=True)
   cpp.with_suffix(".dump").write_text(dump)
   # Safe State separates the fixed SM-entry frame and same-SVL ZA body
   # when captured domains differ. Validate both interprocedurally; counting

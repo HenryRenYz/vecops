@@ -1033,6 +1033,73 @@ comparisons are in `benchmarks/dsl_norm.py`.
 
 `T.passes` exposes a named pass registry and `PassManager`. Kernel, vector and
 CPU memory-planning stages have separate pipelines, ordered by `before`/`after`.
+The reusable `kernel-cleanup` and `kernel-loop` stages accept extension passes
+with the same ordering rules. One registry snapshot is shared by all stages of
+a CPU compilation, including the nested cleanup/loop groups.
+These constraints order the default registry snapshot. Explicit pipelines are
+ordered programs: they preserve the supplied order, permit repeated names and
+do not implicitly restore omitted passes. `PassInvocation(name, options=...,
+label=..., stage=...)` gives a call independent options and a diagnostic label;
+`PassGroup(name, pipeline, stage=None, max_iterations=1)` nests a sequence and
+can repeat it to a bounded fixed point. Every callback must report
+`PassResult(..., changed=False)` for a round to converge; legacy callbacks are
+conservatively treated as changed. Registry implementations remain uniquely
+named and every nested callback is snapshotted before compilation begins.
+
+The default CPU pipeline runs reusable cleanup after normalization, source
+recipe expansion, loop optimization, serial unrolling and software-pipeline
+materialization. Cleanup combines typed scalar/branch simplification, logical
+view folding, memory normalization, CSE, private dead-store elimination and conservative DCE. It preserves
+observable checks, historical load identities, explicit rounding and floating
+reduction order. `cleanup_iterations` controls the maximum rounds (default 4,
+range 1..16). Pure integer metadata can be hoisted from loops; a bounded
+single-branch loop can be unswitched when its condition and bounds are safe to
+speculate. `loop_unswitch_budget` bounds that transformation's owned-node count
+(default 32; zero disables it).
+Signed arithmetic moves onto previously empty paths only when its full typed
+interval proves that it cannot overflow.
+Index generators retain their coordinate maps through slicing, transpose and
+reshape; row epilogues explicitly map their axes and origins. They cannot be
+retagged like coordinate-independent elementwise arithmetic.
+Private dead-store elimination requires an exact adjacent overwrite, harmless
+initial evaluation/address metadata and no observation of the old private
+contents. Public stores, masks, captures, fences and unknown effects retain
+their ordering. CSE treats mutable scalar versions and induction variables as
+identity-sensitive dependencies, in addition to historical loads/tile state.
+
+Representation verifiers run at kernel, vector and prepared-CPU boundaries.
+Terminal checks reject executable opaque dot/packing operations. Lazy
+`BindTile` descriptors retain historical load identities and can describe an
+original product after its oriented consumer has been lowered; they do not
+evaluate that product. Their structural/type invariants are still checked.
+`verify_ir=False` disables these diagnostic checks, not frontend semantics or
+hardware preflight. Unknown operations conservatively may trap and cannot be
+speculated. An operation contract must explicitly declare `may_trap=False`
+and `speculatable=True` before motion can rely on that promise; effects='none'
+alone is insufficient. Pass reports record each invocation, nested group round
+and reported change separately, including repeated callbacks.
+
+Shared integer facts combine validated extent bounds/alignment with typed DAG
+intervals and congruences. Arithmetic facts are discarded when the complete
+interval can overflow its result dtype. Proven predicates or remainders are
+folded only when their evaluation is independently safe to discard; an actual
+load or shape check cannot disappear merely because its numerical result is
+known. Positive constant integer division/remainder has a separately checked
+nontrapping contract. No floating reassociation is introduced.
+
+The late `cpu-plan-storage` pass computes branch declaration scopes and
+conservative lexical live intervals before emission. `cpu_scratch_reuse`
+(bool, default True) permits compatible private buffers with nonoverlapping
+lifetimes to share a capacity slot; logical storage/read identities remain
+distinct. Historical reads and metadata references extend intervals. Worker,
+hardware, implicit snapshot, state and workspace owners are not merged by this
+planner. Intervals currently cover entire top-level regions, conservatively
+overlapping lifetimes inside a shared nested loop; this is not hierarchical
+loop/branch liveness. C++ printing consumes the frozen placement/slot map and does not
+rediscover branch ownership. Runtime allocation traces describe physical slots.
+Resource inspection lists each logical buffer's `physical_slot` and the
+`memory_lowering.scratch_slots` count. Source dot recipes have already become
+ordinary executable IR, so there is no separate empty matmul-plan catalog.
 Managers snapshot the registry; analyses and traces are local to a run.
 
 ```python
@@ -1138,11 +1205,14 @@ Development formatting is pinned in the `dev` extra. Run
 `python -m ruff format python/vecops/language` or append `--check` in CI;
 the project uses two-space indentation and a 120-column target.
 
-The `cpu-memory` stage runs `cpu-plan-transpose` and `cpu-plan-matmul` on the prepared emission
-catalog. All three managers are frozen before user passes execute. This pass
-recognizes layout conversions, proves dense destinations, selects dtype/ISA
-networks, and prepares SME state-owning alternatives. C++ printing runs no
-passes. `cpu_transpose_cache_block` (multiple of 16, default 128) and
+The `cpu-memory` stage plans transpose, state, grids, register layouts/programs,
+hardware preflight and scratch storage on the prepared emission catalog. All
+stage managers are frozen before user passes execute. Matrix algorithms have
+already expanded into ordinary source recipes; there is no separate opaque
+matmul schedule catalog. Transpose planning recognizes layout conversions,
+proves dense destinations, selects dtype/ISA networks, and prepares SME
+state-owning alternatives. C++ printing runs no passes.
+`cpu_transpose_cache_block` (multiple of 16, default 128) and
 `cpu_transpose_loop_order` (`"input"`/`"output"`, default `"input"`) are CPU
 tuning overrides. Generic streaming multi-output fusion currently yields to
 layout-aware transpose plans rather than bypassing their permutation DAGs.
@@ -1755,6 +1825,20 @@ search paths after that load does not replace those mapped libraries. The
 helper does not modify the conda environment, shell startup files or global
 compiler configuration. Its inputs and resulting runtime identities are
 recorded in the job manifest and participate in compiler/cache identity.
+
+LLVM 19 can also reject a scalar-conditioned scalable BF16 selection with
+`Cannot select ... nxv8bf16 ... select_cc`. Upstream
+[LLVM #128881](https://github.com/llvm/llvm-project/pull/128881) adds the missing
+selection legalization. For the affected ARM transpose validation, both frozen
+DSL versions and the C++ reference use the same LLVM 19 `-O3` configuration
+with `-mllvm=-two-entry-phi-node-folding-threshold=0` and
+`-mllvm=-phi-node-folding-threshold=0`; these are recorded compiler-workaround
+options, not a global optimization default or a general cure for BF16 errors.
+Keep the actual compiler, wrapper contents and options in the native identity.
+LLVM 21 is not a drop-in replacement for the current base-SVE predicate-tuple
+bridge: [LLVM #108008](https://github.com/llvm/llvm-project/pull/108008) changed
+tuple IR representation, while that bridge binds the LLVM 19 vector intrinsics
+directly. Its compatibility must be established separately before upgrading.
 
 The helper requires the explicit bundle/runtime paths and SHA-256 values listed
 in its usage error. Temporary headers are extracted under an owner-only `0700`
@@ -2391,15 +2475,14 @@ retain the original modulo-aligned 2×2/2×4 dispatch and use the one-tile
 schedule for a nonaligned problem; the SME paired candidate additionally
 enables a multi-tile body on nonaligned problems.
 
-`cpu_outline_vector_fallback` is a boolean option, defaulting to `True` for
-SME and `False` for other targets.
+`cpu_outline_vector_fallback` is a boolean option, defaulting to `True`.
 It outlines only the ordinary vector fallback in automatic native dispatch;
 native resident and cache drivers retain their existing inlining. This can
 change native code size and adds a private call when the vector fallback is
-selected. SME measurements support isolating this fallback while retaining
-the original aligned native tile dispatch; x86 measurements showed small
-packed regressions, so x86 keeps the fallback inline. An explicit boolean
-override remains available for target-specific experiments.
+selected. Isolating the cold recipe limits compiler work and register pressure
+in large packing/matmul owners, including dynamic x86 native dispatch. This
+boundary does not change the fallback recipe or the native tile schedule.
+An explicit boolean override remains available for target-specific experiments.
 
 `T.sve.iota`, `join_k_groups`, `broadcast_segment`, `row_pair`, and `mmla` expose pure
 ordinary-SVE register operations. They require complete scalable `pow=0`

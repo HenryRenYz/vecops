@@ -5,7 +5,7 @@
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import make_compiler
+from dsl_test_utils import assert_source_algorithms_lowered, make_compiler
 
 
 @pytest.fixture(scope="module")
@@ -44,4 +44,4 @@ def test_grouped_gemv_math_and_cache_continuation(compiler, column, wide, blocke
   compiled.operator.native(a, b, d, c)
   value = (a @ b + d.astype(np.float32)).astype(dtype)
   np.testing.assert_allclose(c, value / (1 + np.exp(-value)), rtol=3e-5, atol=3e-5)
-  assert ("gemv_group" if blocked else "dsl_recipe_dot_") in compiled.generated_source
+  assert_source_algorithms_lowered(compiled.backend_ir)

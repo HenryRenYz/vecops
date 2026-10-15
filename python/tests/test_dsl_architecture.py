@@ -106,7 +106,6 @@ def test_builtin_loading_is_idempotent_and_order_stable():
     "fuse-loop-regions",
     "fuse-loop-consumers",
     "unroll-serial",
-    "refresh-computation-reuse",
     "plan-software-pipeline",
   ]
 

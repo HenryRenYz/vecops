@@ -192,7 +192,10 @@ def analyze(owner, args=(), kwargs=None):
         size = math.prod(int(scalar(n, environment)) for n in view.shape) * itemsize(view.dtype)
       except (ValueError, KeyError):
         size = None
-      report["scratch"].append({"storage": view.storage, "bytes": size, "scope": "invocation or worker-private"})
+      slot = backend.storage.slots.get(view.storage, view.storage) if backend.storage is not None else view.storage
+      report["scratch"].append(
+        {"storage": view.storage, "physical_slot": slot, "bytes": size, "scope": "invocation or worker-private"}
+      )
   regions, seen = [], set()
   for region in (*owner.vector_ir.regions, *backend.stores.values(), *backend.state_regions.values()):
     if isinstance(region, VectorRegion) and id(region) not in seen:
@@ -201,7 +204,7 @@ def analyze(owner, args=(), kwargs=None):
   report["register_estimates"] = [_liveness(region) for region in regions]
   report["memory_lowering"] = {
     "transpose_plans": len(backend.transposes),
-    "matmul_plans": len(backend.matmuls),
+    "scratch_slots": len(set(backend.storage.slots.values())) if backend.storage is not None else 0,
     "snapshots": len(backend.snapshots),
     "materialized_values": len(owner.kernel_ir.materializations),
   }

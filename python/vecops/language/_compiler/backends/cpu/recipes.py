@@ -52,7 +52,10 @@ def expand_dot_recipes(ir, context):
     raise ValueError("cpu_gemv_k_unroll must be 1, 2 or 4")
 
   native_schedule = context.options.get("cpu_matmul_native_schedule", "default")
-  outline_vector_fallback = context.options.get("cpu_outline_vector_fallback", target.isa == "sme")
+  # Keep the automatic dispatch's cold vector recipe out of the native owner.
+  # Inlining it into a large packing/matmul owner can substantially increase
+  # register pressure even when that fallback is never selected at runtime.
+  outline_vector_fallback = context.options.get("cpu_outline_vector_fallback", True)
   if type(outline_vector_fallback) is not bool:
     raise TypeError("cpu_outline_vector_fallback must be bool")
   if native_schedule not in {"default", "shared-owner", "prefetch", "stream-b", "paired-fringe"}:
@@ -621,8 +624,8 @@ def expand_dot_recipes(ir, context):
                               span=I.literal(32) if family == "amx" else I.binary("mul", I.literal(2),
                                     I.Expr(I.ScalarType("int64"), "streaming_lanes", data=product.type.dtype)))
               a, b = product.args[:2]
-              current = lambda v: current_physical_read(v, block, statement_index)
-              raw = lambda v: current(v) and v.op == "load" and not v.args and v.data.dtype == v.type.dtype and v.data.region is not None
+              current = lambda v, block=block, index=statement_index: current_physical_read(v, block, index)
+              raw = lambda v, current=current: current(v) and v.op == "load" and not v.args and v.data.dtype == v.type.dtype and v.data.region is not None
               if family == "amx":
                 if raw(a):
                   kwargs["raw_a"] = a.data
@@ -925,12 +928,8 @@ def expand_dot_recipes(ir, context):
 
   provenance(ir.body)
   if rewritten:
-    # This adapter follows epilogue discovery, after the first layout fold.
-    # Normalize newly staged windows with that same generic pass, rather than
-    # teach the terminal emitter a recipe-specific projection algorithm.
-    from ...passes.kernel.transforms import fold_value_transforms
-
-    ir = fold_value_transforms(ir, context)
+    # The pipeline's post-recipe cleanup normalizes newly staged windows.
+    # Adapters do not invoke hidden optimization passes.
     vector_count = len(rewritten - sme_rewritten - native_rewritten)
     if vector_count:
       ir.diagnostics.append(f"staged {vector_count} vector dot leaf/leaves from DSL library")

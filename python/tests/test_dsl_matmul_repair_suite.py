@@ -223,7 +223,11 @@ def test_pure_lower_worker_does_not_attest_toolchain_or_watch_sdk(tmp_path, monk
     return
   repair.lower_worker(SimpleNamespace(group_index=0, suite_dir=tmp_path, compress_prelower=compress), source, plan)
   proof = repair.suite.read(tmp_path / "groups/g/lower-proof.json")["dsl"]
-  assert proof["effective_cflags"] == ["-ffp-contract=off"]
+  # Target-independent lowering still retains the host's required compiler
+  # policy flags (for example the ARM SimplifyCFG sink workaround).
+  import vecops
+
+  assert proof["effective_cflags"] == [*vecops.Compiler(target="Generic").snapshot().cflags, "-ffp-contract=off"]
   assert proof["runtime_parallelism"] is True
 
 
@@ -817,5 +821,6 @@ def test_codegen_paths_propagate_to_every_child(tmp_path, monkeypatch):
   for worker in ("lower", "compile", "recover"):
     assert repair.child(args, ["--worker", worker], tmp_path / "child.log", 1) == 0
   assert all(
-    command.count("--allow-codegen-change") == len(paths) and all(path in command for path in paths) for command in commands
+    command.count("--allow-codegen-change") == len(paths) and all(path in command for path in paths)
+    for command in commands
   )

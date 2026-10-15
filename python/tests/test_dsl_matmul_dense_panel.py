@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
-"""Runtime cache packing also binds the prepared register-transpose path."""
+"""Runtime cache packing preserves arithmetic through source-level recipes."""
 import numpy as np
-import vecops
 import vecops.language as T
-from dsl_test_utils import make_compiler
+from dsl_test_utils import assert_source_algorithms_lowered, make_compiler
+from vecops.language._compiler import ir as I
+from vecops.language._compiler.ir.traversal import nodes
 
 
 def test_runtime_dense_panel_transpose_and_global_arithmetic(tmp_path):
@@ -24,4 +25,5 @@ def test_runtime_dense_panel_transpose_and_global_arithmetic(tmp_path):
   c=np.empty((37,45),np.float32)
   compiled.operator.native(a,b,c,**compiled._core.specialization_values)
   np.testing.assert_allclose(c,np.maximum(((a*2+1)@(b*0.5-1))*0.25+1,0),rtol=3e-5,atol=3e-5)
-  assert 'transpose_vec' in compiled.generated_source
+  assert_source_algorithms_lowered(compiled.backend_ir)
+  assert any(isinstance(value, I.Expr) and value.op == "packed_load" for value in nodes(compiled.kernel_ir.body))

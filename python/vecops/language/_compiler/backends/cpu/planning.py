@@ -46,7 +46,6 @@ class PreparedKernel:
   snapshots: object
   reductions: object
   transposes: object
-  matmuls: object
   grids: object = field(default_factory=dict)
   grid_regions: object = field(default_factory=dict)
   states: object = field(default_factory=dict)
@@ -56,6 +55,7 @@ class PreparedKernel:
   register_layout_decisions: object = field(default_factory=dict)
   register_programs: object = field(default_factory=dict)
   hardware: object = field(default_factory=dict)
+  storage: object = None
   pass_trace: list = field(default_factory=list)
 
   def store(self, statement):
@@ -78,7 +78,7 @@ class PreparedKernel:
 def prepare(vectors, *, memory_manager=None):
   """Lower all latent regions using the same per-compilation pass snapshot."""
   manager = vectors.manager
-  stores, axes, snapshots, reductions, transposes, matmuls = {}, {}, {}, {}, {}, {}
+  stores, axes, snapshots, reductions, transposes = {}, {}, {}, {}, {}
   seen = set()
   state_regions = {}
   primitives = {}
@@ -146,7 +146,7 @@ def prepare(vectors, *, memory_manager=None):
   # Registration changes after this point cannot change a source emission.
   prepared = PreparedKernel(
     vectors,
-    *(MappingProxyType(plans) for plans in (stores, axes, snapshots, reductions, transposes, matmuls)),
+    *(MappingProxyType(plans) for plans in (stores, axes, snapshots, reductions, transposes)),
     state_regions=MappingProxyType(state_regions),
     primitives=MappingProxyType(primitives),
   )

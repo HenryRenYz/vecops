@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered, make_compiler
 from test_dsl_sme_packing import _available, _dtype, _expected
 from vecops._arm_vector_state import get_vector_state
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
@@ -70,11 +70,6 @@ def _template(dtype, side, pipeline, parameter_dtype="float32", masked=False, re
     T.pack(value, P, dtype=dtype, side=side, format="sme")
 
   return kernel
-
-
-def _za_body(source):
-  marker = source.index("/* FP32 DAG K-contiguous SME ZA packing */")
-  return source[marker : source.index("/* non-contiguous K preserves vector gather packing */", marker)]
 
 
 def _uncaptured_convert_template(dtype, side):
@@ -181,7 +176,9 @@ def test_uncaptured_folded_za_pack_preserves_narrow_alias_and_zero_padding(dtype
         vecops.TensorMeta((8192,), dtype=dtype),
         **compiled._core.specialization_values,
       )
-      assert "FP32 DAG K-contiguous SME ZA packing" in compiled.generated_source
+      assert_source_algorithms_lowered(compiled.backend_ir)
+      assert any(f"vecops::vec::sme::{op}<" in compiled.generated_source for op in ("load_hor", "write_hor"))
+      assert any(f"vecops::vec::sme::{op}<" in compiled.generated_source for op in ("read_ver", "store_ver"))
       compiled_kernels[side] = compiled
   assert len(collector.requests) == 2
   vecops.compile_batch(collector.requests, parallelism=compiler.jobs, execution_parallelism=1)
@@ -253,7 +250,9 @@ def test_transformed_za_pack_conversions_broadcast_tails_and_noncontiguous_fallb
         for compiled in pair:
           compiled.operator(*arguments, vecops.TensorMeta((8192,), dtype=dtype), **compiled._core.specialization_values)
         assert_no_vec_mask_arrays(pair[0].generated_source)
-        assert "FP32 DAG K-contiguous SME ZA packing" in pair[0].generated_source
+        assert_source_algorithms_lowered(pair[0].backend_ir)
+        assert any(f"vecops::vec::sme::{op}<" in pair[0].generated_source for op in ("load_hor", "write_hor"))
+        assert any(f"vecops::vec::sme::{op}<" in pair[0].generated_source for op in ("read_ver", "store_ver"))
         compiled_kernels[side, pipeline] = pair
   vecops.compile_batch(collector.requests, parallelism=compiler.jobs, execution_parallelism=1)
   shapes = ((0, 5), (5, 0), (1, 1), (panel - 1, kp + 1), (panel, chunk), (2 * panel + 3, 2 * chunk + 1))

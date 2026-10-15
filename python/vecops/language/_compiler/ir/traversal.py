@@ -30,7 +30,7 @@ def walk_unique(expression):
     pending.extend(reversed(value.args))
 
 
-def nodes(value, seen=None):
+def nodes(value, seen=None, *, skip=()):
   """Walk each owned IR node once, including data and shape metadata.
 
   Expression/shape graphs share nodes heavily; recursive tree expansion would
@@ -38,14 +38,16 @@ def nodes(value, seen=None):
   """
   if seen is None:
     seen = set()
+  if isinstance(value, skip):
+    return
   if isinstance(value, (tuple, list)):
     for item in value:
-      yield from nodes(item, seen)
+      yield from nodes(item, seen, skip=skip)
   elif isinstance(value, I.Node) and id(value) not in seen:
     seen.add(id(value))
     yield value
     for field in fields(value):
-      yield from nodes(getattr(value, field.name), seen)
+      yield from nodes(getattr(value, field.name), seen, skip=skip)
 
 
 def children(statement):
@@ -112,12 +114,14 @@ def rewrite_expressions(ir, rewrite, *, with_original=False):
         memo[id(value)] = rewrite(changed, value) if with_original else rewrite(changed)
       return memo[id(value)]
     if isinstance(value, tuple):
-      return tuple(visit(v) for v in value)
+      changed = tuple(visit(v) for v in value)
+      return value if all(a is b for a, b in zip(value, changed)) else changed
     if isinstance(value, I.Block):
       value.statements = [visit(s) for s in value.statements]
       return value
     if is_dataclass(value) and isinstance(value, I.Node):
-      return replace(value, **{f.name: visit(getattr(value, f.name)) for f in fields(value)})
+      changed = {f.name: visit(getattr(value, f.name)) for f in fields(value)}
+      return value if all(item is getattr(value, name) for name, item in changed.items()) else replace(value, **changed)
     return value
 
   visit(ir.body)

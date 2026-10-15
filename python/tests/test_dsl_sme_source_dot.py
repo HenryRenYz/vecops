@@ -8,11 +8,11 @@ import re
 import numpy as np
 import pytest
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered, make_compiler
 from vecops.language._compiler import ir as I
-from vecops.language._compiler.ir.traversal import walk_unique
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.dtypes import ELEMENT_BYTES
+from vecops.language._compiler.ir.traversal import walk_unique
 from vecops.language._debug.interpreter import Interpreter
 from vecops.language._library.sme_matmul import direct_dot
 
@@ -37,7 +37,7 @@ def template(dtype="float32", *, dot=False):
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_direct_mopa_algorithm_uses_source_control_and_strided_vector_loads(dtype):
   artifact = CPUBackend().lower(template(dtype).ir, (), target="SME")
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert artifact.backend_ir.hardware
   assert "vecops::vec::sme::mopa<0" in artifact.source
   assert "vecops::vec::opt::strided" in artifact.source
@@ -49,7 +49,7 @@ def test_direct_mopa_algorithm_uses_source_control_and_strided_vector_loads(dtyp
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_raw_dot_dispatch_stages_direct_mopa_as_dsl_control(dtype):
   artifact = CPUBackend().lower(template(dtype, dot=True).ir, (), target="SME")
-  assert not artifact.backend_ir.matmuls
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assert "staged 1 direct SME dot" in "\n".join(artifact.kernel.diagnostics)
   assert "dsl_recipe_sme_dot_" in artifact.source
   assert "sme::mopa<0" in artifact.source

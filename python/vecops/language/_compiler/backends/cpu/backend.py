@@ -8,7 +8,8 @@ from ....types import TensorType
 from ...environment import freeze
 from ...frontend.parser import lower
 from ...lowering.tile_to_vector import lower_kernel
-from ...pipeline import cpu_memory_pipeline, cpu_vector_pipeline, kernel_pipeline
+from ...passes.manager import registered_passes
+from ...pipeline import cpu_memory_pipeline, cpu_vector_pipeline, kernel_pipeline, load_builtin_passes
 from ..base import LoweredArtifact
 from .cpp.emitter import generate
 from .planning import prepare
@@ -23,9 +24,11 @@ class CPUBackend:
     options.setdefault("cpu_state_vector_reuse", True)
     environment = freeze(options, target=target)
     options["_compiler_environment"] = environment
-    kernel_manager = kernel_pipeline(pipeline, options=options).with_options(options)
-    vector_manager = cpu_vector_pipeline(options=options)
-    memory_manager = cpu_memory_pipeline(options=options)
+    load_builtin_passes()
+    registry = registered_passes()
+    kernel_manager = kernel_pipeline(pipeline, options=options, _registry_snapshot=registry).with_options(options)
+    vector_manager = cpu_vector_pipeline(options=options, _registry_snapshot=registry)
+    memory_manager = cpu_memory_pipeline(options=options, _registry_snapshot=registry)
     annotations = dict(template.annotations)
     parameters = tuple(template.signature.parameters.values())
     for index in out_idx:

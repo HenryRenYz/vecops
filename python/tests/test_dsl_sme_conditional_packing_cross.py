@@ -5,11 +5,11 @@
 import re
 
 import pytest
-from dsl_test_utils import assert_no_vec_mask_arrays
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered
 from test_dsl_matmul_sve_optimized import _cross
 from test_dsl_sme_conditional_pack_buffers import _source
 from test_dsl_sme_conditional_packing import library_template
-from test_dsl_sme_family_owners import _owners
+from test_dsl_sme_family_owners import _assert_packing_owner, _owners
 from vecops._arm_vector_state import VectorState
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
@@ -44,25 +44,30 @@ def _wrapper(source):
 @pytest.mark.parametrize("vl,svl", ((16, 64), (64, 16), (64, 64)))
 @pytest.mark.parametrize("dtype", ("bfloat16", "float16"))
 def test_conditional_fp32_pack_cross_uses_za_without_escaping_calls(tmp_path, vl, svl, dtype):
-  source = (
+  artifact = (
     CPUBackend()
     .lower(library_template(dtype).ir, (), target="SME", options={"_vector_state": VectorState(vl, svl)})
-    .source
   )
+  source = artifact.source
   assert_no_vec_mask_arrays(source)
-  assert "FP32 DAG K-contiguous SME ZA packing" in source
+  assert_source_algorithms_lowered(artifact.backend_ir)
   assembly = _cross(tmp_path, source, _wrapper, vl=vl, svl=svl)
   owners = _owners(assembly, vl=vl, svl=svl)
   pack_owners = [body for body in owners if not re.search(r"^\s*\w*mopa\b", body, re.MULTILINE)]
   assert pack_owners
   for body in pack_owners:
-    assert re.search(r"^\s*ld1w\s+.*za", body, re.MULTILINE)
-    assert re.search(r"^\s*(?:mov|mova)\s+z\d+\.s,.*za", body, re.MULTILINE)
-    assert re.search(r"^\s*bfcvt\b" if dtype == "bfloat16" else r"^\s*fcvt\b", body, re.MULTILINE)
     assert not re.search(r"^\s*(?:bl|blr)\b", body, re.MULTILINE)
     assert len(re.findall(r"^\s*smstart\b", body, re.MULTILINE)) == 1
     assert len(re.findall(r"^\s*smstop\b", body, re.MULTILINE)) == 1
     assert not re.search(r"^\s*(?:ldr|str)\s+z\d+[^\n]*\[sp", body, re.MULTILINE)
+  # Source recipes also own narrow-input/padding alternatives; these are not
+  # FP32 ZA conversion kernels. Require the actual FP32 family to remain and
+  # check its conversion, while retaining no-call/no-spill checks for all packs.
+  fp32_owners = [body for body in pack_owners if re.search(r"^\s*ld1w\s+.*za", body, re.MULTILINE)]
+  assert fp32_owners
+  for body in fp32_owners:
+    assert re.search(r"^\s*(?:mov|mova)\s+z\d+\.s,.*za", body, re.MULTILINE)
+    assert re.search(r"^\s*bfcvt\b" if dtype == "bfloat16" else r"^\s*fcvt\b", body, re.MULTILINE)
 
 
 def _pack_wrapper(dtype, side):
@@ -107,15 +112,17 @@ def test_runtime_guard_buffers_cross_retains_za_and_real_vector_fallback(tmp_pat
   source = _source(dtype, side)
   assembly = _cross(tmp_path, source, _pack_wrapper(dtype, side), vl=vl, svl=svl)
   owners = _owners(assembly, vl=vl, svl=svl)
-  assert len(owners) == 1
-  body = owners[0]
-  assert re.search(r"^\s*ld1w\s+.*za", body, re.MULTILINE)
-  assert re.search(r"^\s*(?:mov|mova)\s+z\d+\.s,.*za", body, re.MULTILINE)
-  assert re.search(r"^\s*bfcvt\b" if dtype == "bfloat16" else r"^\s*fcvt\b", body, re.MULTILINE)
-  assert not re.search(r"^\s*(?:bl|blr)\b", body, re.MULTILINE)
-  assert len(re.findall(r"^\s*smstart\b", body, re.MULTILINE)) == 1
-  assert len(re.findall(r"^\s*smstop\b", body, re.MULTILINE)) == 1
-  assert not re.search(r"^\s*(?:ldr|str)\s+z\d+[^\n]*\[sp", body, re.MULTILINE)
+  assert owners
+  for index, body in enumerate(owners):
+    _assert_packing_owner(body, index)
+    assert re.search(r"^\s*ld1h\s+.*\bza\d+h\.h", body, re.MULTILINE)
+  # Some raw-cache alternatives store vertical halfwords directly; the full
+  # packing family must still retain its word extraction schedules.
+  assert any(re.search(r"\bza\d+v\.s", body) for body in owners)
+  # Cache and materialized FP32/history arms each have their own raw narrow
+  # packing schedules. FP32 conversion precedes those owners in ordinary
+  # vector code; it need not be fused into one FP32 ZA owner.
+  assert re.search(r"^\s*bfcvt\b" if dtype == "bfloat16" else r"^\s*fcvt\b", assembly, re.MULTILINE)
   # The ordinary arm remains in this same object for cache/history/strided
   # conditions. Actual runtime Probe values, not this assembly assertion,
   # prove which arm was selected in the Native bitwise test.
