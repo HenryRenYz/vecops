@@ -16,7 +16,9 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import assert_no_vec_mask_arrays, assert_source_algorithms_lowered, make_compiler
+from vecops.language._compiler import ir as I
+from vecops.language._compiler.ir.traversal import nodes
 
 
 def _sme_available():
@@ -235,7 +237,8 @@ def test_sme_fused_broadcast_prologue_epilogue_and_pipeline(compiler, mode):
     np.testing.assert_array_equal(c, expected)
 
 
-def test_sme_runtime_cache_bypass_keeps_accumulator_and_epilogue(compiler):
+@pytest.mark.parametrize("packing", ("none", "auto"))
+def test_sme_runtime_cache_bypass_keeps_accumulator_and_epilogue(compiler, packing):
   M, N, K = (T.dynamic(lower=0) for _ in range(3))
 
   @T.template
@@ -245,16 +248,55 @@ def test_sme_runtime_cache_bypass_keeps_accumulator_and_epilogue(compiler):
     D: T.Tensor((M, N), dtype="float32"),
     C: T.Tensor((M, N), dtype="float32", access="output"),
   ):
-    value = T.library.matmul((A, B), C, acc=T.load(D), implementation="sme", packing="none")
+    value = T.library.matmul((A, B), C, acc=T.load(D), implementation="sme", packing=packing)
     T.store(C, T.max(value * 0.5 + 1, 0))
 
   compiled = T.compile(kernel, compiler=compiler)
   assert_no_vec_mask_arrays(compiled.generated_source)
-  assert "bypass cache panels for small runtime SME products" in compiled.generated_source
+  assert_source_algorithms_lowered(compiled.backend_ir)
+
+  def matrix_calls(block):
+    return [node for node in nodes(block) if isinstance(node, I.ArchitectureCall) and node.operation == "sme.mopa"]
+
+  def cache_traversals(block):
+    # Cache phases use mutable, positive block steps. Register-tile loops
+    # and private packing loops do not have this guarded scalar step.
+    return [
+      node
+      for node in nodes(block)
+      if isinstance(node, I.For)
+      and node.step.op == "max"
+      and any(I.constant(argument) == 1 for argument in node.step.args)
+      and any(argument.op == "local" for argument in node.step.args)
+      and matrix_calls(node.body)
+    ]
+
+  resident = [
+    node
+    for node in nodes(compiled.kernel_ir.body)
+    if isinstance(node, I.If)
+    and any(isinstance(value, I.Expr) and value.op == "cache_bytes" and value.data == "L2"
+            for value in nodes(node.condition))
+  ]
+  if packing == "auto":
+    assert len(resident) == 1
+    assert matrix_calls(resident[0].body) and matrix_calls(resident[0].otherwise)
+    assert not cache_traversals(resident[0].body)
+    assert cache_traversals(resident[0].otherwise)
+  else:
+    # Explicit packing policy retains the cache schedule even for small
+    # products; only automatic packing selects the resident leaf at runtime.
+    assert not resident
+    assert cache_traversals(compiled.kernel_ir.body)
   rng = np.random.default_rng(89)
-  # The same Dynamic artifact visits zero M/N/K, the small whole-problem
-  # branch and the large cache-panel branch (including repeated K phases).
-  for m, n, k in ((0, 5, 7), (5, 0, 7), (5, 7, 0), (16, 16, 8), (19, 23, 17), (129, 129, 513)):
+  # Preserve all original zero/tail/alias oracles for both policies. At the
+  # target's 768 KiB L2, 129x129x513 still fits the automatic resident leaf.
+  # The extra long-K problem exceeds both that resident budget and the
+  # whole-K panel budget, exercising the cache driver's repeated K phases.
+  shapes = ((0, 5, 7), (5, 0, 7), (5, 7, 0), (16, 16, 8), (19, 23, 17), (129, 129, 513))
+  if packing == "auto":
+    shapes += ((129, 129, 16385),)
+  for m, n, k in shapes:
     a = _matrix(rng, (m, k), "bfloat16")
     b = _matrix(rng, (k, n), "bfloat16", "F")
     d = _matrix(rng, (m, n), "float32")

@@ -49,7 +49,12 @@ def test_fused_byte_pipeline_is_platform_specific():
 
 
 @pytest.mark.parametrize('side',['A','B'])
-def test_amx_public_oracle_matches_element_abi(side):
+def test_amx_public_oracle_matches_element_abi(side, monkeypatch):
+  # This byte oracle checks the AMX contract on every test host. Select
+  # x86 in both the oracle dispatcher and its shared geometry provider;
+  # otherwise an ARM host correctly returns the unrelated SME layout.
+  monkeypatch.setattr('dsl_matmul_supplemental_pack.is_arm',lambda:False)
+  monkeypatch.setattr('dsl_benchmark_utils.is_arm',lambda:False)
   row={'native':'int8','pipeline':'identity','side':side}
   logical=np.arange(19*67,dtype=np.int16).astype(np.int8).reshape(19,67)
   actual=oracle(row,logical)
