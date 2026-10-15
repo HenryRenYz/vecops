@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
-"""Execute every concrete ARM source registration, with auditable coverage.
+"""Execute source registrations for a selected architecture, with auditable coverage.
 
-The six registration cohorts are distinct from shape/vocabulary indexes. Every
+The legacy six cohorts and complete-profile ScenarioBench cohort are distinct
+from shape/vocabulary indexes. Every
 source row is expanded across its declared metadata and packing modes; source
 labels are retained even when the same executable is shared. Offline packing is
 validated outside timing, online packing is inside both native repeat loops.
@@ -54,9 +55,10 @@ COHORTS = {
   "policy": "MatmulPolicyExpanded",
   "fusion": "MatmulFusionExpanded",
   "orientation": "MatmulOrientation",
+  "scenario": "MatmulScenarioExpanded",
 }
 PACKING = ("raw", "packeda", "packedb", "packedab", "onlinepackeda", "onlinepackedb", "onlinepackedab")
-FAMILIES = ("Automatic", "SmallVector", "PackedDot", "RuntimeQuantInt8")
+FAMILIES = ("Automatic", "SmallVector", "PackedDot", "RuntimeQuantInt8", "ResidualSplit")
 POLICIES = ("Automatic", "ExactCover", "FourRegions")
 
 
@@ -89,6 +91,8 @@ def reference_selectors(case):
       family = "PackedDot"
     elif "RuntimeQuant" in config:
       family = "RuntimeQuantInt8"
+    elif "ResidualSplit" in config:
+      family = "ResidualSplit"
     elif config not in ("Automatic", "family_selection::Automatic", "historical_auto"):
       raise ValueError(f"unresolved C++ family selector: {config!r}; {case.declaration}")
   elif case.catalog == "MatmulPolicyExpanded":
@@ -119,12 +123,26 @@ class SourceScenario(Scenario):
     return reference_selectors(self.case)
 
   @property
+  def reference_bound_invocation(self):
+    """Match the source benchmark's call lifecycle, not merely its operands."""
+    return self.case.catalog in {"MatmulScenarioExpanded", "MatmulFusionExpanded", "MatmulPackedExpanded"}
+
+  @property
+  def reference_compensated_pack(self):
+    """The original x86 online-B pack also updates the accumulator sidecar."""
+    return (
+      self.reference_bound_invocation and self.online and self.pack_b
+      and self.case.arm_condition.startswith("x86 source")
+      and self.case.input_pipeline_a in {"AsymmetricQuantize4Zp3", "PrequantizedAsymmetricZp3", "RuntimePerRowAsymmetricQuantize"}
+    )
+
+  @property
   def key(self):
     return f"{super().key}/{self.packing}/{self.reference}/SVL={self.case.svl_bytes}"
 
   @property
   def compilation_key(self):
-    return super().compilation_key, self.packing, self.reference
+    return super().compilation_key, self.packing, self.reference, self.reference_bound_invocation, self.reference_compensated_pack
 
   @property
   def execution_id(self):
@@ -166,6 +184,7 @@ def source_templates(scenario, *, blocks=(None, None, None)):
   at, bt, ct = scenario.orientation
   astride, bstride, cstride = (1, M) if at else (K, 1), (1, K) if bt else (N, 1), (1, M) if ct else (N, 1)
   DM = 1 if scenario.broadcast_prior else M
+  compensated_pack = scenario.reference_compensated_pack
   if scenario.batched:
     AT = T.Tensor((Batch, M, K), (0 if scenario.shared_a else M * K, *astride), ad)
     BT = T.Tensor((Batch, K, N), (0 if scenario.shared_b else K * N, *bstride), bd)
@@ -183,6 +202,13 @@ def source_templates(scenario, *, blocks=(None, None, None)):
   pa, pb, online = scenario.pack_a, scenario.pack_b, scenario.online
   batched, flatten, flat_prior = scenario.batched, scenario.flatten_batch, scenario.shared_prior
   level, swap, prior = scenario.level, T.Const(scenario.swap), scenario.has_prior
+  # Original benchmark vectors remain mutable even when passed to tensor::input.
+  # Preserve the DSL's read-only prior and give only the C++ adapter the source
+  # benchmark's pointer qualification. Ordinary compute only reads this prior;
+  # compensated online packing explicitly updates its accumulator sidecar.
+  CPPDT = T.Tensor(DT.shape, DT.strides, dd, access="inout") if prior else DT
+  if compensated_pack:
+    DT = CPPDT  # This small online-packing domain writes its sidecar each repeat.
   format_ = packing_geometry(na)[0]
   ia, ib, out = case.input_pipeline_a, case.input_pipeline_b, case.output_pipeline
   qa, qb = ia in INPUTS[1:4], ib in INPUTS[1:4]
@@ -219,14 +245,19 @@ def source_templates(scenario, *, blocks=(None, None, None)):
     return T.load(B, dtype=nb)
 
   @T.func
-  def packing(A, B, RQ, Z, AP, BP):
+  def packing(A, B, RQ, Z, AP, BP, D):
     if pa:
       T.pack(input_a(A, RQ, Z), AP, side="A", format=format_, dtype=na)
     if pb:
-      if batched:
-        T.pack(input_b(B[0]), BP, side="B", format=format_, dtype=nb)
+      matrix_b = B[0] if batched else B
+      if compensated_pack:
+        destination = D[0] if batched else D
+        sidecar = T.alloc((matrix_b.shape[1],), dtype="int32")
+        zero_point = T.element_at(T.load(Z), (0, 0)) if ia == "RuntimePerRowAsymmetricQuantize" else 3
+        T.library.pack_b_compensated(input_b(matrix_b), BP, sidecar, zero_point=zero_point, format=format_)
+        T.store(destination, T.broadcast_to(T.load(sidecar), destination.shape))
       else:
-        T.pack(input_b(B), BP, side="B", format=format_, dtype=nb)
+        T.pack(input_b(matrix_b), BP, side="B", format=format_, dtype=nb)
 
   @T.func
   def compute(A, B, C, D, S, SC, SQ, RQ, RD, W, Z, AP, BP):
@@ -287,7 +318,7 @@ def source_templates(scenario, *, blocks=(None, None, None)):
     ):
       for _iteration in T.serial(repeat, unroll=1):
         if only_pack or online:
-          packing(A, B, RQ, Z, AP, BP)
+          packing(A, B, RQ, Z, AP, BP, D)
         if not only_pack:
           if flatten:
             a = T.reshape(A, (A.shape[0] * A.shape[1], A.shape[2]))
@@ -312,13 +343,15 @@ def source_templates(scenario, *, blocks=(None, None, None)):
     )
     family, policy = scenario.reference
     ReferenceFamily, ReferencePolicy = T.Const(FAMILIES.index(family)), T.Const(POLICIES.index(policy))
+    ReferenceBoundInvocation = T.Const(scenario.reference_bound_invocation)
+    ReferenceCompensatedPack = T.Const(compensated_pack)
 
     @T.template(source=ROOT / "benchmarks/dsl_matmul_source_reference.cpp")
     def cpp(
       A: AT,
       B: BT,
       C: CT,
-      D: DT,
+      D: CPPDT,
       S: T.Tensor((1, 1), dtype=acc),
       SC: T.Tensor((1, N), dtype=acc),
       SQ: T.Tensor((1, N), dtype="float32"),
@@ -332,6 +365,8 @@ def source_templates(scenario, *, blocks=(None, None, None)):
     ):
       NativeA, NativeB, InputPipelineA, InputPipelineB, OutputPipeline, HasPrior, BroadcastPrior, SwapAB  # noqa: B018
       PackA, PackB, OnlinePack, OnlyPack, SharedB, ReferenceFamily, ReferencePolicy  # noqa: B018
+      ReferenceBoundInvocation  # noqa: B018
+      ReferenceCompensatedPack  # noqa: B018
 
     return dsl, cpp
 
@@ -390,6 +425,13 @@ def audit_document(cases, executions):
         "dsl_matmul_fusion_reference.cpp",
         "dsl_matmul_atom.h",
         "dsl_matmul_catalog.py",
+        "dsl_matmul_artifact_ab.py",
+        "dsl_matmul_full_suite.py",
+        "dsl_benchmark_selection.py",
+        "dsl_matmul_repair_suite.py",
+        "dsl_timing.py",
+        "dsl_benchmark_utils.py",
+        "dsl_transpose.py",
       )
     },
     "source_rows": dict(Counter(case.catalog for case in cases)),
@@ -404,6 +446,8 @@ def audit_document(cases, executions):
         packing=s.packing,
         reference_family=s.reference[0],
         reference_policy=s.reference[1],
+        reference_bound_invocation=s.reference_bound_invocation,
+        reference_compensated_pack=s.reference_compensated_pack,
         batch_strategy="flatten" if s.flatten_batch else "serial",
       )
       for s in executions
@@ -427,6 +471,8 @@ def result_metadata(scenario):
     "packing": scenario.packing,
     "reference_family": scenario.reference[0],
     "reference_policy": scenario.reference[1],
+    "reference_bound_invocation": scenario.reference_bound_invocation,
+    "reference_compensated_pack": scenario.reference_compensated_pack,
     "batch_strategy": "flatten" if scenario.flatten_batch else "serial",
   }
 
@@ -536,6 +582,9 @@ def main(argv=None):
     "--chunk-index", type=int, help="Execute one explicit chunk; other rows remain unexecuted in the manifest"
   )
   parser.add_argument("--svl-bytes", type=int, help="Audit geometry; execution requires the actual current SVL")
+  parser.add_argument("--architecture", choices=("arm", "x86"), default="arm")
+  parser.add_argument("--feature", action="append", help="explicit target HAS_* ISA feature")
+  parser.add_argument("--complete-registration", action="store_true", help="include ScenarioBench and all batched packed metadata registrations")
   parser.add_argument("--list", action="store_true")
   parser.add_argument(
     "--verify",
@@ -556,7 +605,7 @@ def main(argv=None):
   if args.chunk_size < 1 or args.chunk_index is not None and args.chunk_index < 0:
     raise ValueError("chunk size must be positive and index nonnegative")
   validate_pipeline_contract()
-  cases = load_cases(svl_bytes=args.svl_bytes)
+  cases = load_cases(svl_bytes=args.svl_bytes, architecture=args.architecture, features=args.feature, complete_registration=args.complete_registration)
   all_scenarios = tuple(scenarios(cases, levels=args.level, batch_strategy=args.batch_strategy))
   selected = select_scenarios(
     all_scenarios,

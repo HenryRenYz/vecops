@@ -1,0 +1,22 @@
+{
+  "architecture": "x86",
+  "registration_ids": [
+    "a86c7d7cd84839d02c2fe579",
+    "db404015281138d62cabae39",
+    "825b843ac436c38a284631e6",
+    "96d189d56f5faa993935e311",
+    "ed6d091174b6d022ec6c79b0",
+    "e6d28888e5da77e9ff504240",
+    "0017c3c47cf0d5155943fe29",
+    "838249f38d842c79f0da0dca"
+  ],
+  "tier": "smoke",
+  "evidence": {
+    "main_plan": "/home/renyz/project/vecops-neo/build-matmul-opt-20261015/x86-packed-checked/plan.json",
+    "main_plan_sha256": "cc2a432e7bdaa1fa1d9af108dd1d1956c926e7548cef8593313c660ba266f9a1",
+    "ledger_sha256": "96c55ad97109af05e610fa10bde0b54401878b160b4076f45824c09d08f77571",
+    "supplemental_summary": "/home/renyz/project/vecops-neo/build-matmul-opt-20261015/x86-supplemental-final-summary.json",
+    "supplemental_sha256": "7b06f22a1f280a879f01f79579614f06e8aa322302fb18878e5cc4c879285cbb",
+    "sentinels_sha256": "1dd7b0ecdf1edd659ea84f9dcc7f371c2ebf23ef67d70d8bf74422f8397b87ea"
+  }
+}

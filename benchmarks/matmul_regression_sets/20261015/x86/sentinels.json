@@ -1,0 +1,1354 @@
+{
+  "architecture": "x86",
+  "main_pins": {
+    "smoke": [
+      "2997be040868918d5e155f6d",
+      "1123aa231ba7cbc99a256e4c",
+      "0beb0dc2155f54aeeab95614",
+      "c773788b469265c30cba5db1",
+      "97334921fbbdb234a94692cb",
+      "909dca8e9d2a6e2c6916d147",
+      "89cc69ab82a68b23f9f08de6",
+      "7ef8e37f295976441356c7c7",
+      "73dee04c596fbfeb2c4276e6",
+      "e58483b6f9421b13067c2802",
+      "02d6400c99e7767abc35cb41",
+      "067199656473d21152c22c03",
+      "ec7fd14b40b2f0df91068cf8"
+    ],
+    "extended": []
+  },
+  "compile_stress_ids": [],
+  "risks": {
+    "f18e5f3a50bd0b1b7003eca6": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "5a0fe87c8b823f3cc9d2b9e2": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "2abfd114425fa5b52d4749c5": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "3199b5433b0d1d527167c456": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "c03783bf507c83ed5011da6e": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "eaa52460a726821bf0526334": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "fbe449c9726efed943794edc": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "e6425b93d5b9c685e30d657f": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "ec79fb1baf591cb7042cb19d": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "654cf3b7b5e205b30f9b1b83": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "c41c7309d959633728d81b04": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "9de2c865fefa13ae385d66e6": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "278ae2649772b9291d865346": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "45550281319f55a2b5ebc142": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "5c0ed7b07a66315300b844af": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "3c966b09d9139d8353e62397": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "418c3cf1e6ad9c39520baf1d": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "4c3e5bf67bd33f6a879b01c5": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "5bd51d4a2f236af47fd70238": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "cc5123387d2b0bff0818c0d0": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "74ec13ef7f83c8e343d190ce": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "eaa36b9edf45bded7ec5af83": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "0cde0ea3b0566aa50b154c06": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "067199656473d21152c22c03": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "b040d097a41eea756e3f87bc": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "947a23ed1b614e6c61dfe40b": [
+      "restored:compute:failed:int8:int8:raw"
+    ],
+    "ec7fd14b40b2f0df91068cf8": [
+      "restored:compute:failed:int8:uint8:packedab",
+      "historical_slowdown:packing"
+    ],
+    "aaacc5518ad9824dcd41454f": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "02d6400c99e7767abc35cb41": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "7863e2620f8814d035996388": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "8c964917f6d1a8a9a11b50d2": [
+      "restored:compute:failed:int8:uint8:raw"
+    ],
+    "89cc69ab82a68b23f9f08de6": [
+      "historical_slowdown:packing"
+    ],
+    "2997be040868918d5e155f6d": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "7ef8e37f295976441356c7c7": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "73dee04c596fbfeb2c4276e6": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "e58483b6f9421b13067c2802": [
+      "historical_slowdown:packing"
+    ],
+    "2c85277f4dbbd1765bb67c89": [
+      "historical_slowdown:packing"
+    ],
+    "92586dd9241229c94b28f4ee": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "d4d27f6eaccbb63c74eb44ac": [
+      "historical_slowdown:packing"
+    ],
+    "d21c5c7cb33f088b0620fd96": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "ecfcc0d6c0a2387c3bf141ca": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "ec4d51cbedab51acdaa850e3": [
+      "historical_slowdown:packing"
+    ],
+    "e6465f530e8cbf5d06afa7de": [
+      "historical_slowdown:packing"
+    ],
+    "1123aa231ba7cbc99a256e4c": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "f44cc587fa7d4bc7f00b9646": [
+      "historical_slowdown:compute"
+    ],
+    "0beb0dc2155f54aeeab95614": [
+      "historical_slowdown:compute"
+    ],
+    "3bc47212eb260f3508e0e1df": [
+      "historical_slowdown:compute"
+    ],
+    "1ea34ad58cd7d739ef66916f": [
+      "historical_slowdown:compute"
+    ],
+    "f603fe13bf0e38a425b265f8": [
+      "historical_slowdown:compute"
+    ],
+    "6790fb7a6171fde922b720c5": [
+      "historical_slowdown:compute"
+    ],
+    "65cb2e54a8ee07ec698bff8b": [
+      "historical_slowdown:compute"
+    ],
+    "cb3c680dff4d8a40d561ad90": [
+      "historical_slowdown:compute"
+    ],
+    "bd950d37faeeae229b29e100": [
+      "historical_slowdown:compute"
+    ],
+    "58de6926c276d0dced5b055b": [
+      "historical_slowdown:compute"
+    ],
+    "59c40483d77d639b3f0c9688": [
+      "historical_slowdown:compute"
+    ],
+    "2dcc423ebd8ede2a0165c916": [
+      "historical_slowdown:compute"
+    ],
+    "b28d72df81e6265490796860": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "26aa4972c9b1919fef1ad093": [
+      "historical_slowdown:compute"
+    ],
+    "1604d08d77229b30fcd7f204": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "594bf149ea3cb256fcd4a99b": [
+      "historical_slowdown:compute"
+    ],
+    "cc4b15f3786739ff048bce95": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "2629c29b61472a87d4318482": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "fd6ef8f0a52316cefc854aeb": [
+      "historical_slowdown:compute"
+    ],
+    "d5c027551e36fcc54ad8da8e": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "2f7867e16fd359236c8bb7f4": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "ea55edf65f96bb4650a1ad28": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "1e2ce06b57668c0374b48c3f": [
+      "historical_slowdown:compute"
+    ],
+    "55d2f57c82d3751cf955a851": [
+      "historical_slowdown:compute"
+    ],
+    "19f2d2dce9b36c234e60b170": [
+      "historical_slowdown:compute"
+    ],
+    "50fc660531283e050798cdbd": [
+      "historical_slowdown:compute"
+    ],
+    "61251402fdf090d37b74d4dd": [
+      "historical_slowdown:compute"
+    ],
+    "10ea24721e26702d0fa865dd": [
+      "historical_slowdown:compute"
+    ],
+    "d8ff63312bb9f0f227443152": [
+      "historical_slowdown:compute"
+    ],
+    "a63e72039eb6c3bd5c95f996": [
+      "historical_slowdown:compute"
+    ],
+    "f0d9faefba16afb038405734": [
+      "historical_slowdown:compute"
+    ],
+    "bf621187adb49782820a876c": [
+      "historical_slowdown:compute"
+    ],
+    "935f8e0ebca6e6fabb5462d5": [
+      "historical_slowdown:compute"
+    ],
+    "83f89a1b979ee15ba1f7e355": [
+      "historical_slowdown:packing"
+    ],
+    "e4ae276bccc64efc9c22a705": [
+      "historical_slowdown:compute"
+    ],
+    "6a2d57195fc98b4c1e3c6fa1": [
+      "historical_slowdown:packing"
+    ],
+    "3567543e4544943255fe5b65": [
+      "historical_slowdown:compute"
+    ],
+    "58a50208404928e54da9eb94": [
+      "historical_slowdown:compute"
+    ],
+    "9ca762308dbebce511d0e030": [
+      "historical_slowdown:compute"
+    ],
+    "37b77dfb17a2948b514e8c7d": [
+      "historical_slowdown:compute"
+    ],
+    "46dcc5d0ae7f83871dc41fbc": [
+      "historical_slowdown:compute"
+    ],
+    "07c420bd0644fdfc49aeb586": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "f7a21645afe8bb3d5deb9e40": [
+      "historical_slowdown:compute"
+    ],
+    "f4bc545d80339021cc8dc28b": [
+      "historical_slowdown:compute"
+    ],
+    "091e91323e034eb292322a00": [
+      "historical_slowdown:compute"
+    ],
+    "78e2d1effdbb08b8b236d136": [
+      "historical_slowdown:packing"
+    ],
+    "c76a6283e315c58e234a0aa4": [
+      "historical_slowdown:packing"
+    ],
+    "c0c8d70bcc0ebc8bcd7f867b": [
+      "historical_slowdown:compute"
+    ],
+    "196b029b9613d5f10bb680c4": [
+      "historical_slowdown:packing"
+    ],
+    "05d5da3a7fb2b883deb73c34": [
+      "historical_slowdown:packing"
+    ],
+    "961bc8b4215b4825dc13367e": [
+      "historical_slowdown:packing"
+    ],
+    "b71816e4c8eebc4f12470c0f": [
+      "historical_slowdown:compute"
+    ],
+    "fe5067c5120e71447f818799": [
+      "historical_slowdown:packing"
+    ],
+    "dbac281966293c1e793eda7e": [
+      "historical_slowdown:packing"
+    ],
+    "3b6736bd6cdf6f60f73b524a": [
+      "historical_slowdown:packing"
+    ],
+    "896fd89b970da8a0fb291ca3": [
+      "historical_slowdown:compute"
+    ],
+    "776d63668cd11f023c37e92f": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "30e1c14feedd8f793c7b4b22": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "c53459e4932e53d3c7ecca2f": [
+      "historical_slowdown:compute"
+    ],
+    "aaaac7570119d97ae19b04bc": [
+      "historical_slowdown:packing"
+    ],
+    "1fb5dfa6025f3912dc8ee200": [
+      "historical_slowdown:packing"
+    ],
+    "d177d1428192ef9fb8d6a496": [
+      "historical_slowdown:packing"
+    ],
+    "70a45d9b7df1d13cd4f5fc2a": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "cd3720e301904eb2885bd957": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "98fa9fb4fc31805fd60f2182": [
+      "historical_slowdown:packing"
+    ],
+    "8550fed0f4217b42ba1fd404": [
+      "historical_slowdown:compute"
+    ],
+    "8a8470121c7b5c25af52d95c": [
+      "historical_slowdown:packing"
+    ],
+    "93c3090b7fcde54a7a1d2b53": [
+      "historical_slowdown:packing"
+    ],
+    "d5a5100812b399b77121e3ff": [
+      "historical_slowdown:packing"
+    ],
+    "5fbf682b7f2c122677024f51": [
+      "historical_slowdown:packing"
+    ],
+    "b76deea9c96ee3aff7f2ade4": [
+      "historical_slowdown:packing"
+    ],
+    "9c3c8e60151187fff7d9913b": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "af247b348aa4abda5273dfb0": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "8671bd2f37f99754e2348134": [
+      "historical_slowdown:packing"
+    ],
+    "add39cb0c9f3eac29c69d81a": [
+      "historical_slowdown:packing"
+    ],
+    "a3ab67bf89ba8335bad37307": [
+      "historical_slowdown:packing"
+    ],
+    "3be27f1027ea2701979e7577": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "c0c32cca2f14f92d45c71751": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "4f6184593ef7d6d4a8e7ef48": [
+      "historical_slowdown:packing"
+    ],
+    "3d126d2b867dd20014190002": [
+      "historical_slowdown:packing"
+    ],
+    "99d4d73b7711f038877f94f8": [
+      "historical_slowdown:packing"
+    ],
+    "6dddff5bf9c59dbf58982b94": [
+      "historical_slowdown:packing"
+    ],
+    "22ded50a21de41530ab09d04": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "fc463c835289c13cbe40deaa": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "6ac58d8e54461bc246c1160d": [
+      "historical_slowdown:packing"
+    ],
+    "a3bb57734fd23cb39a0713da": [
+      "historical_slowdown:packing"
+    ],
+    "5dd2eab92a00b172902aac1c": [
+      "historical_slowdown:packing"
+    ],
+    "cc0bd0c9a31016fc87fa6eef": [
+      "historical_slowdown:packing"
+    ],
+    "b55c4fd05c8af61e8785cb54": [
+      "historical_slowdown:packing"
+    ],
+    "c29f235c1feca593f038bced": [
+      "historical_slowdown:compute"
+    ],
+    "e85ea08c11f37ad818d5aa11": [
+      "historical_slowdown:compute"
+    ],
+    "8db08c4d27f3486ef242adf9": [
+      "historical_slowdown:packing"
+    ],
+    "60a82792d118a473fc966442": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "22d608ff5c8bb19c542a8a79": [
+      "historical_slowdown:packing"
+    ],
+    "8c9dd2ac4a58428034f1af07": [
+      "historical_slowdown:packing"
+    ],
+    "38f1e998d9cf52b8ed36aeb6": [
+      "historical_slowdown:packing"
+    ],
+    "a6ee4fa450370859e0a60eab": [
+      "historical_slowdown:packing"
+    ],
+    "f934d6b0039d39ac41258cc0": [
+      "historical_slowdown:packing"
+    ],
+    "064f09f558d9aeee45cc3729": [
+      "historical_slowdown:packing"
+    ],
+    "10324641a1df1e057fe0041f": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "efa6471033e2e93c7c34b038": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "953f0822915d6d431d369474": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "bfefe5f0fbdf0586ff7df582": [
+      "historical_slowdown:packing"
+    ],
+    "856729a0356f8ced6245e911": [
+      "historical_slowdown:packing"
+    ],
+    "19d52e47c6d5855f04d43bec": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "82ba7b7949a0fb83def826cd": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "89900251b9ceb3115ccc5c2c": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "a32c102a59d81f974c829cae": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "f02934a0c7f0ab4b2c262189": [
+      "historical_slowdown:packing"
+    ],
+    "3e7765b47df42ee6296685df": [
+      "historical_slowdown:packing"
+    ],
+    "0fb10dc1a4633ed517a935b5": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "b7365fe0c03d8d6a47f16d18": [
+      "historical_slowdown:packing"
+    ],
+    "fcbe0b9e066fde69383d08f1": [
+      "historical_slowdown:packing"
+    ],
+    "aefdf99e5a3ad71858d6fe40": [
+      "historical_slowdown:packing"
+    ],
+    "3ed0fdb8087d94146979ec33": [
+      "historical_slowdown:packing"
+    ],
+    "389fcf18dd4376ef658c6dad": [
+      "historical_slowdown:packing"
+    ],
+    "0abb12980a8fec28ba554a52": [
+      "historical_slowdown:packing"
+    ],
+    "5a21fb2e2aaaf94672346e2b": [
+      "historical_slowdown:packing"
+    ],
+    "6df6c76f92402b9aef734b23": [
+      "historical_slowdown:packing"
+    ],
+    "a0d4d590880f1ff91dc64d58": [
+      "historical_slowdown:compute"
+    ],
+    "3826408aa1e8589bf66e0f9d": [
+      "historical_slowdown:compute"
+    ],
+    "1a859c708b34666687739e36": [
+      "historical_slowdown:packing"
+    ],
+    "ec35be0506f8ed382384fe1f": [
+      "historical_slowdown:packing"
+    ],
+    "26cc31c7ea2256fcc1090417": [
+      "historical_slowdown:packing"
+    ],
+    "b4b53d1218e9159f2b88dd00": [
+      "historical_slowdown:compute"
+    ],
+    "bec1475b4878e754dc0e52c6": [
+      "historical_slowdown:packing"
+    ],
+    "3323ceef9572aaf014ee6f7e": [
+      "historical_slowdown:packing"
+    ],
+    "cd86cc46dbd3cbdd6bea91c6": [
+      "historical_slowdown:packing"
+    ],
+    "77d8f70d2077aac02f346ffe": [
+      "historical_slowdown:packing"
+    ],
+    "83cf394b5c8ef6d67c327d99": [
+      "historical_slowdown:packing"
+    ],
+    "6f57dffd34de536a1463bcc5": [
+      "historical_slowdown:packing"
+    ],
+    "af65c7de6f3671664ee8a7e5": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "902d783af0af6bebffc1b3b7": [
+      "historical_slowdown:packing"
+    ],
+    "9084ff64ab1779ede6a26127": [
+      "historical_slowdown:packing"
+    ],
+    "2712b57e95b2d2559544d571": [
+      "historical_slowdown:compute"
+    ],
+    "cc80a4b8ab49d27579c3431b": [
+      "historical_slowdown:packing"
+    ],
+    "3b6518c6a20fd40cbc7d9276": [
+      "historical_slowdown:packing"
+    ],
+    "1bd52d5c4085ceb1c33463c9": [
+      "historical_slowdown:packing"
+    ],
+    "10d0a8247e99fe936f30d63c": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "6f69fcf8eef55d2aad09e952": [
+      "historical_slowdown:packing"
+    ],
+    "b6b6b6c0918f98793bf92ece": [
+      "historical_slowdown:packing"
+    ],
+    "50e0c3ba14edc530ee1f8f8a": [
+      "historical_slowdown:packing"
+    ],
+    "4f52e8882bd53ef6cb6d5b58": [
+      "historical_slowdown:packing"
+    ],
+    "d006be90222b4d45dc7207c4": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "72b6c5f3fd92ed683542610b": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "667a350d655d65093db642f5": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "7af558c9b8b77d504afb5a65": [
+      "historical_slowdown:packing"
+    ],
+    "b98e3d2c11ef498cf3aeec93": [
+      "historical_slowdown:packing"
+    ],
+    "aea5c6a8ad2d84946d82674b": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "f667941ee1c850e08fb6b911": [
+      "historical_slowdown:packing"
+    ],
+    "f2b0afe1ae4e08ff95f1522e": [
+      "historical_slowdown:packing"
+    ],
+    "a9dd3e5fe4dfa23af1ee65ea": [
+      "historical_slowdown:packing"
+    ],
+    "7a4983d9124f2582c917d18f": [
+      "historical_slowdown:packing"
+    ],
+    "36756c7df1d1bc5a5c19ab12": [
+      "historical_slowdown:packing"
+    ],
+    "8f87e2f5e66e51dcaed20dc3": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "da84fc1f0e26dd172debbd3d": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "20be2c4d53ec2763713cca25": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "95acd2ef3693d2431ffd278e": [
+      "historical_slowdown:packing"
+    ],
+    "d02ad70b4f19f22f7a6757f0": [
+      "historical_slowdown:packing"
+    ],
+    "48a6d684c059b29077404d83": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "d2dae65006cbc161a20bbabd": [
+      "historical_slowdown:packing"
+    ],
+    "01d6c8116360b47c6560b065": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "e96dff4a0b43f00e89a40c2f": [
+      "historical_slowdown:packing"
+    ],
+    "376a0f24d13b6b64ec36c95f": [
+      "historical_slowdown:compute",
+      "historical_slowdown:packing"
+    ],
+    "e62dd0707a2a9201df0e4bc6": [
+      "historical_slowdown:packing"
+    ],
+    "f8c1c93ec5a809e9f273af9a": [
+      "historical_slowdown:compute"
+    ],
+    "fe92d91c0477f40f3c8991ec": [
+      "historical_slowdown:compute"
+    ],
+    "209d662ce8c1a3585235f852": [
+      "historical_slowdown:packing"
+    ],
+    "dc46af5afb27767be1ae4fe1": [
+      "historical_slowdown:compute"
+    ],
+    "b988feacc0f1a4e97b98546c": [
+      "historical_slowdown:packing"
+    ],
+    "a4b40f7757c4b022bc70beef": [
+      "historical_slowdown:compute"
+    ],
+    "cf899883cc71ff04097f31d0": [
+      "historical_slowdown:packing"
+    ],
+    "c80f5389f73fc961cdd208d3": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "9e13f48f12c407e54f37673b": [
+      "historical_slowdown:packing"
+    ],
+    "96dbf708bc9428db7d71d51f": [
+      "historical_slowdown:packing"
+    ],
+    "db65e91fd91b58e174c47ac1": [
+      "historical_slowdown:packing"
+    ],
+    "fcfb46d8af3a45506cb0faf5": [
+      "historical_slowdown:packing"
+    ],
+    "0b9788655c2ccb2daa9c59dc": [
+      "historical_slowdown:compute"
+    ],
+    "29e2c321c55d4112d742699e": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "21b11eab7a4e63453e1720d5": [
+      "historical_slowdown:packing"
+    ],
+    "6579971ccfeba04730b87d1a": [
+      "historical_slowdown:compute"
+    ],
+    "7bb0836aeebf62f33edc7285": [
+      "historical_slowdown:packing"
+    ],
+    "f1e49b2719cd7dd60c08540b": [
+      "historical_slowdown:compute"
+    ],
+    "80e0446c0151a370bdb0686e": [
+      "historical_slowdown:packing"
+    ],
+    "c83cf8c86ebb22b7f27eb87b": [
+      "historical_slowdown:packing"
+    ],
+    "2ddc3c871083072743c51b75": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "dda2e37a67f4fe1ec0999c33": [
+      "historical_slowdown:packing"
+    ],
+    "9820b1fa63fe90c227d08712": [
+      "historical_slowdown:packing"
+    ],
+    "9e2404c571fc28ffb3a36eca": [
+      "historical_slowdown:packing"
+    ],
+    "47b30fb2994bd496d9c5a251": [
+      "historical_slowdown:compute"
+    ],
+    "00c864049367d2efb8e4c581": [
+      "historical_slowdown:packing"
+    ],
+    "4088ccf75b8d7d2f5faee0b1": [
+      "historical_slowdown:packing"
+    ],
+    "3960f1d4611dd7caca9e1228": [
+      "historical_slowdown:packing"
+    ],
+    "ebf071ce23857d02c625772d": [
+      "historical_slowdown:packing"
+    ],
+    "3f90c68ef8635ee4d16915a2": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "d7ce122660f4fb883c2c66b0": [
+      "historical_slowdown:packing"
+    ],
+    "4b6756dbb0fac8ea7f8dc529": [
+      "historical_slowdown:packing"
+    ],
+    "15a962f6d55ff70ca573a558": [
+      "historical_slowdown:packing"
+    ],
+    "5b5b8f2a15bbbaee035fa529": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "9409dc5bc255b28eb112348b": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "b7903bcf7db784c4ac6defd0": [
+      "historical_slowdown:packing"
+    ],
+    "e4ecbe33538398e4f39a01d8": [
+      "historical_slowdown:packing"
+    ],
+    "2245d2eb1d8d2ca7421c3ec4": [
+      "historical_slowdown:packing"
+    ],
+    "356ce59b050198d2cbcd9d21": [
+      "historical_slowdown:compute"
+    ],
+    "bea6a7ccc1910d7e7c43af51": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "9459ceb16cf2fd0505f7fb06": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "fae2254a4b57e3d6b7ab85dc": [
+      "historical_slowdown:packing",
+      "historical_slowdown:compute"
+    ],
+    "e420a02dde795b6d8f528743": [
+      "historical_slowdown:packing"
+    ],
+    "ea3a7fc71ea35a1be0dbacc0": [
+      "historical_slowdown:packing"
+    ],
+    "256c23e57bf1f78c713023a9": [
+      "historical_slowdown:packing"
+    ],
+    "60ebfb828f92540de83c01b7": [
+      "historical_slowdown:packing"
+    ],
+    "adf8c966d7505656790ec836": [
+      "historical_slowdown:packing"
+    ],
+    "19e0b107a28f136a210cd7bc": [
+      "historical_slowdown:packing"
+    ],
+    "cba31ae8bf1d978aed97035d": [
+      "historical_slowdown:packing"
+    ],
+    "f254ca19ed451fe85f5e065d": [
+      "historical_slowdown:packing"
+    ],
+    "234989eb2e74c7a03262b0bc": [
+      "historical_slowdown:packing"
+    ],
+    "a94b272acfdc5889047cf194": [
+      "historical_slowdown:packing"
+    ],
+    "fc8acd32ef83b010d91811b3": [
+      "historical_slowdown:packing"
+    ],
+    "78b31f290d002a347b3e7e6b": [
+      "historical_slowdown:packing"
+    ],
+    "9bb8a38d8f01e690ce5b55bb": [
+      "historical_slowdown:compute"
+    ],
+    "1956ff7d19ec062c637c4789": [
+      "historical_slowdown:packing"
+    ],
+    "fa212d88a4b88e5e8b7e67e2": [
+      "historical_slowdown:compute"
+    ],
+    "2265240cfbe04c4b153c71c7": [
+      "historical_slowdown:packing"
+    ],
+    "a1a1ddc920de4f15b1d74ee5": [
+      "historical_slowdown:compute"
+    ],
+    "84778c679dab15037a06d502": [
+      "historical_slowdown:compute"
+    ],
+    "8671d4364a0480f919026bd2": [
+      "historical_slowdown:compute"
+    ],
+    "4e376badae444b4cbe200904": [
+      "historical_slowdown:packing"
+    ],
+    "7d7561837e71653a1b5ce739": [
+      "historical_slowdown:compute"
+    ],
+    "89532dd23f7596509f1a5082": [
+      "historical_slowdown:compute"
+    ],
+    "b25e5622a39d6110133e1254": [
+      "historical_slowdown:compute"
+    ],
+    "998c3af7e538abb71f68d3cd": [
+      "historical_slowdown:compute"
+    ],
+    "0bbe1b7f0e5d9b9132e99c65": [
+      "historical_slowdown:compute"
+    ],
+    "49f1224f6775ab91a649368d": [
+      "historical_slowdown:compute"
+    ],
+    "b54db3337515bd893c56b9c9": [
+      "historical_slowdown:compute"
+    ],
+    "a6789f16f588378aa2feb700": [
+      "historical_slowdown:packing"
+    ],
+    "d9fb53c37d43237fe199aa3c": [
+      "historical_slowdown:compute"
+    ],
+    "1ed38864c8f006f9b872e7c2": [
+      "historical_slowdown:packing"
+    ],
+    "f45ffdf8cf7e421bbad406cd": [
+      "historical_slowdown:compute"
+    ],
+    "26711c2bacaf0956c5cfb54d": [
+      "historical_slowdown:compute"
+    ],
+    "4c6209b927069c21e1bd640e": [
+      "historical_slowdown:compute"
+    ],
+    "619ce73cc353fa93ea882340": [
+      "historical_slowdown:compute"
+    ],
+    "76a5a43f2a26699153584e63": [
+      "historical_slowdown:compute"
+    ],
+    "bf2dbb318f7ff44c7831f234": [
+      "historical_slowdown:compute"
+    ],
+    "80bea09157cf7018e1eaa20e": [
+      "historical_slowdown:compute"
+    ],
+    "37724fe5f6db5c6e050788e1": [
+      "historical_slowdown:compute"
+    ],
+    "ed58b2c1df703d2d7ec3162c": [
+      "historical_slowdown:compute"
+    ],
+    "06c5ec2d873636b7db7b2c83": [
+      "historical_slowdown:compute"
+    ],
+    "7062cb0e2ff66d9c7c84aec5": [
+      "historical_slowdown:compute"
+    ],
+    "c542408a8281dd0f991b8868": [
+      "historical_slowdown:compute"
+    ],
+    "134e5fdd444a06ded6a6df04": [
+      "historical_slowdown:compute"
+    ],
+    "a80d3d1b5d0e88b13908642c": [
+      "historical_slowdown:compute"
+    ],
+    "db7c578b868193ee39d184e5": [
+      "historical_slowdown:compute"
+    ],
+    "b871ac6ecf2b685e86b46f49": [
+      "historical_slowdown:compute"
+    ],
+    "0241348098fba029bfdaee30": [
+      "historical_slowdown:compute"
+    ],
+    "403d8702122393fad56a998f": [
+      "historical_slowdown:compute"
+    ],
+    "afade161166a28e10db9be45": [
+      "historical_slowdown:compute"
+    ],
+    "f8a2e725d6ff35a55eaa0ba9": [
+      "historical_slowdown:compute"
+    ],
+    "93bba95c6c9188df4561ae11": [
+      "historical_slowdown:compute"
+    ],
+    "74e93aa1b9fd3e8fb2485558": [
+      "historical_slowdown:compute"
+    ],
+    "42231d59f03400c8a2248488": [
+      "historical_slowdown:compute"
+    ],
+    "cfb4cca49020f7d79e48f700": [
+      "historical_slowdown:compute"
+    ],
+    "b792ad2260e8705fe42e9f65": [
+      "historical_slowdown:compute"
+    ],
+    "243d1eb5f5b50e2d29af9d60": [
+      "historical_slowdown:compute"
+    ],
+    "f0cc8b00a54829eb9ee8ea40": [
+      "historical_slowdown:compute"
+    ],
+    "3eaba2247bbb7a2833a9b737": [
+      "historical_slowdown:compute"
+    ],
+    "eab9ac4918b13b5cf587f54e": [
+      "historical_slowdown:compute"
+    ],
+    "71ab0e6c0adfc887b7444e2d": [
+      "historical_slowdown:compute"
+    ],
+    "3e4a6e137505aa23175bd820": [
+      "historical_slowdown:compute"
+    ],
+    "92a0e1ac73b055f8179d0ba3": [
+      "historical_slowdown:compute"
+    ],
+    "3e4db729b7fa59567b308b63": [
+      "historical_slowdown:compute"
+    ],
+    "1d2c8dcfd3dda206ff24f4df": [
+      "historical_slowdown:packing"
+    ],
+    "2ee4e1b2cc990ca717bae08b": [
+      "historical_slowdown:compute"
+    ],
+    "7a0d7f26fb9cd969bda9aa9d": [
+      "historical_slowdown:packing"
+    ],
+    "389fc55e2849c941fc847627": [
+      "historical_slowdown:compute"
+    ],
+    "9d650a0f669c0c0b324ad9b4": [
+      "historical_slowdown:compute"
+    ],
+    "40bae2b105d40e3e7e2aebee": [
+      "historical_slowdown:compute"
+    ],
+    "b110adb8790da22865d8620d": [
+      "historical_slowdown:compute"
+    ],
+    "405e650e3d34d4199461df26": [
+      "historical_slowdown:compute"
+    ],
+    "684bf1361c33a83241107d37": [
+      "historical_slowdown:compute"
+    ],
+    "432f2b3d58d87f347135ce05": [
+      "historical_slowdown:compute"
+    ],
+    "f9d612a7928d7261f4207d47": [
+      "historical_slowdown:compute"
+    ],
+    "27cb8a6fb833a25d751b7f48": [
+      "historical_slowdown:compute"
+    ],
+    "317ec6764fad75aab3efc9ea": [
+      "historical_slowdown:packing"
+    ],
+    "dec64f5ca5388846e75c2206": [
+      "historical_slowdown:compute"
+    ],
+    "a4f278500145e1fa8e980222": [
+      "historical_slowdown:compute"
+    ],
+    "0b1d493cda444ff6ab2ca2c9": [
+      "historical_slowdown:compute"
+    ],
+    "843753ac2ccde4c6408ad0bc": [
+      "historical_slowdown:compute"
+    ],
+    "f5c07f569521982d5c09c100": [
+      "historical_slowdown:compute"
+    ],
+    "323878e35d13fd20e2306a67": [
+      "historical_slowdown:compute"
+    ],
+    "2735d77b47c78402e3d43012": [
+      "historical_slowdown:packing"
+    ],
+    "97296463d3f5142d2de12964": [
+      "historical_slowdown:compute"
+    ],
+    "b48de2ca14538f580949df1b": [
+      "historical_slowdown:packing"
+    ],
+    "023c1e42cee833bc266ee478": [
+      "historical_slowdown:compute"
+    ],
+    "41d3c13589b977efdcfecb2d": [
+      "historical_slowdown:compute"
+    ],
+    "d16c854da19bccbc054497c7": [
+      "historical_slowdown:compute"
+    ],
+    "ef085dbc38e7e68576dc9d9e": [
+      "historical_slowdown:compute"
+    ],
+    "4befee8a7bf792bfb34460bb": [
+      "historical_slowdown:compute"
+    ],
+    "e32610e5382f430028d8ea8d": [
+      "historical_slowdown:compute"
+    ],
+    "0ff63fdc123a7f1a1d9ade94": [
+      "historical_slowdown:compute"
+    ],
+    "de0de484f136cde5f9bd781a": [
+      "historical_slowdown:compute"
+    ],
+    "7dd3946176f4a3857a8eb4dc": [
+      "historical_slowdown:compute"
+    ],
+    "0f0c3f52b46064e78a4d270c": [
+      "historical_slowdown:compute"
+    ],
+    "211117d8589eec7655c8c698": [
+      "historical_slowdown:compute"
+    ],
+    "bbe56fd645bb337dd39014a2": [
+      "historical_slowdown:compute"
+    ],
+    "7b559f476edb5b7ef54ab0a5": [
+      "historical_slowdown:compute"
+    ],
+    "ec2c7c42474c1dc2a3d72f4d": [
+      "historical_slowdown:compute"
+    ],
+    "b2aecda61755ed4f4052c378": [
+      "historical_slowdown:packing"
+    ],
+    "cae42a5a781cae998ec29c11": [
+      "historical_slowdown:compute"
+    ],
+    "bfe07d3e5f5319a9259e3e7c": [
+      "historical_slowdown:compute"
+    ],
+    "5d27bab6a7948f3b5e1b369a": [
+      "historical_slowdown:compute"
+    ],
+    "4ae5c04346cbed71c7542220": [
+      "historical_slowdown:compute"
+    ],
+    "cbdc6d51b757b133287057a2": [
+      "historical_slowdown:compute"
+    ],
+    "df28294710eb255fda890241": [
+      "historical_slowdown:packing"
+    ],
+    "c5fd956a4ccd8af90b968a3a": [
+      "historical_slowdown:compute"
+    ],
+    "ff0001aa37fa46427c941b46": [
+      "historical_slowdown:compute"
+    ],
+    "7430ba2fded9073b6eea9825": [
+      "historical_slowdown:compute"
+    ],
+    "34c0583b72301ccf14a4b95a": [
+      "historical_slowdown:compute"
+    ],
+    "58e843b5342d2504787308a1": [
+      "historical_slowdown:compute"
+    ],
+    "c2266627bd0ed66fa045d835": [
+      "historical_slowdown:compute"
+    ],
+    "1d454fb0ad52bdfc02f7d333": [
+      "historical_slowdown:compute"
+    ],
+    "649c8c7fa7a2d6b2b486ee99": [
+      "historical_slowdown:compute"
+    ],
+    "7a918ee5a6e57f6f65662575": [
+      "historical_slowdown:compute"
+    ],
+    "574090ddcd3cce871e63a131": [
+      "historical_slowdown:compute"
+    ],
+    "e91bb8551f7769807c464569": [
+      "historical_slowdown:compute"
+    ],
+    "76189b681153ad4704ffe12d": [
+      "historical_slowdown:compute"
+    ],
+    "7cc635834272299bdc17b499": [
+      "historical_slowdown:compute"
+    ],
+    "8ac3214a7ef94da97646748c": [
+      "historical_slowdown:compute"
+    ],
+    "27e73c41c3848a5450203456": [
+      "historical_slowdown:compute"
+    ],
+    "8bb53cc9f5de30424dc116be": [
+      "historical_slowdown:compute"
+    ],
+    "35491e9a12e2a4bbcf20e438": [
+      "historical_slowdown:compute"
+    ],
+    "3215cc16309b5fcf50cc02bc": [
+      "historical_slowdown:compute"
+    ],
+    "ee29d5bc9e8712bb83aaf622": [
+      "historical_slowdown:compute"
+    ],
+    "ae0a6c97eba2fea75f9f0b8a": [
+      "historical_slowdown:compute"
+    ],
+    "28f7db7622e72325268b75b5": [
+      "historical_slowdown:compute"
+    ],
+    "4142810d375ff7cda2888f4f": [
+      "historical_slowdown:compute"
+    ],
+    "2f520deebadc741f85715c4b": [
+      "historical_slowdown:compute"
+    ],
+    "5860351e724d4206259a17f7": [
+      "historical_slowdown:compute"
+    ],
+    "aefc8acf6685af34f5aecadd": [
+      "historical_slowdown:compute"
+    ],
+    "66494d7b0658b4d66be03dcd": [
+      "historical_slowdown:compute"
+    ],
+    "6a56ea3290b0462121d3aeb7": [
+      "historical_slowdown:compute"
+    ],
+    "776ffde088a8c158864b5f65": [
+      "historical_slowdown:compute"
+    ],
+    "89418dac35d1bc1bf4b5933e": [
+      "historical_slowdown:compute"
+    ],
+    "7d1c08d15bd149678aeb10d4": [
+      "historical_slowdown:compute"
+    ],
+    "db1a829d4dfa226d360fca9b": [
+      "historical_slowdown:compute"
+    ],
+    "e467a605841b27896c74ecf7": [
+      "historical_slowdown:compute"
+    ],
+    "6c5d62c403901c9e61a62fe5": [
+      "historical_slowdown:compute"
+    ],
+    "d4188c41e407302e3db4ac09": [
+      "historical_slowdown:compute"
+    ],
+    "05e304d6fddb23890e4d654e": [
+      "historical_slowdown:compute"
+    ],
+    "40e830c43b538508343d337b": [
+      "historical_slowdown:compute"
+    ],
+    "6fe7ab7eb0e9dcaf7d60ab9d": [
+      "historical_slowdown:compute"
+    ],
+    "352d51c893376e9952e11b7a": [
+      "historical_slowdown:compute"
+    ],
+    "c8622db6c8cacab7c41efaac": [
+      "historical_slowdown:compute"
+    ],
+    "7c20364450613853c3cfe17a": [
+      "historical_slowdown:compute"
+    ],
+    "e077b704e7fc2ee04259ac43": [
+      "historical_slowdown:compute"
+    ],
+    "6e4aab72c47dc29141c1e2b5": [
+      "historical_slowdown:compute"
+    ],
+    "b1b073de404e5b5b71f3c6ab": [
+      "historical_slowdown:compute"
+    ],
+    "e306c517c5bec9ff00d87149": [
+      "historical_slowdown:compute"
+    ],
+    "1ce181d7df8700f24967dc41": [
+      "historical_slowdown:compute"
+    ],
+    "4945845f881267c797526263": [
+      "historical_slowdown:compute"
+    ],
+    "ff1eac5ec8ab8a8214cd1d24": [
+      "historical_slowdown:compute"
+    ],
+    "44854ae98d5dbd7af5b9f6c2": [
+      "historical_slowdown:compute"
+    ],
+    "b36e90835e81ae7d0c67f6a7": [
+      "historical_slowdown:compute"
+    ],
+    "2e7320b09ac78203201c7dcc": [
+      "historical_slowdown:compute"
+    ],
+    "6c36dcd1eaeaf4d1ffae4318": [
+      "historical_slowdown:compute"
+    ],
+    "60d058d88eee91972aba8424": [
+      "historical_slowdown:compute"
+    ],
+    "e547835b648ef7710e8b9274": [
+      "historical_slowdown:compute"
+    ],
+    "c1b44898913f814762c965e1": [
+      "historical_slowdown:compute"
+    ],
+    "4b34e0d33ff6a623ea269c13": [
+      "historical_slowdown:compute"
+    ],
+    "75467c3e3b37fec4451327fe": [
+      "historical_slowdown:compute"
+    ],
+    "b931792078f9eb5e8d703aa5": [
+      "historical_slowdown:compute"
+    ],
+    "895b86f806b0db5c0fc2c7fc": [
+      "historical_slowdown:compute"
+    ],
+    "3e211cb3812eb8aba4ae2e30": [
+      "historical_slowdown:compute"
+    ],
+    "94c85e58b8ce733eddf6f60a": [
+      "historical_slowdown:compute"
+    ],
+    "294952fcc028841d35d0bbff": [
+      "historical_slowdown:compute"
+    ],
+    "181f18d1740cfad3c0e2b5f1": [
+      "historical_slowdown:compute"
+    ],
+    "63fa9e8341eebe3e62b6e313": [
+      "historical_slowdown:compute"
+    ],
+    "a7eb881e3f8d361e0a4bb612": [
+      "historical_slowdown:compute"
+    ],
+    "8f01defcf2e30caf51c443e3": [
+      "historical_slowdown:compute"
+    ],
+    "5e07a6362e25206894d8594a": [
+      "historical_slowdown:compute"
+    ]
+  },
+  "notes": [
+    "Historical sentinels are outcome-informed, not a held-out accuracy estimate.",
+    "Compile-stress IDs share three observed large ARM compilation groups; excluded from first two tiers.",
+    "Remaining choices use metadata coverage and mild group-reuse preference, not timing magnitude."
+  ]
+}

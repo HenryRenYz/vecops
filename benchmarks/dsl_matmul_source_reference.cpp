@@ -21,6 +21,8 @@ constexpr auto family_type() {
     return std::type_identity<family_selection::Require<kernel_family::PackedDot>>{};
   else if constexpr (Family == 3)
     return std::type_identity<family_selection::Require<kernel_family::RuntimeQuantInt8>>{};
+  else if constexpr (Family == 4)
+    return std::type_identity<family_selection::Require<kernel_family::ResidualSplit>>{};
   else {
     static_assert(Family == 0, "unknown source-catalog family selector");
     return std::type_identity<family_selection::Automatic>{};
@@ -86,8 +88,20 @@ void __kernel__(vecops::tensor::TensorLike auto A, vecops::tensor::TensorLike au
     if constexpr (spec::PackB) {
       const auto matrix_b =
         fusion_benchmark::input<false, typename Atom::TB, input_b>(source_benchmark::matrix(bt), RQ, Z, row_stride);
-      ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::B>{})(packing_execution, matrix_b,
-                                                                          tensor::output<typename Atom::TB>(bp));
+      if constexpr (spec::ReferenceCompensatedPack) {
+        // Match the original x86 online-B pack's fused column compensation.
+        const auto compensation = tensor::make_tensor(
+            D.data(), tensor::make_shape(tensor::size<rank - 1>(B)));
+        constexpr bool RuntimeZeroPoint =
+            input_a == fusion_benchmark::Input::RuntimePerRowAsymmetricQuantize;
+        const int32_t zero_point = RuntimeZeroPoint ? static_cast<int32_t>(Z(0, 0)) : int32_t{3};
+        matmul::details::run_matmul_pack_b_compensated<Atom>(
+            packing_execution, matrix_b, tensor::output<typename Atom::TB>(bp),
+            tensor::output<int32_t>(compensation), zero_point);
+      } else {
+        ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::B>{})(packing_execution, matrix_b,
+                                                                            tensor::output<typename Atom::TB>(bp));
+      }
     }
   };
   if constexpr (spec::OnlyPack) {
@@ -109,6 +123,7 @@ void __kernel__(vecops::tensor::TensorLike auto A, vecops::tensor::TensorLike au
         return b_raw;
     }();
     const auto out = fusion_benchmark::output<Acc, output>(C, S, SC, SQ, RD, W, Z, row_stride);
+    using OutputMemory = typename decltype(C)::ElementType;
     using Config = ops::MatmulConfig<Atom, Family, Policy, matmul::GenericTiledTuning<>,
                                      platform::SystemCacheInfoProvider, spec::SwapAB>;
     const auto operation = ops::matmul(Config{});
@@ -116,14 +131,40 @@ void __kernel__(vecops::tensor::TensorLike auto A, vecops::tensor::TensorLike au
     const auto n = tensor::size<rank - 1>(B);
     const auto k = tensor::size<rank - 1>(A);
     auto run = [&](const auto&... prior) VECOPS_INLINE_LAMBDA {
-      kernel::Workspace storage(operation.required_workspace(m, n, k, a, b, prior..., out));
-      auto workspace = storage.view();
-      execution::ExecutionSession execution{workspace};
-      for (std::int64_t iteration = 0; iteration < repeat; ++iteration) {
-        if constexpr (spec::OnlinePack)
-          pack();
-        operation(execution, m, n, k, a, b, prior..., out);
-        asm volatile("" ::: "memory");
+      if constexpr (spec::ReferenceBoundInvocation) {
+        // Scenario/Fusion/Packed bind once before their benchmark repeat loop.
+        // This is the same factory as make_benchmark_matmul_invocation, without
+        // importing the benchmark framework or the separately prepared API.
+        const auto invocation = [&]() VECOPS_INLINE_LAMBDA {
+          if constexpr (sizeof...(prior) != 0) {
+            return matmul::details::make_matmul_invocation(
+                Config{}, m, n, k, a, b, prior..., out);
+          } else {
+            const auto zeros = tensor::input<Acc>(
+                out.tensor(), tensor::zeros_transform<Acc, OutputMemory>);
+            return matmul::details::make_matmul_invocation(
+                Config{}, m, n, k, a, b, zeros, out);
+          }
+        }();
+        kernel::Workspace storage(invocation.required_workspace());
+        auto workspace = storage.view();
+        execution::ExecutionSession execution{workspace};
+        for (std::int64_t iteration = 0; iteration < repeat; ++iteration) {
+          if constexpr (spec::OnlinePack)
+            pack();
+          invocation(execution);
+          asm volatile("" ::: "memory");
+        }
+      } else {
+        kernel::Workspace storage(operation.required_workspace(m, n, k, a, b, prior..., out));
+        auto workspace = storage.view();
+        execution::ExecutionSession execution{workspace};
+        for (std::int64_t iteration = 0; iteration < repeat; ++iteration) {
+          if constexpr (spec::OnlinePack)
+            pack();
+          operation(execution, m, n, k, a, b, prior..., out);
+          asm volatile("" ::: "memory");
+        }
       }
     };
     if constexpr (spec::HasPrior)

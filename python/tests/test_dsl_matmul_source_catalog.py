@@ -119,7 +119,7 @@ def test_every_registration_metadata_and_packing_axis_is_expanded_exactly():
   )
   assert len(EXECUTIONS) == expected
   assert len({scenario.execution_id for scenario in EXECUTIONS}) == expected
-  assert {s.case.catalog for s in EXECUTIONS} == set(runner.COHORTS.values())
+  assert {s.case.catalog for s in EXECUTIONS} == set(runner.COHORTS.values()) - {"MatmulScenarioExpanded"}
   packed_batches = [s for s in EXECUTIONS if s.case.catalog == "MatmulPackedExpanded" and s.batched]
   assert len(packed_batches) == 81
   assert all(s.shared_b for s in packed_batches)
@@ -142,11 +142,35 @@ def test_every_unique_source_schema_and_offline_packer_parses(scenario):
 
 
 def test_family_policy_reference_is_explicit_and_unknown_selector_fails():
-  assert {s.reference[0] for s in EXECUTIONS if s.case.catalog == "MatmulFamilyExpanded"} == set(runner.FAMILIES)
+  assert {s.reference[0] for s in EXECUTIONS if s.case.catalog == "MatmulFamilyExpanded"} == set(runner.FAMILIES) - {"ResidualSplit"}
   assert {s.reference[1] for s in EXECUTIONS if s.case.catalog == "MatmulPolicyExpanded"} == set(runner.POLICIES)
   scenario = next(s for s in EXECUTIONS if s.case.catalog == "MatmulFamilyExpanded")
   with pytest.raises(ValueError, match=r"unresolved C\+\+ family selector"):
     replace(scenario, case=replace(scenario.case, configuration="UnknownFamily")).validate()
+
+
+def test_x86_complete_six_cohort_inventory_has_unique_executions_and_real_families():
+  cases = runner.load_cases(architecture="x86", features={"HAS_AMX_BF16", "HAS_AMX_INT8"})
+  executions = list(runner.scenarios(cases))
+  assert len(executions) == 1806
+  assert len({s.execution_id for s in executions}) == len(executions)
+  assert {s.reference[0] for s in executions} == {"Automatic", "SmallVector", "ResidualSplit"}
+  residual = [s for s in executions if s.reference[0] == "ResidualSplit"]
+  assert len(residual) == 4
+  assert {(s.case.m, s.case.n, s.case.k) for s in residual} == {(17, 33, 1024), (35, 53, 257)}
+  assert {s.mode for s in residual} == {"Const", "Dynamic"}
+  assert all(s.packing == "packedab" for s in residual)
+  assert runner.FAMILIES[:4] == ("Automatic", "SmallVector", "PackedDot", "RuntimeQuantInt8")
+
+
+@pytest.mark.parametrize("architecture,expected", [("x86", 2622), ("arm", 3856)])
+def test_complete_source_inventory_includes_scenario_and_both_batched_extent_modes(architecture, expected):
+  executions = list(runner.scenarios(runner.load_cases(architecture=architecture, svl_bytes=64, complete_registration=True)))
+  assert len(executions) == expected
+  assert len({s.execution_id for s in executions}) == expected
+  scenario = [s for s in executions if s.case.catalog == "MatmulScenarioExpanded"]
+  assert scenario and {s.mode for s in scenario} == {"Const", "Dynamic"}
+  assert {s.case.broadcast for s in scenario if s.batched} == {"A", "B", "independent"}
 
 
 def test_reference_keeps_native_rank_three_and_timing_boundaries():

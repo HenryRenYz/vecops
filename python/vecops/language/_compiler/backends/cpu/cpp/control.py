@@ -135,10 +135,16 @@ class ControlEmitter:
       elif isinstance(statement, (I.DeclareState, I.UpdateState)):
         self.emit_state(statement)
       elif isinstance(statement, I.ExitRegion):
+        self.protect_region(statement.body, self.expression_loads(I.Block(block.statements[index + 1 :])))
+        if statement.outlined:
+          self.opening("vecops_dsl::private_call([&]()")
         self.opening("/* inlined helper exit region */")
         self.block(statement.body)
         self.close()
         self.line(f"{statement.name}: ;")
+        if statement.outlined:
+          self.close()
+          self.lines[-1] += ");"
       elif isinstance(statement, I.Exit):
         self.line(f"goto {statement.region};")
       elif isinstance(statement, I.Assign):
@@ -216,7 +222,7 @@ class ControlEmitter:
 
         collect(statement.condition)
         self.disjoint_roots = proofs
-        self.block(statement.body)
+        self.branch_block(statement.body)
         self.disjoint_roots = old_proofs
         self.close()
         if statement.otherwise.statements:
@@ -225,7 +231,7 @@ class ControlEmitter:
             self.opening("/* target instruction fallback */")
           else:
             self.opening("else")
-          self.block(statement.otherwise)
+          self.branch_block(statement.otherwise)
           self.close()
         if feature:
           self.line("#endif")

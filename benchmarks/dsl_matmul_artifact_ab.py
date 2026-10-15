@@ -23,6 +23,7 @@ import re
 import statistics
 import sys
 import time
+from functools import partial
 from pathlib import Path
 
 
@@ -105,8 +106,72 @@ def arguments(values, repeat):
   import vecops
 
   return vecops._C.ArgumentMetadata([
-    vecops._C.TensorView.from_numpy(v, writable=i in (2, 11, 12)) for i, v in enumerate(values)
+    vecops._C.TensorView.from_numpy(mutable_prior_view(v) if i == 3 else v, writable=i in (2, 3, 11, 12))
+    for i, v in enumerate(values)
   ] + [repeat])
+
+
+def mutable_prior_view(value):
+  """Recover the fixture's mutable shared prior without copying or changing layout.
+
+  The catalog protects broadcast input views with as_strided(writeable=False).
+  C++'s original benchmark uses a mutable prior pointer, so its adapter requires
+  a writable view even though ordinary compute only reads it. Accept only the
+  catalog's same-address view of an actually writable NumPy owner; never turn a
+  genuinely read-only buffer into a writable one.
+  """
+  import numpy as np
+
+  if value.flags.writeable:
+    return value
+  owner = getattr(value.base, 'base', None)
+  if not isinstance(owner, np.ndarray) or not owner.flags.writeable or owner.ctypes.data != value.ctypes.data:
+    raise ValueError('shared prior must retain its writable same-address fixture owner')
+  return np.lib.stride_tricks.as_strided(owner, shape=value.shape, strides=value.strides, writeable=True)
+
+
+def poison_array(value, byte):
+  """Poison logical elements, including strided output and packed padding."""
+  import numpy as np
+
+  scalar = np.full(value.dtype.itemsize, byte, dtype=np.uint8).view(value.dtype)[0]
+  value[...] = scalar
+
+
+def validate_complete_writes(call, outputs, *, label):
+  """Two independent initial states reveal any output inherited from a call.
+
+  Only declared result buffers are changed. Inputs and separate Prior buffers
+  retain their original values. Byte comparison is outside timing and does not
+  replace the established floating-point oracle tolerance.
+  """
+  first = None
+  for byte in (0xA5, 0x5A):
+    for output in outputs:
+      poison_array(output, byte)
+    call()
+    current = tuple(output.tobytes(order='C') for output in outputs)
+    if first is None:
+      first = current
+    elif current != first:
+      raise AssertionError(f'{label}: output depends on initial poison; incomplete writes or unintended output reads')
+  return first
+
+
+def validate_packing_abi(paths, executable, values, active, *, compensated=False):
+  """Compare the entire active packed ABI, with independent poison per call."""
+  buffers = tuple(values[i] for i, enabled in zip((11, 12), active) if enabled)
+  if compensated:
+    sidecar = values[3][0, :] if values[3].ndim == 2 else values[3][0, 0, :]
+    buffers += (sidecar,)
+  reference = None
+  for path in dict.fromkeys(paths):
+    packed = validate_complete_writes(
+      lambda path=path: executable(path).invoke(arguments(values, 1)), buffers, label=f'packer {path}')
+    if reference is None:
+      reference = packed
+    elif packed != reference:
+      raise AssertionError(f'packed ABI differs (including padding): {path}')
 
 
 def source_scenarios(document):
@@ -176,7 +241,9 @@ def index_artifacts(args):
                           'InputPipelineB': INPUTS.index(scenario.case.input_pipeline_b),
                           'OutputPipeline': OUTPUTS.index(scenario.case.output_pipeline),
                           'ReferenceFamily': FAMILIES.index(scenario.reference[0]),
-                          'ReferencePolicy': POLICIES.index(scenario.reference[1])}
+                          'ReferencePolicy': POLICIES.index(scenario.reference[1]),
+                          'ReferenceBoundInvocation': int(scenario.reference_bound_invocation),
+                          'ReferenceCompensatedPack': int(scenario.reference_compensated_pack)}
             matches = [(path, exe, adapter) for file, selectors, actual_contract, path, exe, adapter in inventory
                        if file.name == 'dsl_matmul_source_reference.cpp'
                        and actual_contract == contract
@@ -203,8 +270,23 @@ def index_artifacts(args):
   print(f'Indexed {len(output)} rows; {sum(any(p is None for p in row.values()) for row in output.values())} with missing artifacts')
 
 
+def stage_availability(old, new, *, packing_only, packing_expected, reference_only=False):
+  """Require only the requested pair and its independently validated pack ABI."""
+  if packing_only and not packing_expected:
+    return {'status': 'not_applicable'}
+  prefix = 'pack_' if packing_only else ''
+  candidate_roles = {prefix + 'dsl', prefix + 'cpp'}
+  baseline_roles = set() if reference_only else {prefix + 'dsl'}
+  if packing_expected:
+    candidate_roles.update(('pack_dsl', 'pack_cpp'))
+    if not reference_only:
+      baseline_roles.add('pack_dsl')
+  missing = [f'candidate.{role}' for role in sorted(candidate_roles) if not new.get(role)]
+  missing += [f'baseline.{role}' for role in sorted(baseline_roles) if not old.get(role)]
+  return {'status': 'not_run', 'reason': 'missing_artifacts', 'missing_roles': missing} if missing else {'status': 'available'}
+
+
 def compare(args):
-  import numpy as np
   import vecops
   from dsl_matmul_source_catalog import result_metadata, source_arguments, validate_kernel_pair
   from dsl_timing import reserve_cpu
@@ -232,29 +314,33 @@ def compare(args):
         candidate_only.append(result_metadata(scenario))
         continue
       old, new = (index['artifacts'][scenario.execution_id] for index in indexes)
-      if any(path is None for row in (old, new) for path in row.values()):
-        missing.append(dict(result_metadata(scenario), baseline=old, candidate=new))
+      availability = stage_availability(old, new, packing_only=args.packing_only,
+                                        packing_expected=scenario.pack_a or scenario.pack_b,
+                                        reference_only=reference_only)
+      if availability['status'] == 'not_applicable':
+        continue
+      if availability['status'] != 'available':
+        missing.append(dict(result_metadata(scenario), stage='packing' if args.packing_only else 'compute',
+                            **availability, baseline=old, candidate=new))
         continue
       values, expected = source_arguments(scenario)
       # The same offline packed ABI must satisfy both generations and C++.
-      if 'pack_cpp' in new:
-        reference = None
-        for path in (old['pack_dsl'], new['pack_dsl'], new['pack_cpp']):
-          executable(path).invoke(arguments(values, 1))
-          packed = tuple(values[i].copy() for i in (11, 12))
-          if reference is None:
-            reference = packed
-          for active, actual, gold in zip((scenario.pack_a, scenario.pack_b), packed, reference):
-            if active:
-              np.testing.assert_array_equal(actual, gold)
-      paths = {'baseline': old['dsl'], 'candidate': new['dsl'], 'cpp': new['cpp']}
+      if scenario.pack_a or scenario.pack_b:
+        validate_packing_abi((new['pack_cpp'], old['pack_dsl'], new['pack_dsl']), executable,
+                             values, (scenario.pack_a, scenario.pack_b), compensated=scenario.reference_compensated_pack)
+      prefix = 'pack_' if args.packing_only else ''
+      paths = {'baseline': old[prefix + 'dsl'], 'candidate': new[prefix + 'dsl'], 'cpp': new[prefix + 'cpp']}
       if reference_only:
         paths.pop('baseline')
       probe = arguments(values, 1)
-      calls = {label: lambda exe=executable(path): exe.invoke(probe) for label, path in paths.items()}
+      calls = {label: partial(executable(path).invoke, probe) for label, path in paths.items()}
       tolerance = .02 if values[2].dtype.itemsize <= 2 else 2e-10 if values[2].dtype.itemsize == 8 else 8e-4
-      for label in paths.keys() - {'cpp'}:
-        validate_kernel_pair(calls[label], calls['cpp'], values[2], expected, tolerance=tolerance)
+      if not args.packing_only:
+        for label in paths.keys() - {'cpp'}:
+          validate_kernel_pair(
+            partial(validate_complete_writes, calls[label], (values[2],), label=label),
+            partial(validate_complete_writes, calls['cpp'], (values[2],), label='C++ reference'),
+            values[2], expected, tolerance=tolerance)
       repeats = {}
       for label, path in paths.items():
         repeat = 1
@@ -267,7 +353,7 @@ def compare(args):
             break
           repeat *= 2
         repeats[label] = repeat
-        calls[label] = lambda exe=executable(path), call_arguments=call_arguments: exe.invoke(call_arguments)
+        calls[label] = partial(executable(path).invoke, call_arguments)
       samples = {label: [] for label in paths}
       for round_ in range(args.rounds):
         for position, label in enumerate(orders[round_ % len(orders)]):
@@ -280,7 +366,7 @@ def compare(args):
                                        'label': label, 'repeat': repeats[label], 'begin_ns': begin, 'end_ns': end, 'ns': ns}) + '\n')
       stream.flush()
       medians = {label: statistics.median(samples[label]) for label in paths}
-      row = dict(result_metadata(scenario), median_ns=medians, speedup=None if reference_only else medians['baseline']/medians['candidate'],
+      row = dict(result_metadata(scenario), stage='packing' if args.packing_only else 'compute', median_ns=medians, speedup=None if reference_only else medians['baseline']/medians['candidate'],
                  candidate_over_cpp=medians['candidate']/medians['cpp'], artifacts=paths)
       rows.append(row)
       print(scenario.execution_id, row['speedup'], row['candidate_over_cpp'], flush=True)
@@ -304,6 +390,8 @@ def main():
   parser.add_argument('--output-dir', type=Path)
   parser.add_argument('--cpu', type=int)
   parser.add_argument('--rounds', type=int, default=12)
+  parser.add_argument('--packing-only', action='store_true',
+                      help='time offline A/B packing separately, after byte-for-byte validation; skip raw-only rows')
   args = parser.parse_args()
   sys.path.insert(0, str(args.snapshot.resolve() / 'benchmarks'))
   from dsl_snapshot_entry import select_snapshot

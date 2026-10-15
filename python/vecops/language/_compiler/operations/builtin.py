@@ -95,6 +95,10 @@ for name in ("and", "or"):
 define("not", "logical", ELEMENTWISE | T.COMPARISON, arity=1)
 define("neg identity bit_not", "arithmetic", arity=1)
 define("fma", "arithmetic", arity=3)
+# Rank-one BF16 pairs -> F32 pairs (G=2), or independently signed byte
+# pairs -> I32/U32 quadruples (G=4). Absent final-group lanes are zero.
+# Floating grouped adds may fuse/reassociate; integer results are modulo 2^32.
+define("widening_dot", "grouped_arithmetic", T.CSE | T.VECTOR_BOUNDARY, arity=2, keywords=("dtype",))
 define("where", "select", ELEMENTWISE | T.CONDITIONAL, arity=3)
 define(
   "exp exp2 exp_neg exp2_neg log log2 rsqrt rcp",
@@ -155,6 +159,9 @@ define(
 define("scatter", "indexed_memory", T.NONE, effects="write", keywords=("mask", "unique"))
 define("value_transform", "transform", T.VECTOR_BOUNDARY)
 define("shuf local_shuf", "register", T.REGISTER_TRANSFORM, keywords=())
+define("sve.iota", "sve_register", T.VECTOR_BOUNDARY, keywords=())
+define("sve.join_k_groups sve.broadcast_segment sve.row_pair sve.mmla", "sve_register",
+       T.REGISTER_TRANSFORM | T.VECTOR_BOUNDARY, keywords=())
 define(
   "bitcast lower upper lower_half upper_half concat interleave local_interleave_lower local_interleave_upper block_shuffle",
   "register_geometry",

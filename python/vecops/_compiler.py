@@ -3,9 +3,9 @@
 """Python-facing compiler configuration and lazy native-tool discovery.
 
 The public :class:`Compiler` owns cache policy and reproducible CMake inputs;
-it does not start a compiler until an artifact cache miss requires one.  This
-keeps ``cache-only`` usable in runtime-only installations without CMake or a
-C/C++ compiler.
+ARM snapshots attest scalable-vector compiler compatibility with a bounded,
+cached probe before artifact identity is computed. ``cache-only`` replays that
+attestation and remains usable without CMake or a C/C++ compiler.
 """
 
 from __future__ import annotations
@@ -285,7 +285,9 @@ class Compiler:
 
     A compiler can be reused by factories in processes/threads with different
     VL/SVL. Operators retain a frozen copy, so pending batches never silently
-    pick up a later setting. Build event storage remains shared for inspection.
+    pick up a later setting. ARM snapshots also freeze the experimentally
+    selected scalable-sinking compatibility flag in source/DSL cache identity.
+    Build event storage remains shared for inspection.
     """
     if self._is_snapshot:
       return self
@@ -297,6 +299,9 @@ class Compiler:
     result._vector_state = state
     result._native_compiler = None
     result._is_snapshot = True
+    from ._compiler_compat import scalable_sink_flags
+
+    result.cflags = (*result.cflags, *scalable_sink_flags(result))
     return result
 
   def is_environment_current(self):

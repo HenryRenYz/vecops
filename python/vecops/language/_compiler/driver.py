@@ -38,6 +38,11 @@ def _strict_dsl_compiler(compiler: Compiler) -> Compiler:
   return result
 
 
+def _sme_grid_compiler(compiler: Compiler, artifact) -> Compiler:
+  """Compatibility hook retained for benchmark planners; snapshot owns policy."""
+  return compiler.snapshot()
+
+
 def compile(
   template_function: TemplateFunction,
   *,

@@ -516,7 +516,12 @@ auto widen  = vec::convert(F32{}, BF16V{}, narrow, vec::cvt::lane<0>);
 
 - **Value policy** (default `cvt::saturate`): clamps out-of-range values to
   the destination range. `cvt::wrap` is valid only for integer narrowing and
-  keeps the low destination-width bits.
+  keeps the low destination-width bits. Floating-to-integer conversion
+  truncates toward zero, clamps infinities and finite overflows to the
+  destination endpoints, and maps NaN to zero. The x86 native path sanitizes
+  exceptional lanes before the truncating instruction and restores exact
+  integer endpoints afterwards; this also applies under `-ffast-math` and
+  to contiguous/indexed `load_convert` and `store_convert`.
 
 ### Memory (`vec/Memory.h`)
 

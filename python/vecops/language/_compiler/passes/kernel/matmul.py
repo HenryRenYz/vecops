@@ -11,6 +11,14 @@ from ..manager import register_pass
 
 @register_pass("fuse-dot-epilogue", after=("expression-cse",), before=("fuse-elementwise",))
 def fuse_dot_epilogue(ir, context):
+  """Drop an overwritten product/captured-result sink before its epilogue.
+
+  Batched helpers return a load of their private complete result. Treat that
+  captured value like a product when the next store uses the same expression;
+  Fresh reads of the output retain the first store's observable effect.
+  Private-result fusion also retains fresh external reads: an external input
+  can alias the output and observe the helper's original write.
+  """
   def same_view(a, b):
     return (
       a.storage == b.storage
@@ -27,7 +35,10 @@ def fuse_dot_epilogue(ir, context):
       previous = next((s for s in reversed(result) if not isinstance(s, I.BindTile)), None)
       if (
         isinstance(previous, I.Store)
-        and previous.value.op == "dot"
+        and (previous.value.op == "dot" or
+             previous.value.op == "load" and not previous.value.args and
+             previous.value.data.owned and
+             previous.value.data.storage != previous.destination.storage)
         and previous.mask is None
         and isinstance(statement, I.Store)
         and statement.mask is None
@@ -35,12 +46,22 @@ def fuse_dot_epilogue(ir, context):
         and any(e is previous.value for e in walk(statement.value))
       ):
         product_loads = {id(load) for load in I.loads(previous.value)}
+        captured_before_sink = set()
+        if previous.value.op == "load":
+          for earlier in result:
+            if earlier is previous:
+              break
+            if isinstance(earlier, I.BindTile):
+              captured_before_sink.update(id(load) for load in I.loads(earlier.value))
         # A fresh read of C after the first effect observes the computed C.
         # It must not be silently changed into a read of the old C.
         if not any(
           load.data.storage == previous.destination.storage and id(load) not in product_loads
           for load in I.loads(statement.value)
-        ):
+        ) and (previous.value.op == "dot" or not any(
+          not load.data.owned and id(load) not in product_loads and id(load) not in captured_before_sink
+          for load in I.loads(statement.value)
+        )):
           result.remove(previous)
       result.append(statement)
     block.statements = result
@@ -51,7 +72,53 @@ def fuse_dot_epilogue(ir, context):
 
 @register_pass("orient-matmul", after=("fuse-dot-epilogue",), before=("fuse-elementwise",))
 def orient_matmul(ir, context):
-  """C column-contiguous: compute B.T @ A.T, including the fused DAG."""
+  """Orient the complete producer/consumer DAG using proven layout metadata.
+
+  `output` retains the previous column-contiguous policy. `target` additionally
+  uses AMX role/shape costs, and leaves eligible SME zero-epilogue products to
+  their direct vertical stores. Unknown layouts never become layout promises.
+  """
+  policy = context.options.get("cpu_matmul_orientation", "output")
+  if policy not in {"output", "target"}:
+    raise ValueError("cpu_matmul_orientation must be output or target")
+
+  def should_swap(statement, products):
+    destination = statement.destination
+    column = I.constant(destination.strides[0]) == 1 and I.constant(destination.strides[1]) != 1
+    if policy == "output":
+      return column
+    target = context.environment.codegen_target
+    if len(products) != 1:
+      return column
+    product = products[0]
+    if target.isa == "sme" and statement.value is product and destination.dtype == product.type.dtype:
+      return False
+    a, b = product.args[:2]
+    if (target.architecture != "x86" or target.isa == "scalar" or
+        a.type.dtype not in {"bfloat16", "float16", "int8", "uint8"} or
+        b.type.dtype not in {"bfloat16", "float16", "int8", "uint8"} or
+        product.data.implementation not in {"auto", "amx"}):
+      return column
+    def backing(value):
+      while value.op == "cast":
+        value = value.args[0]
+      return value.data if value.op == "load" and not value.args else None
+    left, right = backing(a), backing(b)
+    if left is None or right is None:
+      return column
+    a_row = I.constant(left.strides[1]) == 1
+    a_column = I.constant(left.strides[0]) == 1
+    # C++ exposes B as [N,K]; DSL uses [K,N]. Its BRow means K-contiguous.
+    b_k = I.constant(right.strides[0]) == 1
+    m, n, k = map(I.constant, (*product.type.shape, a.type.shape[1]))
+    if column and a_column and b_k:
+      return True
+    if column and a_row and b_k and type(m) is int and type(n) is int and n >= m:
+      return True
+    if (I.constant(destination.strides[1]) == 1 and a_column and b_k and
+        all(type(v) is int for v in (m, n, k)) and m >= 4 and 2 * m >= n and k >= 16):
+      return True
+    return False
 
   def visit(block):
     result = []
@@ -61,20 +128,21 @@ def orient_matmul(ir, context):
       if (
         isinstance(statement, I.Store)
         and len(statement.destination.shape) == 2
-        and I.constant(statement.destination.strides[0]) == 1
-        and I.constant(statement.destination.strides[1]) != 1
       ):
         products = [e for e in walk(statement.value) if e.op == "dot"]
         if (
           products
           and all(e.data.tiled and e.data.swap for e in products)
+          and should_swap(statement, products)
           and not any(
             e.op == "packed_load" or isinstance(e.type, I.TileType) and len(e.type.shape) not in (1, 2)
             for e in walk(statement.value)
           )
         ):
           destination = replace(
-            statement.destination, shape=statement.destination.shape[::-1], strides=statement.destination.strides[::-1]
+            statement.destination, shape=statement.destination.shape[::-1], strides=statement.destination.strides[::-1],
+            region=replace(statement.destination.region, axes=statement.destination.region.axes[::-1])
+                   if statement.destination.region is not None else None,
           )
           statement = replace(
             statement,

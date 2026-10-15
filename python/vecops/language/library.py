@@ -9,14 +9,22 @@ compiler may cache reused expensive expressions instead of recomputing them.
 
 from . import dsl as T
 from ._library.attention import scaled_dot_product_attention
+from ._library.batched_matmul import batched_matmul
 from ._library.math import layernorm_row, masked_softmax, rmsnorm, silu, softmax_row, stable_sigmoid
+from ._library.packing import pack_b_compensated
 from ._library.registers import pack_interleave, transpose_registers
+from ._library.runtime_quant_int8 import dequantize as dequantize_per_row_column
+from ._library.runtime_quant_int8 import quantize as quantize_per_row_u8
 
 __all__ = [
+  "batched_matmul",
+  "dequantize_per_row_column",
   "layernorm",
   "masked_softmax",
   "matmul",
   "pack_interleave",
+  "pack_b_compensated",
+  "quantize_per_row_u8",
   "rmsnorm",
   "scaled_dot_product_attention",
   "silu",
@@ -110,6 +118,7 @@ def matmul(
   packing="auto",
   swap=True,
   implementation="auto",
+  workspace=None,
 ):
   """Cache-blocked matrix multiply; B has the conventional [K,N] shape.
 
@@ -117,15 +126,40 @@ def matmul(
   DAG, so packing folds input transforms and the final store folds epilogues.
   None block sizes use the target cache hierarchy, not the build host's CPU.
   An owned output tile can be forwarded without a memory intermediate.
+  Optional workspace is caller-declared T.workspace result storage with the
+  exact output shape and accumulation dtype. Disjointness from producer reads,
+  initializer and output is checked before writing. This reuses result capacity;
+  internal instruction packing and cache scratch retain their own lifetimes.
   """
+  if workspace is not None:
+    a, b = inputs
+    if acc_dtype is None:
+      if (a.dtype == "int8" or a.dtype == "uint8") and (b.dtype == "int8" or b.dtype == "uint8"):
+        acc_dtype = "int32"
+      elif (a.dtype == "int16" or a.dtype == "uint16") and (b.dtype == "int16" or b.dtype == "uint16"):
+        acc_dtype = "int64"
+      elif a.dtype == "float64" or b.dtype == "float64":
+        acc_dtype = "float64"
+      else:
+        acc_dtype = "float32"
+    acc_dtype = T.cast(0, acc_dtype).dtype
+    T.static_assert(len(workspace.shape) == 2 and workspace.dtype == acc_dtype)
+    assert workspace.shape[0] == output.shape[0] and workspace.shape[1] == output.shape[1], "matmul workspace shape mismatch"
+    assert T.view_disjoint(workspace, a) and T.view_disjoint(workspace, b), "matmul workspace overlaps input producer"
+    assert T.view_disjoint(workspace, output), "matmul workspace overlaps output"
+    if acc is not None:
+      assert T.view_disjoint(workspace, T.as_value(acc)), "matmul workspace overlaps initializer"
+    target = workspace
+  else:
+    target = output
   if acc_dtype is None:
     result = T._matmul(
-      inputs, output, acc=acc, BM=BM, BN=BN, BK=BK, packing=packing, swap=swap, implementation=implementation
+      inputs, target, acc=acc, BM=BM, BN=BN, BK=BK, packing=packing, swap=swap, implementation=implementation
     )
   else:
     result = T._matmul(
       inputs,
-      output,
+      target,
       acc=acc,
       acc_dtype=acc_dtype,
       BM=BM,
@@ -135,4 +169,6 @@ def matmul(
       swap=swap,
       implementation=implementation,
     )
+  if workspace is not None:
+    T.store(output, result)
   return result

@@ -358,6 +358,7 @@ class VectorsEmitter:
 
   def emit_operations(self, region, tags, coords, active, *, axis=-1, full=False, reuse_projected=False):
     previous_cache, references = self.chunk_cache, {}
+    grouped_caches = {}
     uses = {operation.index: 0 for operation in region.operations}
     for operation in region.operations:
       for index in operation.operands:
@@ -391,7 +392,14 @@ class VectorsEmitter:
           self.line(f"{name} = {zero};")
           self.close()
           self.opening("else")
-        self.chunk_cache = {}
+        # Grouped dot is opaque to the ordinary elementwise DAG scheduler.
+        # Independent outputs may nevertheless share the exact captured
+        # input expression in one full-vector lexical iteration. Keep this
+        # cache per slot/geometry; conditional tail scopes cannot share it.
+        if full and operation.opaque and operation.expression.op == "widening_dot":
+          self.chunk_cache = grouped_caches.setdefault((slot, base, tuple(c), count, axis), {})
+        else:
+          self.chunk_cache = {}
         if operation.opaque:
           expression = operation.expression
         else:
@@ -463,12 +471,16 @@ class VectorsEmitter:
       self.traverse_state_region(state_plan, region, callback, setup, finish)
       return
     variants = [(power, region.base_power, region.groupings[power]) for power in sorted(region.groupings, reverse=True)]
-    if region.base_power > 0:
+    # The least permissive CPU backend allows four native words (pow=2).
+    # A grouped byte dot with an FP64 producer needs additional input lanes,
+    # so even a pow=0 result may require a fractional-word fallback.
+    fallback_power = min(0, 2 - region.rebind_headroom)
+    if region.base_power > fallback_power:
       from ....ir.vector import group_vectors
 
-      variants.append((None, 0, group_vectors(region.unroll, 0, 0)))
+      variants.append((None, fallback_power, group_vectors(region.unroll, fallback_power, fallback_power)))
     for variant, (power, base_power, groups) in enumerate(variants):
-      conditional = power is not None and (power > 0 or region.base_power > 0)
+      conditional = power is not None and (power > 0 or region.base_power > fallback_power)
       if conditional:
         self.line(f"#{'if' if variant == 0 else 'elif'} VEC_MAX_POW >= {base_power + power + region.rebind_headroom}")
       elif variant:

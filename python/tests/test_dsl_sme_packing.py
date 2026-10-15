@@ -40,8 +40,8 @@ def test_raw_za_packing_keeps_checks_outside_owner_and_only_named_words(dtype, s
   assert "packed output buffer too small" in source
   body = source.partition("void __kernel__")[2]
   assert "dsl_pack_" in body
-  assert "pack_offset" in body
-  assert ".with_resources(" not in body
+  assert "pack_offset" not in body
+  assert ".with_resources(" in body
   assert "vecops::ops::MatmulPack" not in source
 
 
@@ -96,6 +96,11 @@ def test_raw_za_pack_bitwise_full_tail_negative_space_stride_and_alias(dtype, tm
     (panel, chunk),
     (2 * panel + 3, 2 * chunk + 1),
     (panel + 1, 5 * chunk + kp - 1),
+    (panel + 1, 0),
+    (panel + 1, 1),
+    (2 * panel + 1, 0),
+    (2 * panel + 1, 1),
+    (2 * panel + 1, chunk + 1),
   )
   compiler = make_compiler(target="Native", jobs=4, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   kernels = {}

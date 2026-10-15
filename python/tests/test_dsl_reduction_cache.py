@@ -76,7 +76,9 @@ def test_full_multiword_reduction_cache_writes_do_not_construct_masks(dtype, ope
   all_stores = cache_stores.findall(lowered.source)
   assert any("vecops::vec::opt::first(" in store for store in all_stores)
   assert "vecops::vec::mwhilelt" in lowered.source
-  identity = "float{0}" if dtype == "float32" else "double{0}"
+  # Value-initialization and an explicit zero are the same typed identity.
+  # Match the current emitter spelling, rather than requiring a literal token.
+  identity = "float{}" if dtype == "float32" else "double{}"
   if operation != "add":
     identity = f"{'-' if operation == 'max' else ''}std::numeric_limits<{'float' if dtype == 'float32' else 'double'}>::infinity()"
   assert identity in lowered.source

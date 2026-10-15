@@ -51,12 +51,19 @@ def plan_state(prepared, context):
   if isinstance(budget, bool) or not isinstance(budget, int) or not 0 <= budget <= 64:
     raise ValueError("cpu_state_register_budget must be an integer in [0,64]")
   plans = {}
-  from ...ir.traversal import children, values, walk_unique
+  from ...ir.traversal import children, nodes, values, walk_unique
 
   matrix_states = set()
   word_states = set()
+  sve_word_states = set()
   state_links = {}
   initial_word_bytes = {}
+  call_states = set()
+  for statement in nodes(prepared.vectors.kernel.body):
+    if isinstance(statement, I.ExitRegion) and statement.outlined:
+      contained = tuple(nodes(statement.body))
+      local = {s.state.name for s in contained if isinstance(s, I.DeclareState)}
+      call_states.update(s.name for s in contained if isinstance(s, I.TileState) and s.name not in local)
 
   def matrices(block):
     for statement in block.statements:
@@ -68,6 +75,16 @@ def plan_state(prepared, context):
           default=ELEMENT_BYTES[statement.state.type.dtype],
         )
         initial_word_bytes[name] = max(initial_word_bytes.get(name, 1), width)
+        for expression in expressions:
+          if context.environment.operations.get(expression).family == "sve_register":
+            sve_word_states.add(name)
+            for source in expression.args:
+              for reference in walk_unique(source):
+                typ = reference.type
+                if (reference.op == "state_ref" and isinstance(typ, I.VectorType) and
+                    typ.tag.N is None and typ.tag.pow == 0 and typ.tag.domain == "simd" and
+                    typ.tag.basis_dtype == typ.dtype):
+                  sve_word_states.add(reference.data.name)
         for reference in expressions:
           if reference.op == "state_ref":
             state_links.setdefault(name, set()).add(reference.data.name)
@@ -133,6 +150,29 @@ def plan_state(prepared, context):
   native_bytes = sve_bytes or (target.vector_bits or 128) // 8
   fixed_bytes = 16 if sve else native_bytes
 
+  # Branch merges and helper snapshots can sit between a typed ISA word and
+  # its consumer. Retain that geometry through same-dtype, complete-word
+  # aliases; unrelated partial vectors and scalar producers stay conservative.
+  declarations = {
+    statement.state.name: statement.state.type
+    for statement in nodes(prepared.vectors.kernel.body)
+    if isinstance(statement, I.DeclareState)
+  }
+  pending = list(sve_word_states)
+  while pending:
+    name = pending.pop()
+    source_type = declarations.get(name)
+    for neighbor in state_links.get(name, ()):
+      typ = declarations.get(neighbor)
+      if (neighbor not in sve_word_states and source_type is not None and
+          isinstance(typ, I.VectorType) and not typ.mask and
+          typ.dtype == source_type.dtype and typ.tag.N is None and
+          typ.tag.pow == 0 and typ.tag.domain == "simd" and
+          typ.tag.basis_dtype == typ.dtype and len(typ.shape) == 1 and
+          I.same_expr(typ.shape[0], I.Expr(I.ScalarType("int64"), "lanes", data=(typ.dtype, 0)))):
+        sve_word_states.add(neighbor)
+        pending.append(neighbor)
+
   def visit(block):
     for statement in block.statements:
       if isinstance(statement, I.DeclareState):
@@ -155,7 +195,16 @@ def plan_state(prepared, context):
         if state.name in word_states:
           # Partial FixedTags change the shuffle word/block width. Keep native
           # scalable words with clipped active counts, or stage scalar memory.
-          if budget and len(shape) == 1 and type(shape[0]) is int and shape[0] > 0:
+          explicit_word = (
+            isinstance(typ, I.VectorType) and not typ.mask and typ.tag.N is None and
+            typ.tag.pow == 0 and typ.tag.domain == "simd" and typ.tag.basis_dtype == typ.dtype and
+            len(pieces) == 1 and pieces[0].scalable and pieces[0].power == 0
+          )
+          if explicit_word:
+            # Register transforms do not invalidate an already proven native
+            # vector boundary merely because its active prefix is dynamic.
+            pass
+          elif budget and len(shape) == 1 and type(shape[0]) is int and shape[0] > 0:
             word_lanes = max(1, native_bytes // ELEMENT_BYTES[typ.dtype])
             count = (shape[0] + word_lanes - 1) // word_lanes
             pieces = [StatePiece((i,), 0, True) for i in range(count)] if count <= budget else []
@@ -188,7 +237,15 @@ def plan_state(prepared, context):
                 lanes = 1 << min((shape[-1] - offset).bit_length() - 1, largest.bit_length() - 1)
                 pieces.append(StatePiece(row + (offset,), lanes))
                 offset += lanes
-        if len(pieces) > budget:
+        # Segment operations change lane geometry while retaining one whole
+        # ISA register. Their typed complete-word inputs/results must not be
+        # split by the widest element type of the connected state graph.
+        if sve and budget and state.name in sve_word_states:
+          pieces = [StatePiece((0,), 0, True, 0)]
+        # Values crossing a private call use scalar storage. In particular,
+        # sizeless SVE registers cannot be members of a C++ closure object.
+        # States local to the outlined body retain ordinary register planning.
+        if len(pieces) > budget or state.name in call_states:
           pieces = []
         plans[state.name] = StatePlan(state, state_view(state), tuple(pieces))
         placement = f"{len(pieces)} independent register pieces" if pieces else "private scalar scratch"

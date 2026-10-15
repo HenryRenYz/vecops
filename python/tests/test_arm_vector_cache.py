@@ -18,6 +18,8 @@ from vecops.language._compiler.cache import _compiler_key
 
 def _mock_state(monkeypatch, state):
   monkeypatch.setattr("vecops._arm_vector_state.get_vector_state", lambda: state)
+  # These tests mock ARM state on the x86 runner and isolate snapshot semantics.
+  monkeypatch.setattr("vecops._compiler_compat.scalable_sink_flags", lambda _compiler: ())
 
 
 @pytest.mark.parametrize(

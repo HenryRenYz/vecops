@@ -306,3 +306,14 @@ retains one directory descriptor per watch and is bounded to the smaller of
 Unwatched paths are hashed from content again; a descriptor-budget limit is
 never permission to reuse a stale hash. Lowering the process limit closes
 excess fallback watches and invalidates their cached generation.
+
+### Scalable-vector compiler compatibility
+
+ARM builds using SVE probe the selected C++ compiler for a reproducible
+SimplifyCFG common-store sinking crash (a scalable `TypeSize` is requested as
+a fixed integer). Only when that exact diagnostic occurs and a second probe
+succeeds does configuration add `-mllvm=-simplifycfg-sink-common=false`.
+Other optimization passes and `-O3` remain enabled. The probe covers both
+source C++ and generated DSL kernels; its bounded execution, compiler identity,
+result and selected flag are retained for build/cache attribution. CMake
+applies the same test for its ARM target configuration.

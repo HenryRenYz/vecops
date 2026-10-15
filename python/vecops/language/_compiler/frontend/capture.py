@@ -24,6 +24,7 @@ DSL_MODULES = {
   "vecops.language",
   "vecops.language.dsl",
   "vecops.language.sme",
+  "vecops.language.sve",
   "vecops.language.amx",
   "vecops.language.library",
   "vecops.language.debug",
@@ -51,6 +52,7 @@ class Body:
   identity: str
   filename: str
   first_line: int
+  inline: bool = True
 
 
 @dataclass(frozen=True)
@@ -67,7 +69,7 @@ class CapturedReducer:
   associative: bool
 
 
-def capture(function, local_scope=None, seen=None):
+def capture(function, local_scope=None, seen=None, *, inline=True):
   seen = set() if seen is None else seen
   if id(function) in seen:
     raise DSLError("recursive DSL helper dependency")
@@ -106,7 +108,7 @@ def capture(function, local_scope=None, seen=None):
         value = SelfCall(value.__qualname__)
         key = ("self", value.name)
       else:
-        value = capture(value.function, seen=seen)
+        value = capture(value.function, seen=seen, inline=value.inline)
         key = value.identity
     elif isinstance(value, type) and value in (Vector, ExecutionLayout):
       key = value.__name__
@@ -174,7 +176,7 @@ def capture(function, local_scope=None, seen=None):
         value = SelfCall(value.__qualname__)
         key = ("self", value.name)
       else:
-        value = capture(value.function, seen=seen)
+        value = capture(value.function, seen=seen, inline=value.inline)
         key = value.identity
     elif isinstance(value, Intrinsic):
       key = value.name
@@ -184,8 +186,8 @@ def capture(function, local_scope=None, seen=None):
     environment[name] = value
     fingerprints.append((name, key))
   identity = hashlib.sha256(
-    (VERSION + ast.dump(target, include_attributes=False) + repr(fingerprints)).encode()
+    (VERSION + ("" if inline else ":private-call") + ast.dump(target, include_attributes=False) + repr(fingerprints)).encode()
   ).hexdigest()
   return Body(
-    target, MappingProxyType(environment), identity, inspect.getsourcefile(function) or "<kernel>", first_line
+    target, MappingProxyType(environment), identity, inspect.getsourcefile(function) or "<kernel>", first_line, inline
   )

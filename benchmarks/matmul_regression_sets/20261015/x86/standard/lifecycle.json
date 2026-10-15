@@ -1,0 +1,39 @@
+{
+  "architecture": "x86",
+  "registration_ids": [
+    "e44cf3d47d5321510cc0b63f",
+    "c1844b71270dd2611ad0c85a",
+    "651886f40f0df100c3dad6af",
+    "60ed2917a1181d8d562a30d2",
+    "fe66bbd17725e98a4fe9a0ca",
+    "e7e464632cdc9ca7f131ae6c",
+    "d814c7dce35b4b75569dfef9",
+    "d7bb5ef3020f57a51e2d2dbd",
+    "d7eb660c5488cf34b6546cfc",
+    "f2e879469c19c99766ae3ebf",
+    "fa891501aaf8ba09549c0807",
+    "eee7b3c0924cf32cf3f45184",
+    "f0b128fd188003f0e8c78d3d",
+    "fdf6dc8836830296ec2fc9b7",
+    "b62b1d712d8dd0c598f7d969",
+    "f11704668956de6210ab5044",
+    "ec1286ea85071d4f7db8e97f",
+    "008379737c68dda653871fb8",
+    "8ae9bc0761d0eafef9f6486e",
+    "dce5d2a715fed863b2015bae",
+    "b0c626721503d1acd90839a0",
+    "fb493ea1ab2ecc55612348f4",
+    "9b9f199d2341e5512f96beb4",
+    "e2ce2c6dcde0bb246d6243a8",
+    "a5bce5d4ee8e9845a8aeb8ef"
+  ],
+  "tier": "standard",
+  "evidence": {
+    "main_plan": "/home/renyz/project/vecops-neo/build-matmul-opt-20261015/x86-packed-checked/plan.json",
+    "main_plan_sha256": "cc2a432e7bdaa1fa1d9af108dd1d1956c926e7548cef8593313c660ba266f9a1",
+    "ledger_sha256": "96c55ad97109af05e610fa10bde0b54401878b160b4076f45824c09d08f77571",
+    "supplemental_summary": "/home/renyz/project/vecops-neo/build-matmul-opt-20261015/x86-supplemental-final-summary.json",
+    "supplemental_sha256": "7b06f22a1f280a879f01f79579614f06e8aa322302fb18878e5cc4c879285cbb",
+    "sentinels_sha256": "1dd7b0ecdf1edd659ea84f9dcc7f371c2ebf23ef67d70d8bf74422f8397b87ea"
+  }
+}

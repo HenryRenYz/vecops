@@ -59,10 +59,22 @@ def transpose_matrix(value, memo=None):
   data = value.data
   args = tuple(transpose_matrix(a, memo) for a in value.args)
   if value.op == "load":
+    region = data.region
+    if rank == 1 and region is not None:
+      # A transposed trailing broadcast gains a unit axis. Retain every
+      # original root coordinate, then append that degenerate coordinate;
+      # a rank-two view cannot retain a one-entry axes mapping.
+      region = replace(region, root_shape=(*region.root_shape, literal(1)),
+                       root_strides=(*region.root_strides, literal(0)),
+                       starts=(*region.starts, literal(0)), widths=(*region.widths, literal(1)),
+                       steps=(*region.steps, 1), axes=(region.axes[0], len(region.root_shape)),
+                       clipped=(*region.clipped, False),
+                       exact_starts=(*region.exact_starts, literal(0)) if region.exact_starts is not None else None)
     data = (
-      replace(data, shape=shape, strides=(data.strides[0], literal(0)))
+      replace(data, shape=shape, strides=(data.strides[0], literal(0)), region=region)
       if rank == 1
-      else replace(data, shape=data.shape[::-1], strides=data.strides[::-1])
+      else replace(data, shape=data.shape[::-1], strides=data.strides[::-1],
+                   region=replace(data.region, axes=data.region.axes[::-1]) if data.region is not None else None)
     )
   elif value.op == "arange":
     data = 0 if rank == 1 else 1 - (data if data is not None else 1)

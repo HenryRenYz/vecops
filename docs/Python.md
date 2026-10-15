@@ -307,11 +307,24 @@ tiles use private scalar scratch with staged simultaneous updates. No arrays
 of Vec/Mask objects are generated. This is a conservative placement policy,
 not a global register allocator or a universal no-spill guarantee.
 
-`T.func` helpers are source-parsed and inlined, including their immutable
-captures in cache identity. Conditional scalar/tile/tuple returns and early
+`T.func` helpers are source-parsed and inline by default, including their immutable
+captures and inline policy in cache identity. `@T.func(inline=False)` retains
+a private non-inlined call for each kernel specialization and call site. No
+public symbol or cross-kernel helper cache is created. Scalar/tile/tuple results
+use caller-owned slots; tile states crossing the call use scalar storage, so
+sizeless SVE values never become closure members. Locally declared states can
+still use registers. Calls may contain hardware regions, but cannot cross an
+already-active AMX/SME instruction region. Views and compile-time descriptors
+are not return values of private calls: use output arguments, or retain the
+default inline helper for descriptor construction.
+The tested BiSheng Clang 19 toolchain crashes while optimizing the large
+outlined SME cache schedule, so that library schedule remains inline. Private
+calls are currently used by the smaller ordinary-SVE PackedDot leaf; moving an
+entire hardware schedule behind a call requires separate target validation.
+Conditional scalar/tile/tuple returns and early
 returns from nested loops are supported. A helper return exits only the
-helper, not its caller kernel. Loop returns lower to lexical exit regions
-without C++ closures; a value helper that reaches its end without returning
+helper, not its caller kernel. Inline loop returns lower to lexical exit regions;
+private calls keep the exit continuation inside their own closure. A value helper that reaches its end without returning
 raises a runtime error. Result shapes must be available before the result
 slot is declared. Arbitrary host calls, mutable captures, exception
 handling, generators and optional DSL tensor operands are rejected. A source
@@ -380,7 +393,9 @@ retain the usual alias/snapshot protection.
 same indexing convention to a rank-one view (coordinate-tuple scatter is not
 yet implemented). Default duplicate indices have ordered logical
 last-writer-wins semantics; `unique=True` is a caller promise permitting
-native indexed `store_convert`. A failed bounds check may leave earlier
+native indexed `store_convert`. Both paths use the same default saturating
+conversion as `T.store`: float-to-integer truncates toward zero, clamps at
+both endpoints, and maps NaN to zero. A failed bounds check may leave earlier
 chunks written; neither operation promises transactional error handling.
 Arbitrary indexed grid writes cannot currently prove program ownership:
 automatic grids retain serial order and `parallel="require"` rejects them.
@@ -675,7 +690,31 @@ family. Column-contiguous output can swap/transposed A/B and the **whole fused
 epilogue**, not just the product. Already packed operands are not silently
 reinterpreted by this transformation.
 
-Row/column GEMV use vector widening-dot/FMA leaves; matrix leaves use public
+`T.widening_dot(a, b, dtype="float32")` groups rank-one computation values
+with equal logical lengths. Statically incompatible lengths are rejected;
+otherwise an unresolved equality is checked before evaluating the result.
+BF16 inputs produce one FP32 result per
+two input elements; signed/unsigned byte inputs accept `dtype="int32"` or
+`"uint32"` and produce one result per four elements. The result length is the
+ceiling of the input length divided by that group size. Missing elements of
+the last group contribute zero, including after a fused input transform.
+Byte products use modulo-2^32 output semantics. BF16 grouping follows the
+selected native widening-dot instruction's rounding semantics; it need not
+match a separately rounded FP32 multiply/reduction bit for bit. The CPU
+compiler emits the public typed `vec::widening_dot` primitive, allowing the
+C++ ISA backend to select BF16 dot/VNNI instructions or its portable fallback.
+
+K-contiguous BF16 and byte inner-product leaves use `T.widening_dot` followed
+by the ordinary DSL reduction. Automatic x86 AMX owners with unresolved
+spatial sizes retain their original cast/multiply/reduce vector fallback:
+expanding a different fallback changed GCC optimization of the entire owner
+and regressed measured native tail paths. Static small GEMV, explicit vector
+implementations and ordinary ARM inputs retain grouped widening. Dynamic
+SME owners whose byte operands include wider tile producers use the compact
+cast/multiply/reduce fallback too: expanding the converted groups caused
+severe LLVM inlining time growth. This does not change explicit
+`T.widening_dot` or pure BF16/byte GEMV. Row/column GEMV otherwise use vector FMA or
+conversion/reduction leaves; matrix leaves use public
 AMX or SME instructions when their dtype/target contract permits, otherwise
 vector FMA. Accumulation defaults to int32 for 8-bit integer inputs, int64 for
 16-bit integer inputs, float64
@@ -705,10 +744,27 @@ never evaluate an input DAG. Capacity and layout checks precede every access.
 The physical packing ABI decoder remains a compiler primitive, not a hidden
 packing loop. External packed buffers remain tied to their target ISA and
 process SVL; changing a logical shape is not a format conversion.
+Fresh packed operands created after online packing retain their native physical
+panel binding. Borrowing raw storage is permitted only when no potentially
+aliasing write follows its lexical capture; cross-region and historical
+ordinary loads retain their logical value path.
+
+`T.library.pack_b_compensated(source, destination, correction,
+zero_point=..., format="amx"/"sme")` packs an already converted `[K,N]`
+int8/uint8 value and writes an `[N]` int32 sidecar. The correction is
+`-zero_point * sum(source, axis=0)` modulo 2**32. It preserves the exact
+public packed ABI and zero padding, leaves excess destination capacity
+untouched, and requires disjoint packed/sidecar outputs. Disjoint source
+storage streams through 256-by-one-panel byte scratch; overlapping sources
+are captured before either output is written. Consumers broadcast the
+N-element sidecar as required; no full K-by-N int32 buffer is needed.
+
 
 `T.dot` and `T.library.matmul` expand into ordinary DSL loops, mutable
 accumulator state, conversions and stores before vector optimization.
-`T.func` is inlined before fusion analysis, including nested library calls.
+Default `T.func` helpers inline before fusion analysis, including nested library
+calls; `inline=False` retains a call region whose body is optimized separately
+from its caller's adjacent statements.
 Rank-two layernorm/softmax compute row statistics once; their final affine/exp
 tail can remain in the operand DAG. Fusion estimates the complete DAG's cost,
 not membership in an expensive-op list.
@@ -742,13 +798,23 @@ requires matching signedness and SME2, and AMX F16 requires
 AMX_FP16. Automatic selection retains a source vector fallback when the
 compiled target lacks an instruction; explicit implementation requests reject
 an unavailable family. Instruction support does not imply hardware availability. Automatic native
-selection currently requires M and N at least 16; smaller matrices retain the
-vector recipe and its producer-cache policy, as measured decode packing costs
-otherwise dominate. The versioned GCC 13 path currently adds roughly 2–3%
-to some single-row decode cases relative to the prior vector-only source;
-920f-4 showed up to roughly 4.5% overhead on a few decode pairs.
-This measured limitation is recorded alongside the gate, rather than treated
-as whole-catalog performance parity. Explicit requests retain native fringe support.
+selection requires M and N at least 16. A known smaller extent prunes the
+native recipe before helper expansion, even when the other extent is dynamic.
+For an unconfigured vector matmul (`packing="auto"`, no BM/BN/BK), positive
+constant dimensions with at most 256 output elements, K at most 256 and at
+most 32 KiB of logical inputs go directly to the vector leaf. This avoids
+expanding a cache traversal and issuing cache-size queries for that small
+working set. Explicit blocks and packing choices retain their cache recipe;
+explicit native requests retain native fringe support.
+
+The compiler memoizes metadata membership queries within each shared DAG
+traversal, including the definition-cycle context. Queries do not share facts
+across changing definitions or loop scopes. Automatic recipe-level affine
+simplification retains its constant-shape admission: extending it to Dynamic
+native recipes reduced clipped expressions but regressed measured ARM raw-dot
+paths. Runtime extents and residual checks therefore retain the existing
+policy. Captured reads and checked reshape ownership keep their identity.
+
 Prologue expressions are evaluated over logical inputs before physical padding;
 accumulator/broadcast initialization precedes hardware compute, and output
 conversion/epilogues follow it. Aligned tiles reuse operands in 2x2 register
@@ -1754,6 +1820,11 @@ for geometry-specific inspection; the normal compile driver supplies one.
 Source-parsed hardware library recipes can specialize integer loop metadata
 using that captured streaming length. Full-tile branch facts refine only their
 own induction domains; tails and sibling/successor blocks retain their bounds.
+Integer interval and clamp proofs memoize shared expression DAGs only within one
+query. Cache keys retain expression and endpoint identities, lexical bound order,
+ordered-simplification mode, and operation-catalog identity; nested catalog
+changes use separate caches. Exceptions release the query state and parallel
+lowerings have isolated contexts. Facts do not survive into another query.
 Constant-shape packing binds shape metadata before instruction printing, while
 signed runtime pitches, alias snapshots, capacity checks and storage-bit
 semantics remain intact. Unknown SVL retains native length queries. These
@@ -1950,11 +2021,18 @@ Raw first-sink FP32/FP64 SME products use masked direct ZA stores. Complete
 FP32 blocks reuse four tiles in a 2x2 schedule; eligible FP64 blocks use all
 eight ZA tiles in a 2x4 schedule to reuse each A load across more columns.
 Other complete/fringe shapes retain their bounded four-/one-tile schedules.
-Moderate inputs spanning several register tiles and at least 64 K elements
-are privately packed within a two-L2 input budget; smaller/nonresident inputs
-retain strided reads. Const and Dynamic FP64 use the same cache-budgeted
-packing choice. Packing is included in operation timing, and aliased producers
-are captured before writes.
+Optional reuse-driven online packing belongs to `matmul`, not `dot`.
+Raw FP32/FP64 SME dots retain strided reads, including repeated and fused
+calls; they do not query cache capacity to choose a private input pack.
+For automatic matmul, moderate inputs spanning several register tiles and
+at least 64 K elements can be privately packed within a two-L2 input budget;
+smaller/nonresident inputs retain strided reads. Const and Dynamic FP64 use
+the same cache-budgeted choice. Explicit `packing="none"` disables that
+optional choice; A/B/AB select their explicit dense-cache policy.
+Instruction-required layouts, bounded tail padding and producer/alias
+snapshots remain valid for both APIs. In particular, accepting raw B for AMX
+still requires its architectural grouped layout. Online packing is included
+in operation timing, and aliased producers are captured before writes.
 SME native operands use the public panel-major packed layout, constructed by
 ZA storage-word transposes from logical producers. Complete spatial panels with K-contiguous raw views skip the intermediate
 dense copy; transformed, spatial-fringe or other-stride producers first
@@ -2018,11 +2096,13 @@ lowering alone, not input validation or numerical semantics.
 For coordinate-preserving AMX B inputs, full panels use direct source
 registers with either K-contiguous transpose or spatial-word interleave.
 Direct dots share the downstream A/accumulator/output consumer across layout
-branches. Cache Matmul uses this choice for exact full-panel metadata;
-unbounded Dynamic cache traversal retains the materialized fallback because
-adding runtime layout branches regressed small x86 BiasRelu kernels, including
-under a 1.8 GHz cap. The original producer and all cast boundaries remain
-intact. Proven-layout fringes stage one physical B tile; unknown layouts
+branches. Cache Matmul uses this choice for exact full-panel metadata.
+Unconfigured automatic raw BF16 matmul with a native FP32 result, no
+initializer and no epilogue also retains B layout evidence in its resident
+leaf. This avoids the dense intermediate for small and medium raw products.
+Other unbounded Dynamic cases retain the materialized fallback: broader
+layout branches regressed small x86 BiasRelu kernels, including under a
+1.8 GHz cap. The original producer and all cast boundaries remain intact. Proven-layout fringes stage one physical B tile; unknown layouts
 retain their full logical-domain staging. Only padding is zero filled and
 producers never see padding coordinates. K-contiguous fringe rows use an
 explicit one-word vector descriptor, avoiding unused wide tail aggregates.
@@ -2031,6 +2111,30 @@ and conversions, and drain each output when ready to limit live vectors.
 Bare permutations of unbounded, already materialized private reads keep
 independent output banks. Exact tile caches, original producers and numeric
 conversions remain eligible for shared evaluation.
+Automatic grouped SME matmul additionally reuses one full-K private A pack
+across bounded full-K B panels when padded A fits 4 MiB and a B panel fits
+1 MiB. B panels cover at most 256 columns and align to two accumulator
+streaming words. Native raw BF16 inputs with at least 128 rows and contiguous
+K strides may instead prepare the complete B when its physical, padded size
+fits 32 MiB, avoiding repeated panel-owner entry. Other layouts retain the
+bounded panel schedule. Each leaf initializes its accumulator once and consumes all
+K, avoiding cache-K partial reloads and a separate full-result zero fill.
+The complete private result remains live until all input panels have been
+consumed, preserving input/output overlap and captured epilogue reads.
+Private A/B views retain their actual K-chunk strides; they are never treated
+as flattened external packed descriptors. Oversized A/K, explicit block sizes,
+explicit packing policies and external native packed descriptors retain their previous
+paths. This scheduling is implemented in the DSL recipe; dot does not acquire
+automatic optional online packing.
+CPU emission places an explicitly allocated scratch Buffer descriptor inside
+its common conditional branch when all storage references remain in that
+branch. Unselected matrix/cache paths therefore do not construct or destroy
+those descriptors. Serial-loop capacity reuse, worker isolation and implicit
+historical-read snapshots retain their existing lifetimes. The compiler
+option `cpu_branch_local_buffers` defaults to `True`; setting it to `False`
+restores entry-level declarations for controlled code-generation comparisons.
+This is a compiler lifetime optimization, not a change to T.func inlining or
+the private function-call ABI.
 Private disjoint storage skips runtime alias checks; unknown overlap retains
 sequential stores. An empty output prefix skips all input computation. Checked
 rank-one reshapes retain element counts, rounding and historical captures.
@@ -2069,9 +2173,35 @@ unavailable explicit instruction families. Low-level `T.amx`/`T.sme` APIs remain
 available; public C++ operators are unchanged. Performance parity is measured
 separately from correctness and instruction-family coverage.
 
+In the native recipe, an automatic matmul with both operands carrying matching
+physical packed descriptors and no explicit BM/BN/BK uses a whole-problem
+leaf. This is a compile-time choice even when M/N/K are runtime values: the
+native path and its automatic vector fallback share the same DSL policy,
+so unused cache traversal and full-matrix partial buffers are not expanded.
+Explicit block sizes and packing policies retain cache traversal. Arbitrary
+logical slices of a packed operand do not inherit a physical-panel shortcut.
+For native cache traversal with explicit B/AB dense packing, each N/K B panel is
+built once outside the M loop and reused by all its M blocks. Instruction
+packing uses a separate private interface: automatic AMX and grouped SME
+cache traversal prepares a native B panel once per N/K phase and passes its
+actual physical View to every M leaf. Private SME K-chunk padding and strides
+are retained; these panels are not reinterpreted as flat external packed
+storage or repaired as untrusted external padding. I16/I64 and SME group-one
+FP32/FP64 retain their existing preparation policy. Explicit B/AB still uses
+the dense cache policy above.
+
+The automatic AMX raw BF16 path also selects bounded full-K B panels for large
+K-contiguous B working sets, following the C++ WholeProblem reuse thresholds.
+It requires raw A/B, aligned K, no explicit cache blocks, and a physical B
+panel no larger than 1 MiB. Each panel spans 64--256 columns and is consumed
+across all M rows before advancing N. Cache packers retain original layout
+evidence without widening the resident AMX leaf's raw-layout dispatch. Both
+schedules accumulate into private output and finish once, preserving captured
+inputs, broadcast initializers, output aliases and whole-matrix epilogues.
+
 Cache traversal, private accumulator initialization, K-phase accumulation,
 optional dense packing and final epilogue application live in
-`_library/matmul.py`. `T.cache_bytes("L1"/"L2"/"L3"/"LLC")` queries the execution
+`_library/matmul.py` and `_library/matrix_recipe.py`. `T.cache_bytes("L1"/"L2"/"L3"/"LLC")` queries the execution
 CPU; an absent L3/LLC returns zero. Block sizes use positive bounded DSL
 arithmetic rather than a target-side native scheduler. Generic packed-ABI
 construction is in `_library/packing.py`, including zero padding and source
@@ -2087,3 +2217,204 @@ earlier in this guide are superseded by this section.
 shape with the scalar's dtype. This covers scalar initial accumulators without
 inventing a synthetic rank-one tensor. Vector hints/prefix geometry are
 retained when a staged value helper binds its caller's captured DAG.
+Transposing a captured value preserves that exact read across later writes,
+including transposes expanded inside a `T.func` or staged matrix recipe.
+Memory-layout folding waits until full-kernel capture provenance is available.
+
+### Matrix library: native panels, batch and reusable storage
+
+`T.pack` retains the public packed ABI and exact required capacity. Native
+AMX/SME targets now use source-level panel schedules, including transformed
+producer values and fringe padding. Extra destination capacity is untouched.
+A raw SME packing shortcut requires unit stride along the logical K dimension
+(`A.strides[1] == 1` or `B.strides[0] == 1`); other layouts use the existing
+producer staging path.
+It also requires a disjointness proof against all relevant
+kernel writes; otherwise it stages the captured producer before packing. This
+preserves `old = T.load(X); T.store(X, ...); T.pack(old, P)` semantics.
+SME public packing traverses complete K instruction chunks with constant
+group counts and handles the terminal remainder separately. This preserves
+exact public group capacity for K tails without combining unrelated loop
+extrema in hardware bounds checks, including converted and bounded staging.
+
+`pass_options={"cpu_pack_bounded": True}` opts converted SME public packing
+into cache-block staging. It evaluates the original producer outside the SME
+owner, then packs several instruction chunks inside one owner per cache block.
+The staging allocation is at most 64 KiB for architectural streaming vector
+lengths, with K blocks no larger than 1024 elements. The public group-padded
+K pitch remains unchanged; private whole-chunk padding is not exposed. A
+runtime disjointness proof covers all producer read roots and the packed
+destination. Overlapping inputs retain complete capture before the first
+write, preserving aliases and historical loads. The default is `False`;
+native performance remains a criterion for enabling this policy.
+
+Native packed AMX K tails keep complete external tiles in place and privately
+repair only the terminal tile. SME keeps its equivalent terminal-group repair.
+External padding has no numerical promise: masked lanes are selected to zero
+before arithmetic, and caller-owned padding is never modified.
+
+Logical rank-two slices of packed inputs may borrow native physical panels
+when their spatial origin is panel-aligned and their K origin and length cover
+complete instruction groups. The compiler must prove these facts; dynamic or
+unaligned windows retain the general logical decoder. Borrowed views preserve
+the original allocation's physical K pitch, even when the slice has a much
+smaller K. Root density, capacity and output nonalias checks still precede all
+native access. An aligned operand can be combined with a raw operand. Explicit
+cache block or packing policies retain their requested traversal.
+
+Automatic native matrix selection additionally admits fresh AMX/SME packed
+small operands with K >= 32 and M*N*K >= 512. Every consumer must retain a
+valid current physical-read proof; historical or cross-region captures use the
+vector path. Raw byte inputs use native kernels only for M >= 4, N >= 16,
+K >= 32 and M*N*K >= 16384 on x86. Raw SME products retain the existing
+M >= 16 and N >= 16 native gate: small raw products can lose substantially
+to vector execution once online packing is included with the source SDK.
+Raw BF16/FP16 skinny shapes keep the existing
+vector policy. A statically satisfied native shape condition omits the second
+shape fallback while retaining hardware-feature fallback.
+
+Private batched-result stores can fuse with an immediate epilogue when no
+intervening or fresh aliased read can observe the removed store. External
+loads captured after that store retain its ordering, even when their view is
+not syntactically C but aliases C at runtime.
+
+`T.library.batched_matmul((A, B), C, ...)` accepts rank-two shared inputs or
+rank-three inputs with an ordinary batch axis (an extent of one broadcasts).
+`C` is rank three. `strategy="serial"` executes independent products;
+`"rows"` flattens batch×M for shared B; `"columns"` flattens batch×N for shared A.
+`"auto"` uses optional `raw_inputs=(A_view, B_view)` layout evidence to choose
+these folds. Layout hints do not replace the original producer expressions;
+a logical reshape is not a promise of zero-copy execution. Complete private
+result storage protects input/output aliases across different batches.
+
+`parallel="serial"` is the default. `"auto"` requests a batch grid and retains
+serial execution when ownership cannot be proved; `"require"` rejects a missing
+proof. Parallel traversal requires `strategy="auto"` or `"serial"` and does not
+apply the row/column folds. The private result is copied to `C` after the grid
+joins, and each worker owns its internal scratch and hardware register state.
+`shared_packing=False` is the default; `True` packs rank-two shared inputs once
+before traversal. This is reuse within one invocation, not a persistent cache.
+Native grid legalization accepts only known memory effects inside a lexical
+hardware owner. Unrecognized effects, shared mutable owner state, or clipped
+grid-dependent output partitions still reject required parallel execution.
+On ARM SVE targets, compiler snapshots probe the selected compiler for the
+scalable-vector common-store sinking crash. Only a reproduced failure followed
+by a successful probe with the compatibility flag enables
+`-mllvm=-simplifycfg-sink-common=false`. The same policy applies to C++ and DSL
+builds, including serial kernels, and participates in artifact/cache identity.
+Cache-only execution replays the attested choice without discovering or
+executing compiler tools; missing or ambiguous policy records require an
+online build with an unambiguous cache namespace.
+
+Both `T.library.matmul` and `T.library.batched_matmul` accept `workspace=` with
+exact result shape and accumulation dtype. Declare `T.workspace` at kernel top
+level and pass its view; disjointness from inputs, initializer and output is
+checked before use. Every invocation overwrites this storage. This reuses
+capacity, not cached matrix values: changing input data still recomputes the
+product. Explicit external prepacking remains the way to reuse packed contents.
+
+`pass_options={"cpu_workspace_scratch": True}` additionally promotes eligible
+top-level internal `T.alloc` sites to the existing replay workspace. Extents
+must depend only on immutable tensor metadata and supported replay-keyed
+properties. Loop-local, branch-local, payload-dependent and hardware-owner
+allocations retain their previous lifetime. The default is disabled. Runtime
+workspace planning/replay continues to control capacity, invalidation and
+concurrent invocation ownership; a JIT compilation cache alone is not a
+workspace cache.
+
+Experimental schedule controls are kept separate from arithmetic semantics:
+
+- `cpu_matmul_orientation="output"` retains the established column-output
+  transpose policy. `"target"` uses proven AMX A/B layouts and shape costs,
+  and lets eligible SME products use direct vertical output. `swap=False`
+  remains authoritative.
+- `cpu_packed_dot=True` enables the ordinary-SVE MMLA candidate for public
+  SME-packed BF16 or same-sign byte AB inputs. It is guarded by ISA support,
+  matching captured VL/SVL, small shape and K limits; unsupported combinations
+  retain the previous leaf. It does not pack raw inputs or quantize them.
+  Native BF16, I8 and U8 leaves, register-geometry composition, and automatic
+  dispatch with its K-limit fallback have been validated on ARM. The default
+  remains disabled: measured packed I8 2×2×65 and 4×4×257 are faster than
+  the generic leaf, while BF16 2×2×65 is slower. Performance depends on the
+  exact dtype, shape and K; this option is an explicit candidate.
+
+Explicit associative tuple `T.reduce` can retain four independent accumulators
+in one ordered traversal. The matrix GEMV recipe uses this to share a common
+K vector across four output dots; unrelated automatic reduction fusion keeps
+its existing register-pressure limit. AMX defaults and the explicit SME
+`paired-fringe` schedule retain multi-tile interiors when a right or bottom
+fringe is present, with fringe work inside the same instruction-owner interval.
+The SME default retains its measured modulo-aligned dispatch.
+
+`T.library.quantize_per_row_u8(value, multipliers, zero_point)` maps FP32 values
+through separate FP32 multiply/add operations, replaces NaN with zero,
+clamps to `[0, 255]`, and truncates into U8. Supply row multipliers with shape
+`(M, 1)` and a shared scalar zero point; ordinary DSL broadcasting applies.
+Positive and negative infinities clamp to 255 and zero respectively.
+`T.library.dequantize_per_row_column(value, row_scale, column_scale)` requires
+I32 input and performs I32-to-FP32 conversion, FP32 row-scale multiplication,
+then FP32 column-scale multiplication, in that order. Row and column scales
+can use shapes `(M, 1)` and `(1, N)`. These composable producer helpers do not
+change generic cast semantics or automatically subtract integer zero-point
+corrections; callers supply any correction in their integer accumulation.
+
+`cpu_runtime_quant_int8=True` enables an experimental exact-pattern route for
+`cast_u8(A_fp32 * row_multiplier + shared_i32_zero_point)` with native
+SME-packed I8 B and an I32 accumulation domain. The route is selected when
+M or N is below the existing native matrix threshold of 16; larger shapes
+retain SME packing/MOPA, which outperforms row-wise grouped GEMV there.
+The original conversion DAG is evaluated in bounded four-element K groups;
+the last partial group quantizes only valid inputs. A private function boundary
+keeps the grouped leaf independent of the larger native matrix fallback's
+inlining and register allocation. It is not reassociated into FMA. Integer
+correction remains modulo 2**32, and a fused dequantization DAG preserves its
+ordered FP32 multiplications. Explicit FMA, unmatched transforms, packed
+origins, and explicit cache/packing policies retain the original recipe. This
+option never introduces quantization into an ordinary floating-point product.
+It also recognizes the exact NaN/clamp wrapper of
+`T.library.quantize_per_row_u8`, preserving those operations. The option
+defaults to `False`; using either public helper does not enable it implicitly.
+
+`cpu_matmul_native_schedule` selects experimental native schedules:
+`"default"`, SME `"shared-owner"` or `"prefetch"`, AMX `"stream-b"`, and
+AMX/SME `"paired-fringe"`.
+The shared-owner leaf uses preallocated, typed packing inside the same lexical
+resource owner as matrix compute when dtype/layout/alias proofs allow it;
+other inputs retain the established path. These alternatives remain explicit
+until target measurements justify a default. Instruction hints do not relax
+logical bounds, padding, or alias checks. The paired-fringe candidate shares
+one input across a 1×2 or 2×1 tail of an existing 2×2 tile body. It remains
+explicit: enabling it globally regressed the dynamic 32×32×17 x86 raw-dot
+benchmark by about 12% against the P3 baseline, despite that case having no
+spatial tail. AMX default leaves retain their previous 1×1 fringe traversal. SME defaults
+retain the original modulo-aligned 2×2/2×4 dispatch and use the one-tile
+schedule for a nonaligned problem; the SME paired candidate additionally
+enables a multi-tile body on nonaligned problems.
+
+`cpu_outline_vector_fallback` is a boolean option, defaulting to `True` for
+SME and `False` for other targets.
+It outlines only the ordinary vector fallback in automatic native dispatch;
+native resident and cache drivers retain their existing inlining. This can
+change native code size and adds a private call when the vector fallback is
+selected. SME measurements support isolating this fallback while retaining
+the original aligned native tile dispatch; x86 measurements showed small
+packed regressions, so x86 keeps the fallback inline. An explicit boolean
+override remains available for target-specific experiments.
+
+`T.sve.iota`, `join_k_groups`, `broadcast_segment`, `row_pair`, and `mmla` expose pure
+ordinary-SVE register operations. They require complete scalable `pow=0`
+registers and run outside SME owners. `iota(dtype)` returns the zero-based lane
+indices in one native unsigned-integer register (`uint8/16/32/64`). Segment geometry is fixed at 128 bits;
+MMLA supports BF16→FP32 and same-sign byte→I32 combinations. These are typed
+instruction building blocks; the packed-dot traversal and output scheduling
+remain ordinary DSL source.
+
+### ARM scalable-store compiler compatibility
+
+A compiler snapshot on an SVE host runs a bounded compiler probe once per
+compiler identity and flag configuration. A reproduced scalable-size failure
+selects only `-mllvm=-simplifycfg-sink-common=false`, after verifying that it
+fixes the probe. Source C++ and generated DSL use the same selected flag,
+which participates in artifact identity. Cache-only snapshots replay the
+matching policy attestation from `cache_dir/identities`; they do not invoke
+a toolchain. Missing or ambiguous attestations are explicit cache errors.

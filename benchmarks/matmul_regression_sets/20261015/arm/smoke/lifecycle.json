@@ -1,0 +1,22 @@
+{
+  "architecture": "arm",
+  "registration_ids": [
+    "10a6155406feea529224bfc2",
+    "d985a29d7e94b10b438c4105",
+    "e36552756d3053084e36d263",
+    "fc8baf190bc25ca1e9f29703",
+    "e938ec30727d3e416aba6414",
+    "00c22b9c877b08971c17ad01",
+    "f7f960d5529bccdc073f9ebd",
+    "8a31e86770ea5a736fbbd69f"
+  ],
+  "tier": "smoke",
+  "evidence": {
+    "main_plan": "/home/renyz/project/vecops-neo/build-matmul-opt-20261015/arm-packed-checked/plan.json",
+    "main_plan_sha256": "844d33211117f8841fe5daf5161f40ce5c7e998c6d56b26b978a5af50c4676f1",
+    "ledger_sha256": "342402009dca9f184de74d1d9181c2c91781d314539d59242d56f9a48863b49c",
+    "supplemental_summary": "/home/renyz/project/vecops-neo/build-matmul-opt-20261015/arm-supplemental-final-summary.json",
+    "supplemental_sha256": "c29afd5f5dd0dd22146b9910849085897340863a3dcbab050d3142556913e154",
+    "sentinels_sha256": "8685cd39b79626ee25770168acdef03dd8cba7cc9bffff5340871add1bc9d785"
+  }
+}

@@ -10,6 +10,18 @@ by runners and also has a JSON/text CLI:
 
     python benchmarks/dsl_matmul_catalog.py --list
     python benchmarks/dsl_matmul_catalog.py --json
+    python benchmarks/dsl_matmul_catalog.py --json --architecture x86 --feature HAS_AMX_INT8
+
+The default ARM view remains compatible with prior source-backed execution
+IDs. The x86 view selects source ISA gates before expansion (AMX_FP16 is not
+enabled implicitly), retaining original source line numbers. Standalone
+packing/stateful/weight-reuse contracts use a separate supplemental inventory;
+they must not be represented as ordinary stateless matmul rows.
+Use ``complete_registration=True`` (CLI ``--complete-registration``) for the
+full compute inventory: this additionally includes ScenarioBench and the
+previously omitted Const batched packed registrations. OrientationBench is an
+explicit optional CMake target. PolicyBench exists only on ARM with fixed SVL;
+the x86 inventory retains an excluded-build record instead of a fake policy.
 
 The parser is intentionally conservative: explicit numeric registrations are
 decoded, while symbolic template registrations are retained as unsupported
@@ -37,6 +49,7 @@ SOURCE_FILES = (
   "MatmulPolicyBench.cpp",
   "MatmulPackedBench.cpp",
   "MatmulPackBenchCommon.h",
+  "MatmulScenarioBench.cpp",
 )
 OPS = ROOT / "benchmarks" / "ops"
 
@@ -87,6 +100,63 @@ class CatalogCase:
 def _read_sources(root: Path) -> dict[str, str]:
   return {name: (root / "benchmarks" / "ops" / name).read_text() for name in SOURCE_FILES}
 
+
+def _architecture_source(source: str, features: frozenset[str]) -> str:
+  """Select concrete preprocessor branches without changing source line numbers.
+
+  Target-shard conditionals remain enabled so every compiled shard contributes
+  its registration. This is inventory selection, not a C++ preprocessor.
+  """
+  symbols = set(features) | {"VECOPS_TARGET_SHARD_ACTIVE", "VECOPS_WEIGHT_REUSE_TARGET_SHARD_ACTIVE"}
+  stack = []
+  active = True
+  output = []
+  lines = source.splitlines(keepends=True)
+  index = 0
+  while index < len(lines):
+    line = lines[index]
+    directive = re.match(r"\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)", line)
+    if not directive:
+      output.append(line if active else "\n" if line.endswith("\n") else "")
+      index += 1
+      continue
+    command, expression = directive.groups()
+    count = 1
+    while expression.rstrip().endswith("\\"):
+      expression = expression.rstrip()[:-1] + lines[index + count].strip()
+      count += 1
+
+    def condition(text):
+      text = re.sub(r"defined\s*\(?\s*(\w+)\s*\)?", lambda m: str(int(m[1] in symbols)), text)
+      text = re.sub(r"\b[A-Za-z_]\w*\b", lambda m: str(int(m[0] in symbols)), text)
+      text = text.replace("&&", " and ").replace("||", " or ")
+      text = re.sub(r"!(?!=)", " not ", text)
+      if re.search(r"[^0-9\s()<>=!&|+*/.\-andort]", text):
+        raise ValueError(f"unsupported inventory preprocessor condition: {text}")
+      return bool(eval(text.strip(), {"__builtins__": {}}, {}))
+
+    if command in {"if", "ifdef", "ifndef"}:
+      selected = condition(expression) if command == "if" else expression.strip() in symbols
+      if command == "ifndef":
+        selected = not selected
+      stack.append((active, selected))
+      active = active and selected
+    elif command == "elif":
+      parent, taken = stack[-1]
+      selected = not taken and condition(expression)
+      stack[-1] = (parent, taken or selected)
+      active = parent and selected
+    elif command == "else":
+      parent, taken = stack[-1]
+      active = parent and not taken
+      stack[-1] = (parent, True)
+    else:
+      active, _ = stack.pop()
+    output.extend("\n" if x.endswith("\n") else "" for x in lines[index : index + count])
+    index += count
+  if stack:
+    raise ValueError("unbalanced inventory preprocessor condition")
+  return "".join(output)
 
 def _line(source: str, offset: int) -> int:
   return source.count("\n", 0, offset) + 1
@@ -603,7 +673,7 @@ def _registration_cases(filename: str, source: str) -> list[CatalogCase]:
   return result
 
 
-def _base_matmul_registrations(source: str) -> list[CatalogCase]:
+def _base_matmul_registrations(source: str, *, architecture: str = "arm") -> list[CatalogCase]:
   """Retain each ARM MatmulBench shard-to-template expansion site."""
   result = []
   functions = (
@@ -621,12 +691,12 @@ def _base_matmul_registrations(source: str) -> list[CatalogCase]:
       # registrations above the ARM branch.  Keep only calls below the ARM
       # catalog block, rather than treating an alias name as proof of ARM.
       arm_catalog = source.find("constexpr int CatalogShard")
-      if arm_catalog < 0 or pos < arm_catalog:
+      if architecture == "arm" and (arm_catalog < 0 or pos < arm_catalog):
         continue
       args = _template_args(source, pos, function)
       # The ARM branch uses SME aliases; discard the mutually exclusive
       # x86 registrations without inferring that they run on ARM.
-      if not any("SME_" in arg or "NativeI8" in arg for arg in args):
+      if not any("SME_" in arg or "AMX_" in arg or "NativeI8" in arg for arg in args):
         continue
       result.append(
         CatalogCase(
@@ -634,7 +704,7 @@ def _base_matmul_registrations(source: str) -> list[CatalogCase]:
           source="benchmarks/ops/MatmulBench.cpp",
           line=_line(source, pos),
           name=f"{function}/line_{_line(source, pos)}",
-          native_a=next((arg.rsplit("::", 1)[-1] for arg in args if "SME_" in arg or "NativeI8" in arg), None),
+          native_a=next((arg.rsplit("::", 1)[-1] for arg in args if "SME_" in arg or "AMX_" in arg or "NativeI8" in arg), None),
           input_modes=tuple(x.rsplit("::", 1)[-1].lower() for x in args if "InputMode::" in x),
           metadata=("Const", "Dynamic"),
           dsl_supported=False,
@@ -649,7 +719,7 @@ def _base_matmul_registrations(source: str) -> list[CatalogCase]:
   return result
 
 
-def _base_matmul_expanded(source: str, common: str) -> list[CatalogCase]:
+def _base_matmul_expanded(source: str, common: str, *, architecture: str = "arm") -> list[CatalogCase]:
   """Expand concrete ARM helper registrations through their shape templates."""
   atoms = {
     "SME_BF16F32": ("bf16", "bf16", "fp32", 2),
@@ -661,6 +731,8 @@ def _base_matmul_expanded(source: str, common: str) -> list[CatalogCase]:
     "NativeI8U8S8": ("uint8", "int8", "int32", 4),
     "NativeI8U8U8": ("uint8", "uint8", "int32", 4),
   }
+  if architecture == "x86":
+    atoms.update({"AMX_BF16F32": ("bf16", "bf16", "fp32", 32), "AMX_F16F32": ("fp16", "fp16", "fp32", 32)})
   packed_shapes = [
     (int(m), int(n), int(k), f"m{m}_n{n}_k{k}", ("packedab",))
     for m, n, k in re.findall(r"VECOPS_REGISTER_PACKED_DOT_PAIR\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,", common)
@@ -678,7 +750,7 @@ def _base_matmul_expanded(source: str, common: str) -> list[CatalogCase]:
   for function in functions:
     for pos, body in _balanced_calls(source, function):
       arm_catalog = source.find("constexpr int CatalogShard")
-      if arm_catalog < 0 or pos < arm_catalog:
+      if architecture == "arm" and (arm_catalog < 0 or pos < arm_catalog):
         continue
       args = _template_args(source, pos, function)
       joined = " ".join(args)
@@ -885,10 +957,13 @@ def _base_matmul_expanded(source: str, common: str) -> list[CatalogCase]:
   return result
 
 
-def _arm_family_cases(source: str) -> list[CatalogCase]:
+def _arm_family_cases(source: str, *, architecture: str = "arm") -> list[CatalogCase]:
   """Expand explicit ARM family/policy-only shapes and retain their limits."""
   start = source.find("#else\n  using PackedDot")
   end = source.find("\n#endif\n}", start)
+  if architecture == "x86":
+    start = source.find("void register_family_benchmarks()")
+    end = len(source)
   if start < 0 or end < 0:
     return []
   arm = source[start:end]
@@ -903,6 +978,8 @@ def _arm_family_cases(source: str) -> list[CatalogCase]:
     "FamilyI8U8S8": ("uint8", "int8", "int32", "uint8"),
     "FamilyI8U8U8": ("uint8", "uint8", "int32", "uint8"),
   }
+  if architecture == "x86":
+    atom_types["AMX_BF16F32"] = ("bf16", "bf16", "fp32", "bf16")
   family_aliases = {
     "Small": "kernel_family::SmallVector",
     "PackedDot": "kernel_family::PackedDot",
@@ -1021,7 +1098,7 @@ def _arm_policy_cases(source: str) -> list[CatalogCase]:
   return result
 
 
-def _packed_scenario_cases(source: str) -> list[CatalogCase]:
+def _packed_scenario_cases(source: str, *, architecture: str = "arm", complete_registration: bool = False) -> list[CatalogCase]:
   """Join ARM packed registrations with their concrete scenario shape tables."""
   atoms = {
     "SME_BF16F32": ("bf16", "bf16", "fp32", 2),
@@ -1033,6 +1110,8 @@ def _packed_scenario_cases(source: str) -> list[CatalogCase]:
     "PackedI8U8S8": ("uint8", "int8", "int32", 4),
     "PackedI8U8U8": ("uint8", "uint8", "int32", 4),
   }
+  if architecture == "x86":
+    atoms.update({"AMX_BF16F32": ("bf16", "bf16", "fp32", 32), "AMX_F16F32": ("fp16", "fp16", "fp32", 32)})
   result: list[CatalogCase] = []
   registrations = (
     ("register_all_packing_modes", "rank2"),
@@ -1070,7 +1149,7 @@ def _packed_scenario_cases(source: str) -> list[CatalogCase]:
         continue
       native_a, native_b, accumulator, _atom_kstep = atom_types
       kstep_token = kstep_match.group(1)
-      kstep = 1 if kstep_token == "1" else 2 if kstep_token == "BF16KStep" else 4
+      kstep = 1 if kstep_token == "1" else (32 if architecture == "x86" else 2) if kstep_token == "BF16KStep" else (64 if architecture == "x86" else 4)
       # The registration templates take Atom, MemoryA/B/C, input pipeline,
       # output pipeline, then optional B pipeline and C-input memory type.
       memory_a, memory_b, memory_c = (_normalize_dtype(arg) for arg in args[1:4])
@@ -1157,7 +1236,7 @@ def _packed_scenario_cases(source: str) -> list[CatalogCase]:
               input_pipeline_a=input_pipeline_a,
               input_pipeline_b=input_pipeline_b,
               output_pipeline=output_pipeline,
-              metadata=("Dynamic",) if rank == "batched" else ("Const", "Dynamic"),
+              metadata=("Dynamic",) if rank == "batched" and architecture == "arm" and not complete_registration else ("Const", "Dynamic"),
               batch=str(batch) if batch is not None else None,
               broadcast=broadcast,
               configuration=f"Atom={atom}; KStep={kstep_token}; source_case_table={'packed_dtype_probe_cases' if probe else 'batched_scenario_cases' if rank == 'batched' else 'scenario_cases'}",
@@ -1171,7 +1250,7 @@ def _packed_scenario_cases(source: str) -> list[CatalogCase]:
   return result
 
 
-def _fusion_cases(source: str) -> list[CatalogCase]:
+def _fusion_cases(source: str, *, architecture: str = "arm") -> list[CatalogCase]:
   """Expand ARM fusion registrations over their declared shape tables."""
   ranks = {
     "register_rank2_and_batched_fusion": ("fusion", "batched_fusion"),
@@ -1189,6 +1268,12 @@ def _fusion_cases(source: str) -> list[CatalogCase]:
     "FusionI8U8S8": ("uint8", "int8", "int32", 4),
     "FusionI8U8U8": ("uint8", "uint8", "int32", 4),
   }
+  if architecture == "x86":
+    atoms["FusionFloatAtom"] = ("bf16", "bf16", "fp32", 32)
+    atoms["::vecops::matmul::AMX_F16F32"] = ("fp16", "fp16", "fp32", 32)
+    for key in ("FusionI8S8S8", "FusionI8S8U8", "FusionI8U8S8", "FusionI8U8U8"):
+      a, b, c, _ = atoms[key]
+      atoms[key] = (a, b, c, 64)
   shape_tables = {
     "fusion": [
       ("tail", 19, 23, None),
@@ -1285,11 +1370,97 @@ def _fusion_cases(source: str) -> list[CatalogCase]:
   return result
 
 
+def _scenario_registrations(source: str, common: str) -> list[CatalogCase]:
+  """Join the default scenario target to its rank-two/rank-three tables."""
+  atoms = {
+    "AMX_BF16F32": ("bf16", "bf16", "fp32"),
+    "AMX_F16F32": ("fp16", "fp16", "fp32"),
+    "SME_BF16F32": ("bf16", "bf16", "fp32"),
+    "SME_F16F32": ("fp16", "fp16", "fp32"),
+    "SME_F32F32": ("fp32", "fp32", "fp32"),
+    "SME_F64F64": ("fp64", "fp64", "fp64"),
+    "I8S8S8": ("int8", "int8", "int32"),
+    "I8S8U8": ("int8", "uint8", "int32"),
+    "I8U8S8": ("uint8", "int8", "int32"),
+    "I8U8U8": ("uint8", "uint8", "int32"),
+  }
+  environment = {name: int(value) for name, value in re.findall(r"constexpr nint_t (\w+)\s*=\s*(\d+)", source)}
+  variables = dict(re.findall(r"const auto (\w+)\s*=\s*([\w_]+\([^;]+\));", source))
+  result = []
+  for function in ("register_scenario", "register_batched_scenario"):
+    for pos, body in _balanced_calls(source, function):
+      args = _template_args(source, pos, function)
+      if len(args) < 4:
+        continue
+      atom = next((key for key in atoms if key in args[0]), None)
+      if atom is None:
+        raise ValueError(f"unresolved scenario Atom at line {_line(source, pos)}: {args[0]}")
+      selector = variables.get(body.strip(), body.strip())
+      match = re.fullmatch(r"(batched_)?scenario_cases\(([^)]+)\)", selector)
+      if match is None:
+        raise ValueError(f"unresolved scenario table at line {_line(source, pos)}: {selector}")
+      kstep = _eval_int(match[2], environment)
+      if kstep is None:
+        raise ValueError(f"unresolved scenario KStep: {match[2]}")
+      batched = function == "register_batched_scenario"
+      table = "make_batched_scenario_cases/" if batched else "make_scenario_cases/"
+      native_a, native_b, accumulator = atoms[atom]
+      tail = args[4:]
+      pipelines = [arg.rsplit("::", 1)[-1] for arg in tail if "InputPipeline::" in arg]
+      pipa = pipelines[0] if pipelines else "Convert"
+      pipb = pipelines[1] if len(pipelines) > 1 else pipa
+      out = next((arg.rsplit("::", 1)[-1] for arg in tail if "OutputPipeline::" in arg), "Convert")
+      mc = _normalize_dtype(args[3])
+      prior = next((_normalize_dtype(arg) for arg in tail if _normalize_dtype(arg)), mc)
+      for shape in _scenario_shape_cases(common.replace("k_step", str(kstep))):
+        if not shape.name.startswith(table):
+          continue
+        broadcast = shape.broadcast
+        if batched and "false" in tail and broadcast and "A=shared" in broadcast:
+          broadcast = broadcast.replace("A=shared", "A=independent")
+        if broadcast:
+          broadcast = "A" if "A=shared" in broadcast else "B" if "B=shared" in broadcast else "independent"
+        result.append(
+          dataclasses.replace(
+            shape,
+            catalog="MatmulScenarioExpanded",
+            source="benchmarks/ops/MatmulScenarioBench.cpp",
+            line=_line(source, pos),
+            name=function + "/" + shape.name.removeprefix(table),
+            dtype_a=native_a,
+            dtype_b=native_b,
+            accumulator=accumulator,
+            native_a=native_a,
+            native_b=native_b,
+            memory_a=_normalize_dtype(args[1]),
+            memory_b=_normalize_dtype(args[2]),
+            memory_c=mc,
+            memory_c_input=prior,
+            input_modes=("raw",),
+            metadata=("Const", "Dynamic"),
+            broadcast=broadcast,
+            input_pipeline_a=pipa,
+            input_pipeline_b=pipb,
+            output_pipeline=out,
+            configuration=f"Atom={atom}; KStep={kstep}",
+            dsl_supported=True,
+            unsupported_reason=None,
+            declaration=f"{function}<{', '.join(args)}>({body})",
+          )
+        )
+  return result
+
 def load_cases(
-  root: Path | str = ROOT, *, svl_bytes: int | None = None, lane: int | None = None
+  root: Path | str = ROOT, *, svl_bytes: int | None = None, lane: int | None = None,
+  architecture: str = "arm", features: Iterable[str] | None = None,
+  complete_registration: bool = False,
 ) -> tuple[CatalogCase, ...]:
   root = Path(root)
-  if svl_bytes is None:
+  if architecture not in {"arm", "x86"}:
+    raise ValueError("architecture must be 'arm' or 'x86'")
+  if architecture == "x86":
+    svl_bytes, lane = None, 16
+  if svl_bytes is None and architecture == "arm":
     try:
       from vecops._arm_vector_state import get_vector_state
 
@@ -1301,17 +1472,28 @@ def load_cases(
   if lane is None and svl_bytes is not None:
     lane = svl_bytes // 4
   sources = _read_sources(root)
+  if architecture == "x86":
+    selected_features = frozenset(features if features is not None else {"HAS_AMX_BF16", "HAS_AMX_INT8"})
+    sources = {name: _architecture_source(source, selected_features | {"ARCH_X86_FAMILY"}) for name, source in sources.items()}
   cases: list[CatalogCase] = []
   for filename, source in sources.items():
+    if filename == "MatmulPolicyBench.cpp" and architecture == "x86":
+      cases.append(CatalogCase("ArchitectureExcluded", "benchmarks/CMakeLists.txt", 168,
+        "MatmulPolicyBench", dsl_supported=False,
+        unsupported_reason="CMake registers MatmulPolicyBench only for ARM NativeFixedStreamingSVE; its Atom is SME_BF16F32, so no x86 registration exists"))
+      continue
     if filename == "MatmulBench.cpp":
-      cases.extend(_base_matmul_registrations(source))
-      cases.extend(_base_matmul_expanded(source, sources["MatmulBenchCommon.h"]))
+      cases.extend(_base_matmul_registrations(source, architecture=architecture))
+      cases.extend(_base_matmul_expanded(source, sources["MatmulBenchCommon.h"], architecture=architecture))
+    if filename == "MatmulScenarioBench.cpp" and complete_registration:
+      selected = source if architecture == "x86" else _architecture_source(source, frozenset(features or {"HAS_SME", "HAS_SME_F64F64"}))
+      cases.extend(_scenario_registrations(selected, sources["MatmulScenarioBenchCommon.h"]))
     if filename == "MatmulFamilyBench.cpp":
-      cases.extend(_arm_family_cases(source))
+      cases.extend(_arm_family_cases(source, architecture=architecture))
     if filename == "MatmulPolicyBench.cpp":
       cases.extend(_arm_policy_cases(source))
     if filename == "MatmulPackedBench.cpp":
-      cases.extend(_packed_scenario_cases(source))
+      cases.extend(_packed_scenario_cases(source, architecture=architecture, complete_registration=complete_registration))
     if filename in {"MatmulBenchCommon.h", "MatmulFamilyBench.cpp", "MatmulPolicyBench.cpp", "MatmulPackedBench.cpp"}:
       cases.extend(_extent_cases(filename, source))
     if filename == "MatmulBenchCommon.h":
@@ -1325,7 +1507,7 @@ def load_cases(
     }:
       cases.extend(_registration_cases(filename, source))
     if filename == "MatmulFusionBench.cpp":
-      cases.extend(_fusion_cases(source))
+      cases.extend(_fusion_cases(source, architecture=architecture))
     if filename == "MatmulOrientationBench.cpp":
       cases.extend(_orientation_cases(source))
     if filename == "MatmulPackBenchCommon.h":
@@ -1333,7 +1515,7 @@ def load_cases(
     if filename == "MatmulScenarioBenchCommon.h":
       cases.extend(_vocab_cases(filename, source))
       cases.extend(_scenario_shape_cases(source))
-  return tuple(dataclasses.replace(case, svl_bytes=svl_bytes, lane=lane) for case in cases)
+  return tuple(dataclasses.replace(case, svl_bytes=svl_bytes, lane=lane, **({"arm_condition": "x86 source registration; selected ISA features: " + ",".join(sorted(selected_features))} if architecture == "x86" else {})) for case in cases)
 
 
 def cases_by_catalog(cases: Iterable[CatalogCase] | None = None) -> dict[str, tuple[CatalogCase, ...]]:
@@ -1351,8 +1533,11 @@ def main() -> int:
   parser.add_argument(
     "--svl-bytes", type=int, help="streaming vector length in bytes; defaults to current calling thread on ARM Linux"
   )
+  parser.add_argument("--architecture", choices=("arm", "x86"), default="arm")
+  parser.add_argument("--feature", action="append", help="explicit target HAS_* feature; repeat for each enabled feature")
+  parser.add_argument("--complete-registration", action="store_true", help="include ScenarioBench and complete batched packed metadata coverage")
   args = parser.parse_args()
-  cases = load_cases(svl_bytes=args.svl_bytes)
+  cases = load_cases(svl_bytes=args.svl_bytes, architecture=args.architecture, features=args.feature, complete_registration=args.complete_registration)
   if args.json:
     print(json.dumps([case.as_dict() for case in cases], indent=2))
   else:

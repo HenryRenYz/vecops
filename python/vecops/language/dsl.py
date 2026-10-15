@@ -74,17 +74,31 @@ class ExecutionLayout:
 
 
 class DSLFunction:
-  def __init__(self, function):
+  def __init__(self, function, *, inline=True):
+    if type(inline) is not bool:
+      raise TypeError("T.func inline must be a bool")
     functools.update_wrapper(self, function)
     self.function = function
+    self.inline = inline
 
   def __call__(self, *args, **kwargs):
     raise TypeError("T.func helpers are called by the DSL compiler, not the Python interpreter")
 
 
-def func(function):
-  """Declare a source-parsed, specialized and inlined kernel helper."""
-  return DSLFunction(function)
+def func(function=None, *, inline=True):
+  """Declare a source-parsed, specialized kernel helper.
+
+  Helpers inline by default. ``inline=False`` preserves a private call at
+  each specialized call site. Its implementation belongs to that kernel;
+  separate kernels never share a public helper or a global specialization.
+  Scalar/tile results cross the call through caller-owned result slots.
+  Hardware instruction regions must be entered inside, not across, a call.
+  """
+  if type(inline) is not bool:
+    raise TypeError("T.func inline must be a bool")
+  def decorate(target):
+    return DSLFunction(target, inline=inline)
+  return decorate if function is None else decorate(function)
 
 
 @dataclass(frozen=True)
@@ -152,6 +166,7 @@ _OPERATIONS = (
   "max",
   "min",
   "fma",
+  "widening_dot",
   "ceildiv",
   "arange",
   "lanes",

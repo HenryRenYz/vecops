@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from dataclasses import fields, is_dataclass
+
 from .....types import TensorType
 from .... import ir as I
 from ....ir.traversal import nodes
@@ -24,6 +26,63 @@ from .state import StateEmitter
 from .support import _PREAMBLE, _SME_MATH_POLICY
 from .transpose import TransposeEmitter
 from .vectors import VectorsEmitter
+
+
+def branch_buffer_scopes(block):
+  """Find branch-private explicit buffers without shortening loop reuse.
+
+  Every occurrence of the storage's View, including metadata/owner payloads,
+  must share its declaration branch. Conditional scopes inside serial loops
+  are excluded: moving a reusable slot there would allocate each iteration.
+  Worker bodies keep their existing private declaration/reuse policy. Implicit
+  emitter snapshots are deliberately outside this plan.
+  """
+  references, allocations, seen = {}, set(), set()
+
+  def visit(value, path=(), looping=False):
+    if isinstance(value, dict):
+      for key, item in value.items():
+        visit(key, path, looping)
+        visit(item, path, looping)
+      return
+    if isinstance(value, (tuple, list, set, frozenset)):
+      for item in value:
+        visit(item, path, looping)
+      return
+    if not is_dataclass(value) or isinstance(value, type):
+      return
+    key = id(value), path, looping
+    if key in seen:
+      return
+    seen.add(key)
+    if isinstance(value, I.View):
+      references.setdefault(value.storage, set()).add(path)
+    if isinstance(value, I.Allocate):
+      allocations.add(value.view.storage)
+    if isinstance(value, I.If):
+      visit(value.condition, path, looping)
+      for child in (value.body, value.otherwise):
+        visit(child, path if looping else (*path, id(child)), looping)
+      return
+    if isinstance(value, (I.Grid, I.Team)):
+      for field in fields(value):
+        item = getattr(value, field.name)
+        visit(item, () if field.name == "body" else path, True if field.name == "body" else looping)
+      return
+    looping = looping or isinstance(value, (I.For, I.While, I.UnrolledFor))
+    for field in fields(value):
+      visit(getattr(value, field.name), path, looping)
+
+  visit(block)
+  result = {}
+  for name in allocations:
+    paths = iter(references.get(name, ()))
+    common = next(paths, ())
+    for path in paths:
+      common = common[:next((i for i, (a, b) in enumerate(zip(common, path)) if a != b), min(len(common), len(path)))]
+    if common:
+      result[name] = common[-1]
+  return result
 
 
 class CPUEmitter(
@@ -79,6 +138,11 @@ class CPUEmitter(
     }
     self.uses_streaming_math_policy = False
     self.buffer_declarations = {}
+    local_buffers = vector_ir.manager.options.get("cpu_branch_local_buffers", True)
+    if type(local_buffers) is not bool:
+      raise TypeError("cpu_branch_local_buffers must be bool")
+    self.branch_buffer_scopes = branch_buffer_scopes(self.ir.body) if local_buffers else {}
+    self.active_buffer_branches = {}
     self.parallel_depth = 0
     self.verified_grid = None
     # Identity-indexed emission caches also see transient panel/proxy Exprs.
@@ -105,8 +169,27 @@ class CPUEmitter(
   def allocate_buffer(self, dtype, name, count):
     # Invocation-local scratch reuse across serial loops, never process/global
     # state. Each textual allocation site has its own independently sized slot.
-    self.buffer_declarations[name] = f"  vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};"
+    owner = self.active_buffer_branches.get(self.branch_buffer_scopes.get(name))
+    if owner is None:
+      self.buffer_declarations[name] = f"  vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};"
+    else:
+      indent, declarations = owner
+      declarations[name] = f"{'  ' * indent}vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};"
     self.line(f"{name}.resize({count});")
+
+  def branch_block(self, block):
+    """Construct branch-private descriptors only when that branch executes."""
+    insertion = len(self.lines)
+    declarations = {}
+    key = id(block)
+    previous = self.active_buffer_branches.get(key)
+    self.active_buffer_branches[key] = self.indent, declarations
+    self.block(block)
+    self.lines[insertion:insertion] = list(declarations.values())
+    if previous is None:
+      del self.active_buffer_branches[key]
+    else:
+      self.active_buffer_branches[key] = previous
 
   def unique(self, prefix="v"):
     self.counter += 1

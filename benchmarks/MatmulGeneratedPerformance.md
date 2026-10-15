@@ -1,14 +1,128 @@
 <!-- SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors -->
 <!-- SPDX-License-Identifier: MIT -->
 
-# Generated Matmul measurements, 2026-10-11
+# Generated Matmul measurements
+
+Fixed nested regression cohorts (80 / 320 / 1280 / full), runner commands and strict
+comparison rules are documented in [MatmulRegressionSubsets.md](MatmulRegressionSubsets.md).
+
+## Full catalog optimization run, 2026-10-15
+
+This completed run compares generated `T.dot` / `T.library.matmul` and the public
+C++ Matmul reference across the enabled registrations in `benchmarks/ops/Matmul*Bench.cpp`.
+The immutable historical baseline is `build-matmul-full-20261014/source-final`;
+the candidate is `build-matmul-opt-20261015/source-packed-checked`.
+Correctness checks and input generation are unchanged. All comparable registrations
+passed; unsupported Prepared APIs remain explicit gaps.
+
+| Platform | Main compute | Main packing stages | WeightReuse | Independent MatmulPack | Stateful Legacy | Prepared API gaps |
+|---|---:|---:|---:|---:|---:|---:|
+| Local x86 | 2,622/2,622 | 842/842 | 394 | 220 | 5 | 5 |
+| ARM 920f-4 | 3,856/3,856 | 1,276/1,276 | 442 | 252 | 5 | 5 |
+
+Main packing stages are additional measurements of the same registrations, not
+additional independent matrix shapes. The ARM MMLA experiment remains disabled in
+the source configuration and is not included in the enabled catalog.
+
+### Main performance
+
+Ratios mean DSL time / C++ time; lower is better. Speedup means old time / new time.
+Before/after comparisons require exact execution ID, stage and workload metadata,
+and both runs must have passed. Newly recovered cases enter current coverage but
+have no invented baseline time. Means below are registration-weighted geometric
+means, not application-weighted throughput.
+
+| Platform / stage | Common passed pairs | DSL speedup | C++ speedup | Paired DSL/C++ old → new | All current DSL/C++ geo / median |
+|---|---:|---:|---:|---:|---:|
+| Local x86 / compute | 2,591 | 2.097x | 0.981x | 5.548 → 2.594 | 2.563 / 2.238 |
+| Local x86 / packing | 842 | 1.050x | 0.963x | 4.428 → 4.058 | 4.058 / 3.918 |
+| ARM 920f-4 / compute | 3,660 | 1.576x | 0.998x | 7.652 → 4.843 | 4.652 / 2.938 |
+| ARM 920f-4 / packing | 1,274 | 0.991x | 0.997x | 1.039 → 1.045 | 1.046 / 1.116 |
+
+### Supplemental performance
+
+Packing, weight-reuse lifecycle and Stateful Legacy are kept separate. WeightReuse
+retains the actual R matrix products, with results also grouped by `calls_per_pack`.
+
+| Platform / category | Common passed pairs | DSL speedup | C++ speedup | Paired DSL/C++ old → new | All current DSL/C++ geo |
+|---|---:|---:|---:|---:|---:|
+| Local x86 / MatmulWeightReuse | 394 | 4.506x | 0.976x | 55.870 → 12.095 | 12.095 |
+| Local x86 / MatmulPack | 220 | 1.233x | 0.994x | 6.439 → 5.194 | 5.194 |
+| Local x86 / StatefulMatmul | 5 | 1.005x | 1.006x | 2.242 → 2.245 | 2.245 |
+| ARM 920f-4 / MatmulWeightReuse | 442 | 4.391x | 1.003x | 40.772 → 9.316 | 9.316 |
+| ARM 920f-4 / MatmulPack | 247 | 0.997x | 1.006x | 1.219 → 1.230 | 1.213 |
+| ARM 920f-4 / StatefulMatmul | 5 | 1.021x | 1.011x | 3.038 → 3.008 | 3.008 |
+
+### Improvements and remaining limits
+
+This revision restores saturating converting-scatter semantics, preserves valid
+online packed bindings, fuses byte B packing with its column compensation, refines
+small-problem native dispatch, fuses safe batched result/epilogue stores, and caches
+individual affine proof queries. ARM uses a probe-gated workaround for the actual
+BiSheng scalable-vector SimplifyCFG crash; both C++ and DSL receive the same policy.
+The compiler binary is unchanged, but the policy is an explicit baseline change.
+
+Local x86: 783 common compute registrations have old/new speedup > 1.1; 261 have new/old time > 1.1. The median speedup is 1.007x. ARM 920f-4: 976 common compute registrations have old/new speedup > 1.1; 447 have new/old time > 1.1. The median speedup is 1.004x. These results do not establish universal non-regression or
+C++ parity. See the per-case data for large remaining gaps and slowdowns.
+
+An isolated x86 diagnostic explains one quantized packing regression: the same
+generated kernel for execution `2997be040868918d5e155f6d`, with only the historical
+conversion header substituted, measures 2.100 microseconds versus 5.140 with the
+current header. Both pass the unchanged packing-byte oracle. This locates that
+case's slowdown in the corrected conversion backend. The historical header lacks
+the required exceptional-value semantics and is not a shipping candidate. The
+separate diagnostic did not overwrite formal scores, and does not explain every
+regression. Full evidence is in `x86-conversion-regression-diagnostic/`.
+
+### Measurement and reproduction
+
+Local x86 uses GCC 13.3 on CPU54. ARM uses `920f-4`, project
+`/home/ryz/vecops-neo`, BiSheng Clang 19.1.7 through
+`build-math-unify/clangxx-gcc15`, CPU181, SVE VL = SME SVL = 64 B.
+Both use the matching API10 extension and frozen source SDK. This task's build and validation
+workers exit before each platform's formal timing; resource audits and pre/post
+input identities are retained. Each implementation calibrates to at least 25 ms,
+then runs 12 balanced native timing rounds. JIT compilation is excluded. ARM is a
+shared host: ongoing load observations are retained, including external compiler
+activity on other cores; this is a pinned-core run, not an exclusive-machine run.
+
+Build entry scripts are `build-{x86,arm}-packed-checked.sh`; supplemental preparation
+uses `supplemental-prepare-{x86,arm}-packed-checked.sh`, under the candidate artifact
+root. Exact resumptions and ownership-preserving build-only reschedules are retained
+there. After all groups and supplemental preguards pass, `finish_platform.py x86`
+or `finish_platform.py arm` performs serial timing, postguards and strict summaries.
+On ARM, source `~/.bashrc` and activate the verified `af3` environment first; compiler
+paths are explicit in each frozen plan. Do not run the timing controller over a live
+build or mix its frozen source tree with the working tree's Python package.
+
+Across platforms, 1,470 identical Automatic logical workloads are
+matched, weighting each once and taking the median across registration aliases.
+The current DSL/C++ geometric means are 2.327
+(x86) and 4.673 (ARM).
+
+![Matched Automatic workload distribution](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/final-matched-matmul.png)
+
+- [Main before/after data, exact paired workloads](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/optimization-comparison.json)
+- [Supplemental before/after data and individual registrations](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/supplemental-optimization-comparison.json)
+- [Current platform comparison and coverage by geometry/dtype/packing](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/final-platform-comparison.json)
+- [Priority-related subsets, restored coverage and regressions](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/priority-results.json)
+- [x86 strict summary](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/x86-final-summary/summary.json)
+- [ARM strict summary](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/arm-final-summary/summary.json)
+- [x86 full timings CSV](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/x86-final-summary/timings.csv)
+- [ARM full timings CSV](/home/renyz/project/vecops-neo/build-matmul-opt-20261015/arm-final-summary/timings.csv)
+
+The detailed implementation, targeted regressions, compiler diagnosis, limitations
+and exact operational evidence are in
+[the analysis report](/home/renyz/project/vecops-neo/docs/internal/matmul-cpp-dsl-analysis-20261013.md).
+
+## Historical selected-registration experiment, 2026-10-11
 
 The starting implementation is commit `f8ebb69`. This experiment compares
 generated `T.dot` / `T.library.matmul` with the public C++ `ops::Matmul`, using
 the actual registrations parsed from `benchmarks/ops/Matmul*Bench.cpp`.
 It covers selected registrations, not the complete catalog.
 
-## Machines and measurement
+### Machines and measurement
 
 | Platform | Source root | Compiler | Geometry / timing CPUs |
 |---|---|---|---|
@@ -36,7 +150,7 @@ coverage is eight mixed-byte rows locally, twenty FP16/FP32/FP64/mixed-byte rows
 on ARM, and sixteen accumulator rows covering all four signed/unsigned byte
 pairs on each platform, with both Const and Dynamic metadata and both APIs.
 
-## Representative results
+### Representative results
 
 Times are microseconds per product. All rows below use `T.library.matmul`;
 BF16 rows use Dynamic metadata and FP32 accumulation/output.
@@ -60,7 +174,7 @@ not the original commit, whose Const overflow guard did not compile.
 The final BF16 datasets are `ab-final-local` and `arm-results/ab-final-arm`;
 FP64 is `arm-results/cache-ab-arm-v12`, under `build-matmul-perf` locally.
 
-## Changes and limits
+### Changes and limits
 
 AMX consumes validated external packed A/B directly for complete K groups.
 SME uses ZA storage-word transposes to construct panel-major operands and
@@ -91,7 +205,7 @@ and small-problem path selection still need further work. The sixteen byte-pair
 accumulator observations precede the final ARM SSA/cache changes and are
 retained as diagnostic coverage, not final-speed claims.
 
-## Reproduction and artifact provenance
+### Reproduction and artifact provenance
 
 For a new representative build, run in an immutable checkout / package snapshot
 and pass compilers explicitly:

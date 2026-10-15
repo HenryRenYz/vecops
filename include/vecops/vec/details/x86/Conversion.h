@@ -6,6 +6,9 @@
 /**
  * @file Conversion.h
  * @brief x86 backend implementations for element type conversion operations.
+ * Saturating floating-to-integer conversions truncate toward zero, restore
+ * exact integer endpoints on overflow, and map NaN to zero, including when
+ * fast-math is enabled. Conversion-memory operations share this path.
  */
 
 #if !defined(ARCH_X86_FAMILY)
@@ -16,6 +19,7 @@
 #include <cstring>
 
 #include "vecops/vec/details/Conversion.h"
+#include "vecops/vec/Comparison.h"
 #include "vecops/vec/details/x86/Basic.h"
 #include "vecops/util/ScalarConvert.h"
 
@@ -1045,7 +1049,24 @@ VECOPS_ALWAYS_INLINE Vec<ToTag> x86_convert_vec_native(
   if constexpr (
       ToTraits::word_count == 1 && FromTraits::word_count == 1 &&
       !split_bfloat32_narrowing) {
-    return x86_convert_vec_single_word(to, from, value);
+    if constexpr (std::integral<To> && sizeof(To) >= 4 &&
+                  (std::same_as<From, float32_t> || std::same_as<From, float64_t>)) {
+      // x86 truncating instructions return an indefinite integer on overflow.
+      // Sanitize those lanes before conversion and restore exact integer
+      // endpoints afterwards (floating endpoints may round outside the range).
+      // Sub-32-bit destinations already narrow through this saturated path.
+      const auto high = cmpge(from, value, fill(from, static_cast<From>(std::numeric_limits<To>::max())));
+      const auto low = cmple(from, value, fill(from, static_cast<From>(std::numeric_limits<To>::min())));
+      const auto nan = isnan(from, value);
+      const auto zero = fill(from, From{0});
+      const auto safe = blend(from, blend(from, blend(from, value, high, zero), low, zero), nan, zero);
+      const auto converted = x86_convert_vec_single_word(to, from, safe);
+      return blend(to,
+          blend(to, converted, x86_convert_mask_native(to, from, high), fill(to, std::numeric_limits<To>::max())),
+          x86_convert_mask_native(to, from, low), fill(to, std::numeric_limits<To>::min()));
+    } else {
+      return x86_convert_vec_single_word(to, from, value);
+    }
   } else {
     using ToHalf = Half<ToTag>;
     using FromHalf = Half<FromTag>;

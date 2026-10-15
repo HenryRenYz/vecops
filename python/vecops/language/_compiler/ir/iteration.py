@@ -69,6 +69,8 @@ class FoldLoop(I.ReductionGroup):
   The inherited bindings also keep compatibility with alias/snapshot planning.
   """
 
+  explicit_tuple: bool = False
+
   @property
   def domain(self):
     source = self.assignments[0].value.args[0]

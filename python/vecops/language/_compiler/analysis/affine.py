@@ -6,9 +6,49 @@ Preserve cancellation before taking intervals (i + width - i is width).
 Unknown nonlinear expressions remain unproved, never optimistic bounds.
 """
 
+from contextvars import ContextVar
 from dataclasses import fields, replace
+from functools import wraps
 
 from .. import ir as I
+
+# One proof query owns its identity/bounds caches. Strong references
+# retain both expressions and endpoints until that query exits, preventing id
+# reuse. Bounds insertion order and _ordered are part of the key. No facts are
+# transferred across a scope, branch, definition environment, catalog, or query.
+# Nested operation catalogs get independent caches and restore the outer state.
+_metadata_query = ContextVar("vecops_affine_metadata_query", default=None)
+
+
+def _query_cached(kind):
+  def decorate(function):
+    @wraps(function)
+    def query(value, bounds, **options):
+      from ..operations import current
+
+      state = _metadata_query.get()
+      catalog = current()
+      token = None
+      if state is None or state["catalog"] is not catalog:
+        state = {"catalog": catalog, "interval": {}, "ordered": {}, "canonical": {}}
+        token = _metadata_query.set(state)
+      try:
+        endpoints = tuple((name, pair[0], pair[1]) for name, pair in bounds.items())
+        key = (id(value), tuple((name, id(lo), id(hi)) for name, lo, hi in endpoints), options.get("_ordered", True))
+        cache = state[kind]
+        if key in cache:
+          return cache[key][2]
+        result = function(value, bounds, **options)
+        if len(cache) < 65536:
+          cache[key] = value, endpoints, result
+        return result
+      finally:
+        if token is not None:
+          _metadata_query.reset(token)
+
+    return query
+
+  return decorate
 
 
 def metadata_reference(value):
@@ -79,21 +119,65 @@ def affine(value, variables, definitions, seen=frozenset()):
 
 
 def affine_contains(value, variables, definitions, seen=frozenset()):
-  reference = metadata_reference(value)
-  if reference is not None and reference in variables:
-    return True
-  if value.op in {"local", "frozen"}:
-    if value.data in variables:
-      return True
-    if value.data in definitions and value.data not in seen:
-      return affine_contains(definitions[value.data], variables, definitions, seen | {value.data})
-  if any(affine_contains(a, variables, definitions, seen) for a in value.args):
-    return True
+  """Find a referenced variable in one expression/definition graph query.
+
+  This is existential reachability, not a context-dependent value rewrite.
+  Visit each expression once: keeping every ancestor-definition set in a memo
+  key expands an acyclic SSA diamond exponentially. The caller's initial
+  ``seen`` still excludes those definition edges; internal cycles are bounded
+  by expression identity. Data-owned shape/provenance nodes remain edges too.
+  """
   from ..ir.traversal import nodes
 
-  return any(isinstance(v, I.Expr) and affine_contains(v, variables, definitions, seen) for v in nodes(value.data))
+  visited, data_seen, pending = set(), set(), [value]
+  while pending:
+    current = pending.pop()
+    if id(current) in visited:
+      continue
+    visited.add(id(current))
+    reference = metadata_reference(current)
+    if (
+      reference is not None
+      and reference in variables
+      or current.op in {"local", "frozen"}
+      and current.data in variables
+    ):
+      return True
+    if current.op in {"local", "frozen"} and current.data in definitions and current.data not in seen:
+      if current.args:
+        # Frontend references are leaves. Preserve the older path-dependent
+        # fallback semantics for independently constructed non-leaf references.
+        return _affine_contains_nonleaf(value, variables, definitions, seen, {})
+      # Preserve definition substitution: a bound local's own args/data do
+      # not replace the definition selected by the caller.
+      pending.append(definitions[current.data])
+    else:
+      pending.extend(current.args)
+      pending.extend(node for node in nodes(current.data, data_seen) if isinstance(node, I.Expr))
+  return False
 
 
+def _affine_contains_nonleaf(value, variables, definitions, seen, memo):
+  key = id(value), seen
+  if key in memo:
+    return memo[key]
+  reference = metadata_reference(value)
+  if reference is not None and reference in variables or value.op in {"local", "frozen"} and value.data in variables:
+    result = True
+  elif value.op in {"local", "frozen"} and value.data in definitions and value.data not in seen:
+    result = _affine_contains_nonleaf(definitions[value.data], variables, definitions, seen | {value.data}, memo)
+  else:
+    from ..ir.traversal import nodes
+
+    result = any(_affine_contains_nonleaf(a, variables, definitions, seen, memo) for a in value.args) or any(
+      isinstance(a, I.Expr) and _affine_contains_nonleaf(a, variables, definitions, seen, memo)
+      for a in nodes(value.data)
+    )
+  memo[key] = result
+  return result
+
+
+@_query_cached("interval")
 def interval(value, bounds, *, _ordered=True):
   """Inclusive bounds in loop-invariant metadata, or None if unproved."""
   value = canonical_integer(simplify_ordered(value, bounds) if _ordered else value)
@@ -192,6 +276,7 @@ def interval(value, bounds, *, _ordered=True):
   return None
 
 
+@_query_cached("ordered")
 def simplify_ordered(value, bounds):
   """Remove metadata clamps already implied by an induction domain.
 
@@ -234,8 +319,21 @@ def simplify_ordered(value, bounds):
 
 def canonical_integer(value, *, _memo=None):
   """Normalize pure integer metadata sums without touching floating DAGs."""
-  memo = {} if _memo is None else _memo
+  shared = None
   identity = id(value)
+  if _memo is None:
+    from ..operations import current
+
+    state = _metadata_query.get()
+    if state is not None and state["catalog"] is current():
+      shared = state["canonical"]
+      if identity in shared:
+        return shared[identity][1]
+  # Each traversal has its own recursive memo. Canonicalization is not
+  # idempotent: a returned expression may simplify further on a later call.
+  # Only exact top-level inputs may be shared across traversals; recursive
+  # result->result entries must never promise cross-traversal fixed points.
+  memo = {} if _memo is None else _memo
   if identity in memo:
     return memo[identity][1]
   result = _canonical_integer(value, memo)
@@ -243,6 +341,8 @@ def canonical_integer(value, *, _memo=None):
   # their last reference and have an id reused during this same traversal.
   memo[identity] = value, result
   memo[id(result)] = result, result
+  if shared is not None and len(shared) < 65536:
+    shared[identity] = value, result
   return result
 
 

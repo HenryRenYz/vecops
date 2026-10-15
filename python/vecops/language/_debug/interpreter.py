@@ -19,6 +19,11 @@ class UnsupportedInterpretation(NotImplementedError):
   pass
 
 
+class _HelperExit(Exception):
+  def __init__(self, region):
+    self.region = region
+
+
 class Interpreter:
   def __init__(self, kernel, arguments, *, vector_lanes=16, max_steps=1000000):
     global np
@@ -102,18 +107,72 @@ class Interpreter:
     if op == "native_lanes":
       return self.vector_lanes
     args = tuple(self.value(a) for a in expression.args)
+    if op == "ceildiv":
+      return -(-args[0] // args[1])
     contract = current().get(expression)
     if contract.traits & Trait.SCALAR_REDUCTION:
       operation = contract.reduction
       function = {"add": np.sum, "min": np.min, "max": np.max}.get(operation)
       if function is None:
         raise UnsupportedInterpretation(op)
+      if operation == "add":
+        return function(args[0], dtype=self.dtype(expression.type.dtype))
       return function(args[0])
     if op == "axis_reduce":
       axis, operation, _ = expression.data
       return {"add": np.sum, "min": np.min, "max": np.max}[operation](args[0], axis=axis)
     if op in ("cast", "convert"):
       return np.asarray(args[0], dtype=self.dtype(expression.type.dtype))
+    if op == "widening_dot":
+      # Wide integer temporaries preserve each input's signedness. A final
+      # unsigned cast specifies the destination-width modulo arithmetic.
+      group = expression.data
+      integer = expression.type.dtype in {"int32", "uint32"}
+      dtype = np.int64 if integer else np.float32
+      a, b = (np.asarray(v, dtype=dtype) for v in args)
+      if a.shape != b.shape:
+        raise ValueError("widening_dot input length mismatch")
+      padding = (-a.size) % group
+      product = np.pad(a * b, (0, padding)).reshape(-1, group).sum(axis=1, dtype=dtype)
+      if integer:
+        product = (product & 0xFFFFFFFF).astype(np.uint32)
+        return product.view(np.int32) if expression.type.dtype == "int32" else product
+      return product
+    if op.startswith("sve."):
+      operation = op.removeprefix("sve.")
+      dtype = self.dtype(expression.type.dtype)
+      if operation == "iota":
+        return np.arange(self.vector_lanes * 4 // np.dtype(dtype).itemsize, dtype=dtype)
+      if operation == "join_k_groups":
+        a, b = (np.ascontiguousarray(v).view(np.uint32) for v in args)
+        if a.shape != b.shape or a.size % 4:
+          raise ValueError("SVE inputs must be matching complete 128-bit segments")
+        joined = np.empty_like(a)
+        joined[0::2], joined[1::2] = a[:a.size // 2], b[:b.size // 2]
+        return joined.view(dtype)
+      if operation == "broadcast_segment":
+        source = np.ascontiguousarray(args[0]).view(np.uint8)
+        start = expression.data * 16
+        if source.size % 16 or start + 16 > source.size:
+          raise ValueError("SVE segment index exceeds ordinary VL")
+        return np.tile(source[start:start + 16], source.size // 16).view(dtype)
+      if operation == "row_pair":
+        source = np.ascontiguousarray(args[0]).view(np.uint64)
+        selected = source[expression.data::2]
+        return np.concatenate((selected, selected)).view(dtype)
+      a, b, acc = args
+      group = 4 if expression.args[0].type.dtype == "bfloat16" else 8
+      if a.size != b.size or a.size != acc.size * group // 2 or acc.size % 4:
+        raise ValueError("SVE MMLA operands must occupy matching complete registers")
+      integer = expression.type.dtype == "int32"
+      wide = np.int64 if integer else np.float32
+      a = np.asarray(a, dtype=wide).reshape(-1, 2, group)
+      b = np.asarray(b, dtype=wide).reshape(-1, 2, group)
+      products = np.matmul(a, np.transpose(b, (0, 2, 1)))
+      result = products.reshape(-1) + np.asarray(acc, dtype=wide)
+      if integer:
+        return (result.astype(np.int64) & 0xFFFFFFFF).astype(np.uint32).view(np.int32)
+      return result.astype(dtype)
     if op == "bitreinterpret":
       source = expression.args[0]
       return np.asarray(self.value(source), dtype=self.dtype(source.type.dtype)).view(self.dtype(expression.type.dtype))
@@ -149,7 +208,7 @@ class Interpreter:
       return args[0][indices]
     if op == "reshape":
       return np.reshape(args[0], tuple(int(self.value(n)) for n in expression.type.shape))
-    if op == "broadcast":
+    if op == "broadcast" or op == "value_transform" and expression.data[0] == "broadcast_to":
       return np.broadcast_to(args[0], tuple(int(self.value(n)) for n in expression.type.shape))
     if op == "dot":
       result = args[0].astype(self.dtype(expression.type.dtype)) @ args[1].astype(self.dtype(expression.type.dtype))
@@ -220,6 +279,14 @@ class Interpreter:
         self.states[statement.state.name] = np.asarray(self.value(statement.value)).copy()
       elif isinstance(statement, I.UpdateState):
         self.states[statement.state.name][...] = self.value(statement.value)
+      elif isinstance(statement, I.ExitRegion):
+        try:
+          self.block(statement.body)
+        except _HelperExit as result:
+          if result.region != statement.name:
+            raise
+      elif isinstance(statement, I.Exit):
+        raise _HelperExit(statement.region)
       elif isinstance(statement, I.Allocate):
         self.states[statement.view.storage] = np.empty(
           tuple(int(self.value(n)) for n in statement.view.shape), dtype=self.dtype(statement.view.dtype)

@@ -42,6 +42,7 @@ class ExitRegion(Node):
 
   name: str
   body: Block
+  outlined: bool = False
 
 
 @dataclass(frozen=True)

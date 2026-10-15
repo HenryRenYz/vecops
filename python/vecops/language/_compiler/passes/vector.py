@@ -8,7 +8,6 @@ from dataclasses import replace
 from .. import ir as I
 from ..dtypes import ELEMENT_BYTES
 from ..ir import vector as V
-from ..ir.traversal import walk_unique
 from .manager import register_pass
 
 
@@ -40,11 +39,30 @@ def coalesce_groups(region, context):
 def legalize_types(region, context):
   base = ELEMENT_BYTES[region.dtype]
 
-  sizes = [
-    ELEMENT_BYTES[e.type.dtype] for root in region.roots for e in walk_unique(root) if isinstance(e.type, I.TileType)
-  ]
-  sizes.extend(ELEMENT_BYTES[load.data.dtype] for root in region.roots for load in I.loads_unique(root))
-  region.rebind_headroom = max(0, int(math.log2(max(sizes, default=base))) - int(math.log2(base)))
+  # Lane-changing primitives evaluate their producers at a different width.
+  # A U8 grouped dot has four input lanes per I32 result: an FP32 producer
+  # behind that U8 cast needs four times the result register bytes. Merely
+  # taking the largest dtype in the DAG misses this intermediate geometry.
+  maximum = int(math.log2(base))
+  pending = [(root, 0) for root in region.roots]
+  seen = set()
+  while pending:
+    value, lane_shift = pending.pop()
+    if (id(value), lane_shift) in seen:
+      continue
+    seen.add((id(value), lane_shift))
+    if isinstance(value.type, I.TileType):
+      maximum = max(maximum, int(math.log2(ELEMENT_BYTES[value.type.dtype])) + lane_shift)
+      if value.op == "load":
+        maximum = max(maximum, int(math.log2(ELEMENT_BYTES[value.data.dtype])) + lane_shift)
+    for argument in value.args:
+      shift = lane_shift
+      if value.op == "widening_dot":
+        shift += int(math.log2(value.data))
+      elif value.op == "bitreinterpret":
+        shift += int(math.log2(ELEMENT_BYTES[value.type.dtype])) - int(math.log2(ELEMENT_BYTES[argument.type.dtype]))
+      pending.append((argument, shift))
+  region.rebind_headroom = max(0, maximum - int(math.log2(base)))
   region.operations = [
     replace(op, type=replace(op.type, tag=I.VectorTag(pow=region.base_power, basis_dtype=region.dtype)))
     for op in region.operations

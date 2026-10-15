@@ -176,6 +176,21 @@ class ReducersFrontend:
           # fold stays logical until common loop fusion and SIMD legalization.
           del parent.statements[allocation_start:]
           self.block = parent
+          if isinstance(native, tuple) and axis is None:
+            from ..ir.iteration import FoldLoop
+
+            assignments = []
+
+            def bind(value):
+              if isinstance(value, tuple):
+                return tuple(bind(v) for v in value)
+              name = self.unique("tuple_fold")
+              assignments.append(I.Assign(name, value))
+              return I.Expr(value.type, "local", data=name)
+
+            bound = bind(native)
+            parent.statements.append(FoldLoop(tuple(assignments), explicit_tuple=True))
+            return bound
           return native
 
     def update(target, source):

@@ -108,7 +108,9 @@ class HelperFrontend:
         isinstance(s, (ast.For, ast.While)) and any(isinstance(r, ast.Return) for r in ast.walk(s))
         for s in ast.walk(body.tree)
       )
-      if loop_returns:
+      if not body.inline and self.hardware_regions:
+        self.error(node, "private T.func calls cannot cross an active hardware instruction region")
+      if loop_returns or not body.inline:
         return self.helper_exit_region(body, node)
       if any(isinstance(s, ast.Return) and s.value is not None for s in ast.walk(body.tree)):
         result = self.unique("helper_result")
@@ -148,7 +150,7 @@ class HelperFrontend:
     if context["result"] is None and context["value_returning"]:
       self.error(node, "loop-returning T.func requires a value-returning path")
     if not context["value_returning"]:
-      parent.statements.append(I.ExitRegion(context["name"], region))
+      parent.statements.append(I.ExitRegion(context["name"], region, outlined=not body.inline))
       return None
     # Runtime verification distinguishes a missing return from a valid zero.
     flag = self.unique("helper_returned")
@@ -159,7 +161,7 @@ class HelperFrontend:
           block.statements.insert(index, I.Assign(flag, I.literal(True), False))
           break
     parent.statements.extend(context["prefix"])
-    parent.statements.append(I.ExitRegion(context["name"], region))
+    parent.statements.append(I.ExitRegion(context["name"], region, outlined=not body.inline))
     parent.statements.append(
       I.Assert(I.Expr(I.ScalarType("bool"), "local", data=flag), "T.func reached end without returning")
     )
@@ -289,7 +291,7 @@ def expand_helper(function, arguments, *, catalog, prefix, keyword_arguments=Non
   from .capture import capture
   from .parser import Frontend
 
-  body = capture(function.function)
+  body = capture(function.function, inline=function.inline)
   ir = TemplateIR(prefix, inspect.Signature(), {}, (), None, (), None, body.filename, body)
   frontend = Frontend(ir, catalog=catalog)
   if hardware_kind is not None:

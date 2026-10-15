@@ -30,6 +30,7 @@ _BUILTIN_MODULES = (
   "backends.cpu.passes",
   "backends.cpu.transpose",
   "backends.cpu.grid_pass",
+  "backends.cpu.workspace",
   "backends.cpu.state",
   "backends.cpu.register_layout",
   "backends.cpu.registers",

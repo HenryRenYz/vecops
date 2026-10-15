@@ -33,6 +33,12 @@ def fuse_reductions(ir, context):
       epilogues.clear()
 
     for statement in block.statements:
+      if isinstance(statement, FoldLoop) and statement.explicit_tuple:
+        # A user-written associative tuple fold is one logical traversal.
+        # The opportunistic fusion limit applies to independent folds only.
+        flush()
+        result.append(statement)
+        continue
       assignments = (
         statement.assignments
         if isinstance(statement, FoldLoop) and not statement.stores

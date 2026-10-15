@@ -183,7 +183,7 @@ class Frontend(
         if isinstance(value, ModuleType) and value.__name__ in DSL_MODULES:
           return value
         if isinstance(value, DSLFunction):
-          return capture(value.function)
+          return capture(value.function, inline=value.inline)
         from ...._dtype import is_native_dtype
         from ..._debug.options import PrintTarget
 
@@ -688,9 +688,16 @@ class Frontend(
       # A checked dense reshape creates a bounded logical coordinate system
       # for memory preflight. It does not establish an affine grid partition
       # relative to other views of the original storage.
-      region = I.ViewRegion(shape, tuple(strides), (I.literal(0),) * len(shape), shape,
-                            (1,) * len(shape), tuple(range(len(shape))), (False,) * len(shape),
-                            affine_partition=False)
+      region = I.ViewRegion(
+        shape,
+        tuple(strides),
+        (I.literal(0),) * len(shape),
+        shape,
+        (1,) * len(shape),
+        tuple(range(len(shape))),
+        (False,) * len(shape),
+        affine_partition=False,
+      )
       return I.View(view.storage, view.dtype, shape, tuple(strides), view.offset, view.writable, view.owned, region)
     if operation == "load":
       view = args[0]
@@ -855,6 +862,32 @@ class Frontend(
       if accuracy not in {"strict", "fast", "estimate"}:
         self.error(node, "accuracy must be strict, fast or estimate")
       return I.Expr(value.type, operation, (value,), accuracy)
+    if operation == "widening_dot":
+      if len(args) != 2:
+        self.error(node, "T.widening_dot expects two rank-one computation values")
+      a, b = (self.value(v, node) for v in args)
+      if any(not isinstance(v.type, I.TileType) or len(v.type.shape) != 1 for v in (a, b)):
+        self.error(node, "T.widening_dot expects two rank-one computation values")
+      extent = a.type.shape[0]
+      from ..analysis.affine import canonical_integer
+
+      if not I.same_expr(canonical_integer(extent), canonical_integer(b.type.shape[0])):
+        if I.constant(extent) is not None and I.constant(b.type.shape[0]) is not None:
+          self.error(node, "T.widening_dot inputs must have equal logical lengths")
+        # Validation must execute even when the result is empty. A check
+        # embedded only in its extent can disappear with the consumer loop.
+        self.block.statements.append(
+          I.Assert(I.binary("eq", extent, b.type.shape[0]), "widening_dot input length mismatch")
+        )
+      dtype = dtype_name(kwargs.get("dtype", "float32"))
+      if a.type.dtype == b.type.dtype == "bfloat16" and dtype == "float32":
+        group = 2
+      elif a.type.dtype in {"int8", "uint8"} and b.type.dtype in {"int8", "uint8"} and dtype in {"int32", "uint32"}:
+        group = 4
+      else:
+        self.error(node, "T.widening_dot supports BF16 x BF16 -> FP32 and signed/unsigned byte -> I32/U32")
+      extent = I.binary("ceildiv", extent, I.literal(group))
+      return I.Expr(I.TileType(dtype, (extent,)), "widening_dot", (a, b), group)
     if operation == "fma":
       a, b, c = (self.value(v, node) for v in args)
       shaped = any(isinstance(value.type, I.TileType) for value in (a, b, c))

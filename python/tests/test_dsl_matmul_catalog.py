@@ -23,6 +23,60 @@ def test_dtype_names_match_complete_tokens():
   assert catalog._normalize_dtype("NotAnInt8Type") is None
 
 
+def test_x86_inventory_uses_real_registered_atoms_and_gates():
+  cases = catalog.load_cases(ROOT, architecture="x86", features={"HAS_AMX_BF16", "HAS_AMX_INT8"})
+  counts = Counter(case.catalog for case in cases)
+  assert counts["MatmulBaseRegistration"] == 4
+  assert counts["MatmulBaseExpanded"] == 58
+  assert counts["MatmulFamilyExpanded"] == 16
+  assert counts["MatmulPolicyExpanded"] == 0
+  assert counts["ArchitectureExcluded"] == 1
+  assert counts["MatmulPackedExpanded"] == 375
+  assert counts["MatmulFusionExpanded"] == 324
+  assert counts["MatmulOrientation"] == 46
+  executable = [c for c in cases if c.catalog.endswith("Expanded") or c.catalog == "MatmulOrientation"]
+  assert all(c.svl_bytes is None and c.lane == 16 for c in cases)
+  assert not any("SME_" in (c.configuration or "") for c in executable)
+  assert not any(c.native_a == "fp16" for c in executable)
+  families = [c.configuration for c in cases if c.catalog == "MatmulFamilyExpanded"]
+  assert families.count("kernel_family::ResidualSplit") == 2
+  assert not any("PackedDot" in f or "RuntimeQuant" in f for f in families)
+  assert all("KStep=32" in c.configuration for c in cases if c.catalog == "MatmulBaseExpanded" and "AMX_BF16F32" in c.configuration)
+
+
+def test_complete_registration_adds_scenario_and_missing_batched_const_without_changing_legacy_arm():
+  legacy = catalog.load_cases(ROOT, svl_bytes=64)
+  assert not any(c.catalog == "MatmulScenarioExpanded" for c in legacy)
+  complete = catalog.load_cases(ROOT, svl_bytes=64, complete_registration=True)
+  assert sum(c.catalog == "MatmulScenarioExpanded" for c in complete) == 510
+  assert all(c.metadata == ("Const", "Dynamic") for c in complete if c.catalog == "MatmulPackedExpanded")
+  x86 = catalog.load_cases(ROOT, architecture="x86", complete_registration=True)
+  scenario = [c for c in x86 if c.catalog == "MatmulScenarioExpanded"]
+  assert len(scenario) == 408
+  assert {c.broadcast for c in scenario if c.batch} == {"A", "B", "independent"}
+  assert all(c.input_modes == ("raw",) and c.metadata == ("Const", "Dynamic") for c in scenario)
+  assert {c.k for c in scenario if c.name.endswith("scenario/tail") and c.native_a == "bf16"} == {257}
+
+
+def test_x86_fp16_gate_adds_only_actual_source_registrations():
+  absent = catalog.load_cases(ROOT, architecture="x86", features={"HAS_AMX_INT8"})
+  present = catalog.load_cases(ROOT, architecture="x86", features={"HAS_AMX_INT8", "HAS_AMX_FP16"})
+  assert sum(c.catalog == "MatmulBaseRegistration" for c in present) == 5
+  assert len(present) > len(absent)
+  assert any(c.catalog == "MatmulBaseExpanded" and "AMX_F16F32" in c.configuration for c in present)
+  without_i8 = catalog.load_cases(ROOT, architecture="x86", features=set())
+  assert sum(c.catalog == "MatmulBaseRegistration" for c in without_i8) == 3
+
+
+def test_architecture_selector_preserves_lines_and_handles_nested_gates():
+  source = "#if defined(ARCH_X86_FAMILY)\nx86\n#if defined(HAS_AMX_FP16)\nf16\n#else\nno_f16\n#endif\n#else\narm\n#endif\n"
+  selected = catalog._architecture_source(source, frozenset({"ARCH_X86_FAMILY"}))
+  assert len(source.splitlines()) == len(selected.splitlines())
+  assert "x86" in selected and "no_f16" in selected
+  assert "\nf16\n" not in selected and "arm" not in selected
+  assert selected.splitlines()[5] == "no_f16"
+
+
 def test_manifest_keeps_arm_sources_and_registration_families():
   cases = catalog.load_cases(ROOT, svl_bytes=64)
   sources = {case.source for case in cases}

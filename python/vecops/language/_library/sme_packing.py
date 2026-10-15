@@ -84,7 +84,19 @@ def pack_full_words(source, destination, *, origin, width, chunk, chunks, row_un
 
 
 @T.func
-def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spatial, output_origin=0, group_unroll=2):
+def pack_fringe(
+  source,
+  destination,
+  *,
+  origin,
+  k_origin,
+  width,
+  active_k,
+  spatial,
+  output_origin=0,
+  group_unroll=2,
+  bounded_rows=False,
+):
   """Zero-pad fractional K groups and spatial tails through typed ZA words.
 
   Narrow storage uses its own view of the physical ZA row, for both complete
@@ -101,7 +113,13 @@ def pack_fringe(source, destination, *, origin, k_origin, width, active_k, spati
   second_mask = sme.mask(T.max(0, T.min(width, spatial - origin - width)), dtype=word_dtype)
   for tile in T.unroll(2):
     for row in T.serial(T.max(0, T.min(width, spatial - origin - tile * width)), unroll=2):
-      region = source[origin + tile * width + row, k_origin : k_origin + active_k]
+      if bounded_rows:
+        # The row loop still visits only valid rows. This redundant clamp
+        # exposes their bound to a preflight that conservatively separates
+        # the enclosing panel interval from the clipped row-loop interval.
+        region = source[T.min(origin + tile * width + row, spatial - 1), k_origin : k_origin + active_k]
+      else:
+        region = source[origin + tile * width + row, k_origin : k_origin + active_k]
       if T.itemsize(source.dtype) >= 4:
         sme.load_hor(tile, row, region, word_dtype=word_dtype)
       else:
@@ -215,3 +233,33 @@ def _pack_panels(source, destination, width, chunk, ratio, row_unroll, group_unr
     for origin in T.serial(0, source.shape[0], 2 * width, unroll=1):
       panel_output = destination[origin // (2 * width), :, :]
       _pack_remainder(source, panel_output, origin, 0, width, chunk, ratio, group_unroll)
+
+
+@T.func
+def pack_typed_in_region(source, destination, acc_dtype):
+  """Pack a native dense View into preallocated private panels in an owner.
+
+  The caller supplies an active SME owner, a K-contiguous [spatial,K]
+  source and whole-chunk [panel,K-group,2*width*group] destination. Keep
+  the destination's actual panel/group strides; no public ABI flattening,
+  allocation, source conversion or ownership transition occurs here.
+  """
+  T.static_assert(len(source.shape) == 2 and len(destination.shape) == 3)
+  T.static_assert(source.dtype == destination.dtype)
+  width = sme.streaming_lanes(acc_dtype)
+  chunk = sme.streaming_lanes(source.dtype)
+  group = T.itemsize(acc_dtype) // T.itemsize(source.dtype)
+  for panel in T.serial(destination.shape[0], unroll=1):
+    for chunk_index in T.serial((source.shape[1] + chunk - 1) // chunk, unroll=1):
+      ki = chunk_index * chunk
+      pack_fringe(
+        source,
+        destination[panel, :, :],
+        origin=panel * 2 * width,
+        k_origin=ki,
+        width=width,
+        active_k=T.min(chunk, source.shape[1] - ki),
+        spatial=source.shape[0],
+        output_origin=ki // group,
+        bounded_rows=True,
+      )

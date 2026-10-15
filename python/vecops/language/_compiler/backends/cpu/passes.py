@@ -123,10 +123,14 @@ def plan_native_word_tails(region, context):
     default=ELEMENT_BYTES[region.dtype],
   )
   store_headroom = max(0, memory_bytes.bit_length() - ELEMENT_BYTES[region.dtype].bit_length())
-  tail_power = -max(region.rebind_headroom, store_headroom)
+  # A grouped contraction can need several native source words even for
+  # one result. Never shrink below one result lane at the minimum SVE VL.
+  minimum_result_power = -(16 // ELEMENT_BYTES[region.dtype]).bit_length() + 1
+  tail_power = max(-max(region.rebind_headroom, store_headroom), minimum_result_power)
   variants = tuple((power, region.base_power, groups) for power, groups in region.groupings.items())
-  if region.base_power > 0:
-    variants += ((None, 0, V.group_vectors(region.unroll, 0, 0)),)
+  fallback_power = min(0, 2 - region.rebind_headroom)
+  if region.base_power > fallback_power:
+    variants += ((None, fallback_power, V.group_vectors(region.unroll, fallback_power, fallback_power)),)
   for variant, base_power, groups in variants:
     fragments = []
     for parent, group in enumerate(groups):

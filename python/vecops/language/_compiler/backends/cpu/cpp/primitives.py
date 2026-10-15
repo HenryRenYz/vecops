@@ -5,6 +5,7 @@
 from .... import ir as I
 from ....analysis.projection import scalar_memory_projection
 from ....dtypes import ELEMENT_BYTES
+from ....ir.traversal import walk_unique
 from ..capabilities import CPP_TYPES
 
 
@@ -52,7 +53,127 @@ class PrimitivesEmitter:
     result = self.vector(source, tag, source.type.shape, coords, "1")
     return f"vecops::vec::get({tag}{{}}, {result}, 0)"
 
+  def widening_dot_vector(self, value, tag, own_coords, active):
+    # The operation changes lane geometry: each output consumes a complete
+    # byte-span group, with absent source lanes contributing zero. Disable
+    # the consumer's full-vector proof while loading the final source group.
+    group = value.data
+    source_coords = (f"(({own_coords[0]}) * {group})",)
+    previous_full = getattr(self, "full_vector", False)
+    operands, tags = [], []
+    try:
+      self.full_vector = False
+      for source in value.args:
+        source_tag = f"vecops::vec::ViewAs<{CPP_TYPES[source.type.dtype]}, {tag}>"
+        self.tag_dtypes[source_tag] = source.type.dtype
+        if tag in self.tag_geometry:
+          # ViewAs preserves physical bytes, unlike a lane-count Rebind.
+          self.tag_geometry[source_tag] = self.tag_geometry[tag]
+        if tag in self.fixed_tag_lanes:
+          self.fixed_tag_lanes[source_tag] = self.fixed_tag_lanes[tag] * group
+        count = f"vecops_dsl::clamp_value<vecops::nint_t>(({self.scalar(source.type.shape[0])}) - ({source_coords[0]}), 0, ({active}) * {group})"
+        # VLA SVE FixedTag supports at most 16 bytes. A one-result byte
+        # contraction can still evaluate four FP64 producer lanes (32 B).
+        # Materialize only those exceptional fixed-tag inputs lane by lane;
+        # scalable full groups retain their legalized vector traversal.
+        fixed_lanes = self.fixed_tag_lanes.get(source_tag)
+        wide_fixed_producer = (
+          self.environment.target.architecture == "arm"
+          and fixed_lanes is not None
+          and any(
+            isinstance(node.type, I.TileType) and fixed_lanes * ELEMENT_BYTES[node.type.dtype] > 16
+            for node in walk_unique(source)
+          )
+        )
+        if wide_fixed_producer:
+          operand, lane = self.unique("dot_fixed_input"), self.unique("dot_fixed_lane")
+          self.line(f"auto {operand} = vecops::vec::zeros({source_tag}{{}});")
+          self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({count}); ++{lane})")
+          index = I.Expr(I.ScalarType("int64"), "raw", data=f"(({source_coords[0]}) + {lane})")
+          scalar = self.element_at(I.Expr(I.ScalarType(source.type.dtype), "element_at", (source, index)))
+          self.line(f"{operand} = vecops::vec::set({source_tag}{{}}, {operand}, {lane}, {scalar});")
+          self.close()
+        else:
+          operand = self.vector(source, source_tag, source.type.shape, source_coords, count, 0)
+        # A transformed producer can turn masked-load zeros into nonzeros.
+        # Sanitize its final value, rather than just the underlying load.
+        sanitized = self.unique("dot_input")
+        self.line(
+          f"auto {sanitized} = vecops::vec::blend({source_tag}{{}}, vecops::vec::zeros({source_tag}{{}}), vecops::vec::mwhilelt({source_tag}{{}}, 0, {count}), {operand});"
+        )
+        operands.append(sanitized)
+        tags.append(source_tag)
+    finally:
+      self.full_vector = previous_full
+    return f"vecops::vec::widening_dot({tag}{{}}, {tags[0]}{{}}, {tags[1]}{{}}, {', '.join(operands)})"
+
   def primitive_vector(self, value, tag, shape, coords, active, axis):
+    if self.environment.operations.get(value).family == "sve_register":
+      if self.environment.codegen_target.isa not in {"sve", "sme"}:
+        raise TypeError("ordinary SVE register operations require an SVE compilation target")
+      if value.op == "sve.iota":
+        own_coords = self.coordinates(value.type.shape, shape, coords)
+        own_axis = axis - (len(shape) - len(value.type.shape))
+        start = f"static_cast<{CPP_TYPES[value.type.dtype]}>({own_coords[0]})"
+        if own_axis < 0:
+          return f"vecops::vec::fill({tag}{{}}, {start})"
+        return f"vecops::vec::iota({tag}{{}}, {start})"
+      operands, tags = [], []
+      for source in value.args:
+        own_tag = f"vecops::vec::ScalableTag<{CPP_TYPES[source.type.dtype]}, 0>"
+        self.tag_dtypes[own_tag] = source.type.dtype
+        tags.append(own_tag)
+        operands.append(self.vector(source, own_tag, source.type.shape, ("0",), f"vecops::vec::size({own_tag}{{}})", 0))
+      operation = value.op.removeprefix("sve.")
+      own_tag = f"vecops::vec::ScalableTag<{CPP_TYPES[value.type.dtype]}, 0>"
+      self.tag_dtypes[own_tag] = value.type.dtype
+      self.tag_geometry[own_tag] = True, 0
+      if operation == "mmla":
+        call = f"vecops::vec::sve::mmla({own_tag}{{}}, {tags[0]}{{}}, {tags[1]}{{}}, {', '.join(operands)})"
+      else:
+        template = f"<{value.data}>" if value.data is not None else ""
+        call = f"vecops::vec::sve::{operation}{template}({tags[0]}{{}}, {', '.join(operands)})"
+      own_coords = self.coordinates(value.type.shape, shape, coords)
+      if self.same_register_tag(tag, own_tag) and own_coords == ("0",):
+        return call
+      # Scratch placement or a differently shaped consumer may request a
+      # prefix/multiword/broadcast traversal. Compute the ISA word once, then
+      # project its real lanes; never disguise one native word as many words.
+      word, result, lane = self.unique("sve_word"), self.unique("sve_projected"), self.unique("sve_lane")
+      self.line(f"auto {word} = {call};")
+      self.line(f"auto {result} = vecops::vec::zeros({tag}{{}});")
+      self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({active}); ++{lane})")
+      own_axis = axis - (len(shape) - len(value.type.shape))
+      index = own_coords[0] if own_axis < 0 else f"(({own_coords[0]}) + {lane})"
+      self.opening(f"if (({index}) >= 0 && ({index}) < vecops::vec::size({own_tag}{{}}))")
+      self.line(
+        f"{result} = vecops::vec::set({tag}{{}}, {result}, {lane}, vecops::vec::get({own_tag}{{}}, {word}, {index}));"
+      )
+      self.close()
+      self.close()
+      return result
+    if value.op == "widening_dot":
+      own_coords = self.coordinates(value.type.shape, shape, coords)
+      own_axis = axis - (len(shape) - len(value.type.shape))
+
+      def broadcast():
+        # Grouping happens before broadcasting. Repeat the selected grouped
+        # scalar when the consumer vectorizes another axis or a singleton.
+        index = I.Expr(I.ScalarType("int64"), "raw", data=own_coords[0])
+        scalar = self.element_at(I.Expr(I.ScalarType(value.type.dtype), "element_at", (value, index)))
+        return f"vecops::vec::fill({tag}{{}}, {scalar})"
+
+      if own_axis < 0 or (I.constant(value.type.shape[0]) == 1 and not I.same_expr(value.type.shape[0], shape[axis])):
+        return broadcast()
+      if I.constant(value.type.shape[0]) is None and not I.same_expr(value.type.shape[0], shape[axis]):
+        return self.conditional_vector(
+          value.type,
+          tag,
+          f"({self.scalar(value.type.shape[0])}) == 1",
+          broadcast,
+          lambda: self.widening_dot_vector(value, tag, own_coords, active),
+        )
+      return self.widening_dot_vector(value, tag, own_coords, active)
     if value.op == "bitreinterpret":
       if id(value) in self.prepared.register_programs:
         return self.geometry_vector(value, tag, shape, coords, active, axis)
@@ -276,6 +397,28 @@ class PrimitivesEmitter:
       if target.architecture == "arm"
       else (target.vector_bits or 128) // 8
     )
+    if value.op == "bitcast" and value.args[0].op == "fill" and len(shape) == 1:
+      source = value.args[0]
+      before, after = ELEMENT_BYTES[source.type.dtype], ELEMENT_BYTES[value.type.dtype]
+      fixed = self.fixed_tag_lanes.get(tag)
+      minimum_bytes = (
+        fixed * after
+        if fixed is not None
+        else (16 if target.architecture == "arm" else native_bytes) * 2 ** geometry[1]
+        if geometry is not None and geometry[0]
+        else 0
+      )
+      if before > after and minimum_bytes >= before:
+        # A uniform word is periodic in its smaller lanes. Rotate for a
+        # projected, possibly unaligned prefix, then broadcast and reinterpret
+        # the entire register instead of extracting/inserting every byte.
+        own = self.coordinates(value.type.shape, shape, coords)
+        shift = f"static_cast<int>((({own[-1]}) % {before // after}) * {after * 8})"
+        bits = f"std::bit_cast<std::uint{before * 8}_t>(static_cast<{CPP_TYPES[source.type.dtype]}>({self.scalar(source.args[0])}))"
+        rotated = f"std::rotr({bits}, (std::endian::native == std::endian::little ? {shift} : -({shift})))"
+        scalar = f"std::bit_cast<{CPP_TYPES[source.type.dtype]}>({rotated})"
+        source_tag = f"vecops::vec::ViewAs<{CPP_TYPES[source.type.dtype]}, {tag}>"
+        return f"vecops::vec::bitcast({tag}{{}}, {source_tag}{{}}, vecops::vec::fill({source_tag}{{}}, {scalar}))"
     capacity = (
       (native_bytes // ELEMENT_BYTES[value.type.dtype]) * (1 << geometry[1])
       if geometry is not None and geometry[0] and geometry[1] >= 0
@@ -408,12 +551,17 @@ class PrimitivesEmitter:
             f"vecops::vec::store_convert({tag}{{}}, {self.pointer(statement.destination)}, {roots[1][slot]}, {options}, vecops::vec::opt::indexed({indices}));"
           )
         else:
+          # Duplicate indices require ordered scalar writes, but the numeric
+          # conversion still follows store_convert's public default contract.
           lane = self.unique("scatter_lane")
           self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({count}); ++{lane})")
           self.opening(f"if (vecops::vec::get({tag}{{}}, {mask}, {lane}))")
-          self.line(
-            f"{self.pointer(statement.destination)}[vecops::vec::get({itag}{{}}, {indices}, {lane})] = static_cast<{CPP_TYPES[statement.destination.dtype]}>(vecops::vec::get({tag}{{}}, {roots[1][slot]}, {lane}));"
+          converted = self.scalar_convert(
+            statement.destination.dtype,
+            f"vecops::vec::get({tag}{{}}, {roots[1][slot]}, {lane})",
+            statement.value.type.dtype,
           )
+          self.line(f"{self.pointer(statement.destination)}[vecops::vec::get({itag}{{}}, {indices}, {lane})] = {converted};")
           self.close()
           self.close()
 

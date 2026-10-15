@@ -20,6 +20,49 @@ class PrimitivesFrontend:
 
   def primitive(self, operation, args, kwargs, node):
     family = self.operations.get(operation).family
+    if family == "sve_register":
+      from ..dtypes import ELEMENT_BYTES
+      if self.hardware_regions:
+        self.error(node, "ordinary SVE segment operations cannot run in a hardware region")
+      if operation == "sve.iota":
+        if len(args) != 1 or kwargs:
+          self.error(node, "sve.iota expects one unsigned integer dtype")
+        dtype = dtype_name(args[0])
+        if dtype not in {"uint8", "uint16", "uint32", "uint64"}:
+          self.error(node, "sve.iota expects an unsigned integer dtype")
+        typ = I.VectorType(dtype, (I.Expr(I.ScalarType("int64"), "lanes", data=(dtype, 0)),), tag=I.VectorTag(basis_dtype=dtype))
+        return I.Expr(typ, operation)
+      arity = 3 if operation == "sve.mmla" else 2
+      if len(args) != arity or kwargs:
+        self.error(node, f"{operation} expects {arity} positional arguments")
+      values = [self.value(v, node) for v in args[:1 if operation in {"sve.broadcast_segment", "sve.row_pair"} else arity]]
+      for value in values:
+        typ = value.type
+        if (not isinstance(typ, I.VectorType) or typ.mask or typ.tag.N is not None or
+            typ.tag.pow != 0 or typ.tag.domain != "simd" or typ.tag.basis_dtype != typ.dtype):
+          self.error(node, "SVE segment operations require complete ordinary scalable vectors with pow=0")
+        self.block.statements.append(I.Assert(I.binary("eq", typ.shape[0], I.Expr(I.ScalarType("int64"), "lanes", data=(typ.dtype, 0))), "SVE segment operation requires a complete register"))
+      dtype = values[0].type.dtype
+      data = None
+      if operation == "sve.join_k_groups":
+        if dtype != values[1].type.dtype or ELEMENT_BYTES[dtype] not in {1, 2, 4, 8}:
+          self.error(node, "join_k_groups requires matching numeric element types")
+      elif operation in {"sve.broadcast_segment", "sve.row_pair"}:
+        data = I.constant(self.value(args[1], node))
+        if type(data) is not int or not 0 <= data < (16 if operation == "sve.broadcast_segment" else 2):
+          self.error(node, "SVE segment/row selector must be a bounded compile-time integer")
+        if operation == "sve.row_pair" and ELEMENT_BYTES[dtype] != 4:
+          self.error(node, "row_pair requires four-byte elements")
+        if operation == "sve.broadcast_segment":
+          self.block.statements.append(I.Assert(I.binary("ge", I.binary("mul", values[0].type.shape[0], I.literal(ELEMENT_BYTES[dtype])), I.literal((data + 1) * 16)), "SVE segment index exceeds ordinary VL"))
+      else:
+        a, b, accumulator = values
+        dtype = accumulator.type.dtype
+        if not (a.type.dtype == b.type.dtype == "bfloat16" and dtype == "float32" or
+                a.type.dtype == b.type.dtype and a.type.dtype in {"int8", "uint8"} and dtype == "int32"):
+          self.error(node, "mmla supports BF16/BF16/FP32 and same-sign byte/byte/I32")
+      typ = I.VectorType(dtype, (I.Expr(I.ScalarType("int64"), "lanes", data=(dtype, 0)),), tag=I.VectorTag(basis_dtype=dtype))
+      return self.declare_state(I.Expr(typ, operation, tuple(values), data))
     if operation == "_packing_offset":
       if len(args) != 7 or kwargs:
         self.error(node, "_packing_offset expects s, k, spatial, reduction, dtype, format, side")
@@ -219,14 +262,10 @@ class PrimitivesFrontend:
         for extent in shape:
           self.block.statements.append(I.Assert(I.binary("ge", extent, I.literal(0)), "negative value extent"))
         data = (operation, ())
-      # Transposed reads keep the existing DataAccess transpose fast path.
-      if operation == "transpose" and value.op == "load" and not value.args:
-        view = value.data
-        return I.Expr(
-          I.TileType(value.type.dtype, shape, value.type.mask),
-          "load",
-          data=replace(view, shape=shape, strides=tuple(view.strides[a] for a in axes), region=None),
-        )
+      # Preserve the read edge here: this may be an outer helper's historical
+      # capture, whose BindTile is not visible in this isolated frontend.
+      # The full-kernel fold-value-transforms pass can recover the same memory
+      # fast path once it can prove the source read was not captured.
       return I.Expr(I.TileType(value.type.dtype, shape, value.type.mask), "value_transform", (value,), data)
     return NotImplemented
 

@@ -22,7 +22,9 @@ def normalize_iteration_regions(ir, context):
     statements = []
     for statement in block.statements:
       if isinstance(statement, I.ReductionGroup):
-        statements.append(FoldLoop(statement.assignments, statement.stores))
+        statements.append(
+          statement if isinstance(statement, FoldLoop) else FoldLoop(statement.assignments, statement.stores)
+        )
         continue
       for child in children(statement):
         visit(child, available)

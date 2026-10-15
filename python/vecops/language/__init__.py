@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Tile-style Python metaprogramming frontend for vecops kernels."""
 
-from . import amx, cost, library, passes, sme
+from . import amx, cost, library, passes, sme, sve
 from ._compiler.pipeline import load_builtin_passes as _load_builtin_passes
 from .compile import CompiledKernel, compile, compile_pending
 from .debug import DebugOptions, lower, stderr, stdout
@@ -57,4 +57,4 @@ __all__.extend(_dtype_constants)
 from .library import layernorm, matmul, softmax, transpose_copy
 
 __all__ += ["layernorm", "matmul", "softmax", "transpose_copy"]
-__all__ += ["amx", "cost", "library", "passes", "sme"]
+__all__ += ["amx", "cost", "library", "passes", "sme", "sve"]
