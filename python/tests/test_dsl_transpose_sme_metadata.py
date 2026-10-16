@@ -119,7 +119,12 @@ def test_transpose_owner_snapshots_exact_geometry_before_za_loops(source, output
     storage = "A" if "source" in name else "C"
     descriptor = f"{storage}.data()"
     if metadata:
-      descriptor = re.search(rf"const auto (\w+) = {storage}\.data\(\);", artifact.source)[1]
+      # Data pointers are captured only when an outlined helper needs them.
+      # The SME owner still binds its exact input/output origin before loops.
+      captures = re.findall(rf"const auto (\w+) = {storage}\.data\(\);", artifact.source)
+      assert len(captures) <= 1
+      if captures:
+        descriptor = captures[0]
     assert descriptor in value
   loops = body[body.index("for (vecops::nint_t") :]
   assert "dsl_c_parameter_" not in loops
