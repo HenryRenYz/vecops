@@ -1081,6 +1081,9 @@ their ordering. CSE treats mutable scalar versions and induction variables as
 identity-sensitive dependencies, in addition to historical loads/tile state.
 
 Representation verifiers run at kernel, vector and prepared-CPU boundaries.
+Generic kernel/vector verifiers live with the IR vocabulary; CPU storage and
+capture-plan verification lives in the CPU backend. The IR layer does not import
+backend capabilities or execute lowering passes.
 Terminal checks reject executable opaque dot/packing operations. Lazy
 `BindTile` descriptors retain historical load identities and can describe an
 original product after its oriented consumer has been lowered; they do not
@@ -1119,6 +1122,9 @@ including their original operand bindings. This preserves the existing C++
 behavior rather than introducing a new integer promotion policy. Shared effect
 proofs include expression-owned type/data dependencies; loads, traps and cycles
 in those dependencies cannot become discardable through a pure wrapper.
+Shape compatibility compares representable integer literal dimensions by value,
+including equal weak and explicitly typed literals. Scalar expression identity
+and arithmetic promotion continue to distinguish their types.
 
 The late `cpu-plan-storage` pass computes branch declaration scopes and
 conservative lexical live intervals before emission. `cpu_scratch_reuse`

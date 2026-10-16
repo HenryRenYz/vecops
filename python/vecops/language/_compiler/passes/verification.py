@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Named verifier invocations at representation boundaries."""
 
-from ..ir.verification import verify_kernel, verify_prepared, verify_vector
+from ..backends.cpu.verification import verify_prepared
+from ..ir.verification import verify_kernel, verify_vector
 from .manager import PassResult, register_pass
 
 

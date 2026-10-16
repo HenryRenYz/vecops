@@ -37,6 +37,7 @@ from .kernel import (
   loads,
   loads_unique,
   same_expr,
+  same_extent,
   shaped_type,
 )
 from .matmul import DotOptions, Pack, PackedView, transpose_matrix

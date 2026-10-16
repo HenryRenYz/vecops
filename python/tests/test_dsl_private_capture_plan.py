@@ -12,7 +12,8 @@ from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.captures import plan_private_captures
 from vecops.language._compiler.backends.cpu.planning import PreparedKernel
 from vecops.language._compiler.ir.vector import VectorKernel
-from vecops.language._compiler.ir.verification import IRVerificationError, verify_private_captures
+from vecops.language._compiler.backends.cpu.verification import verify_private_captures
+from vecops.language._compiler.ir.verification import IRVerificationError
 from vecops.language._compiler.passes.manager import PassContext
 
 
@@ -142,7 +143,7 @@ def test_active_hardware_scope_retains_reference_capture():
 def test_completed_plan_verification_uses_its_frozen_operation_semantics():
   from types import SimpleNamespace
 
-  from vecops.language._compiler.ir.verification import verify_prepared
+  from vecops.language._compiler.backends.cpu.verification import verify_prepared
   from vecops.language._compiler.operations import (
     OpDef,
     Trait,

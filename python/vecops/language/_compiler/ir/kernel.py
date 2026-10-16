@@ -360,6 +360,32 @@ def same_expr(a, b):
   )
 
 
+def same_extent(a, b):
+  """Compare integer shape values without changing scalar promotion rules.
+
+  Weak literals and explicit integer literals can denote the same extent.
+  Their scalar expression identities remain distinct; this query is only for
+  shape compatibility, whose runtime contract compares numerical dimensions.
+  """
+  for value in (a, b):
+    if type(value) is not Expr or type(value.type) is not ScalarType or value.type.dtype.removeprefix("u") not in {
+      "int8", "int16", "int32", "int64"
+    }:
+      return False
+    if value.op == "literal":
+      unsigned = value.type.dtype.startswith("u")
+      bits = int(value.type.dtype.removeprefix("u")[3:])
+      lower, upper = (0, (1 << bits) - 1) if unsigned else (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+      if value.args or type(value.data) is not int or not lower <= value.data <= upper:
+        return False
+  return same_expr(a, b) or (
+    a.op == b.op == "literal"
+    and type(a.data) is int
+    and type(b.data) is int
+    and a.data == b.data
+  )
+
+
 def broadcast_shape(a, b):
   result = []
   for i in range(1, max(len(a), len(b)) + 1):
@@ -367,7 +393,7 @@ def broadcast_shape(a, b):
     y = b[-i] if i <= len(b) else literal(1)
     if constant(x) == 1:
       result.append(y)
-    elif constant(y) == 1 or same_expr(x, y):
+    elif constant(y) == 1 or same_extent(x, y):
       result.append(x)
     else:
       if x.op == y.op == "literal":

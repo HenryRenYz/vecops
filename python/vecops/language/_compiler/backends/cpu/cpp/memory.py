@@ -204,7 +204,7 @@ class MemoryEmitter:
       if len(operand.type.shape) > len(destination.shape):
         raise TypeError("store source cannot have a higher rank than destination")
       for source_extent, destination_extent in zip(reversed(operand.type.shape), reversed(destination.shape)):
-        if I.constant(source_extent) == 1 or I.same_expr(source_extent, destination_extent):
+        if I.constant(source_extent) == 1 or I.same_extent(source_extent, destination_extent):
           continue
         if source_extent.op == destination_extent.op == "literal":
           raise TypeError("store source does not broadcast to the destination shape")

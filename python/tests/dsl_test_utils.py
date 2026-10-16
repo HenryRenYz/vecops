@@ -120,7 +120,7 @@ def assert_source_algorithms_lowered(prepared) -> None:
 
   from vecops.language._compiler.backends.cpu.transpose import TransposePlan
   from vecops.language._compiler.ir.vector import VectorRegion
-  from vecops.language._compiler.ir.verification import verify_prepared
+  from vecops.language._compiler.backends.cpu.verification import verify_prepared
 
   # The emitter appends the CPU transpose schedules it actually used to the
   # debug region list. The phase-boundary verifier runs before that emission.

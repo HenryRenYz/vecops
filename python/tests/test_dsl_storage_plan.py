@@ -10,7 +10,7 @@ from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.planning import PreparedKernel
 from vecops.language._compiler.backends.cpu.storage import plan_storage
 from vecops.language._compiler.ir.vector import VectorKernel
-from vecops.language._compiler.ir.verification import verify_prepared
+from vecops.language._compiler.backends.cpu.verification import verify_prepared
 from vecops.language._compiler.passes.manager import PassContext
 
 
