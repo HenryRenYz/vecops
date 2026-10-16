@@ -36,5 +36,5 @@ def plan_memory_proofs(prepared, context):
     region_shapes={identity: region.shape for identity, region in prepared.vectors.plans.items()},
   )
   return replace(
-    prepared, partition_proofs=proofs.partitions, broadcast_proofs=proofs.broadcasts, extent_geometry=proofs.geometry
+    prepared, partition_proofs=proofs.partitions, broadcast_proofs=proofs.broadcasts, scalar_geometry=proofs.geometry
   )

@@ -41,7 +41,7 @@ def verify_prepared(prepared):
   confirmed = _memory_proofs(prepared)
   verify_partition_proofs(prepared, confirmed.partitions)
   verify_broadcast_proofs(prepared, confirmed.broadcasts)
-  verify_extent_geometry(prepared, confirmed.geometry)
+  verify_scalar_geometry(prepared, confirmed.geometry)
   return prepared
 
 
@@ -129,25 +129,25 @@ def verify_broadcast_proofs(prepared, confirmed=None):
     require(type(proof.equal) is bool and proof.equal == actual.equal, "invalid CPU extent equality")
 
 
-def verify_extent_geometry(prepared, confirmed=None):
+def verify_scalar_geometry(prepared, confirmed=None):
   """Geometry may contain equality classes only, for the exact final subject."""
-  from .broadcasts import ExtentGeometry
+  from .broadcasts import ScalarGeometry
 
   if confirmed is None:
     confirmed = _memory_proofs(prepared).geometry
-  for key, plan in getattr(prepared, "extent_geometry", {}).items():
-    require(type(plan) is ExtentGeometry and key == id(plan.subject), "stale CPU extent geometry identity")
+  for key, plan in getattr(prepared, "scalar_geometry", {}).items():
+    require(type(plan) is ScalarGeometry and key == id(plan.subject), "stale CPU scalar geometry identity")
     actual = confirmed.get(key)
-    require(actual is not None and actual.subject is plan.subject, "detached CPU extent geometry subject")
+    require(actual is not None and actual.subject is plan.subject, "detached CPU scalar geometry subject")
     require(
       len(plan.classes) == len(actual.classes)
       and all(len(a) == len(b) and all(x is y for x, y in zip(a, b)) for a, b in zip(plan.classes, actual.classes)),
-      "CPU extent geometry is not proved in the final lexical domains",
+      "CPU scalar geometry is not proved in the final lexical domains",
     )
     require(
       len(plan.representatives) == len(actual.representatives)
       and all(a is b for a, b in zip(plan.representatives, actual.representatives)),
-      "CPU extent representatives are not proved in the final lexical domains",
+      "CPU scalar representatives are not proved in the final lexical domains",
     )
 
 

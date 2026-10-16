@@ -8,11 +8,11 @@ import json
 
 from .... import ir as I
 from ....analysis.effects import read_accesses
-from .memory import scoped_extent_geometry
+from .memory import scoped_scalar_geometry
 
 
 class ControlEmitter:
-  @scoped_extent_geometry
+  @scoped_scalar_geometry
   def elementwise_group(self, group, future):
     body = I.Block(list(group.stores))
     self.protect_region(body, future)

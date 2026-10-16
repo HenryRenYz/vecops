@@ -211,25 +211,25 @@ def test_geometry_is_exact_subject_scoped_and_restored_on_exception():
   kernel, store, source, destination = clamp_example()
   analysis = collect_broadcast_analysis(kernel)
   emitter = MemoryEmitter()
-  emitter.prepared = SimpleNamespace(extent_geometry=analysis.geometry)
+  emitter.prepared = SimpleNamespace(scalar_geometry=analysis.geometry)
   emitter.scalar = lambda value: "source" if value is source else "destination"
   original_cache = {("outer",): "outer_vector"}
   emitter.chunk_cache = original_cache
   assert "?" in emitter.coordinates((source,), (destination,), ("i",))[0]
-  with pytest.raises(RuntimeError, match="abort"), emitter.extent_geometry(store):
+  with pytest.raises(RuntimeError, match="abort"), emitter.scalar_geometry(store):
     assert emitter.chunk_cache == {} and emitter.chunk_cache is not original_cache
     assert emitter.coordinates((source,), (destination,), ("i",)) == ("i",)
-    assert emitter.active_extent_aliases[id(destination)] == (destination, source)
+    assert emitter.active_scalar_aliases[id(destination)] == (destination, source)
     emitter.chunk_cache[("inside",)] = "inside_vector"
-    with emitter.extent_geometry(replace(store)):
+    with emitter.scalar_geometry(replace(store)):
       assert not emitter.same_geometry(source, destination)
-      assert not emitter.active_extent_aliases
+      assert not emitter.active_scalar_aliases
       assert not emitter.chunk_cache
     assert emitter.same_geometry(source, destination)
     assert emitter.chunk_cache == {("inside",): "inside_vector"}
     raise RuntimeError("abort")
   assert emitter.chunk_cache is original_cache
-  assert not emitter.active_extent_aliases
+  assert not emitter.active_scalar_aliases
   assert not emitter.same_geometry(source, destination)
 
 
@@ -247,12 +247,12 @@ def test_geometry_equality_preserves_direct_state_register_consumption():
   state = I.TileState("saved", I.TileType("float32", (source,)))
   value = I.Expr(state.type, "state_ref", data=state)
   plan = SimpleNamespace(pieces=(object(),))
-  emitter.prepared = SimpleNamespace(extent_geometry=analysis.geometry, states={"saved": plan})
+  emitter.prepared = SimpleNamespace(scalar_geometry=analysis.geometry, states={"saved": plan})
   emitter.chunk_cache = {}
   emitter.state_tags = lambda *_: ("tag",)
   emitter.state_coordinates = lambda _: (("0",),)
   emitter.same_register_tag = lambda a, b: a == b
-  with emitter.extent_geometry(store):
+  with emitter.scalar_geometry(store):
     assert emitter.state_vector(value, "tag", (destination,), ("0",), "active", 0) == "saved_r0"
   assert state.type.shape[0] is source and store.destination.shape[0] is destination
 
@@ -276,20 +276,20 @@ def test_memory_proofs_share_one_lexical_walk(monkeypatch):
 
 
 def test_geometry_verifier_rejects_forged_classes_and_subjects():
-  from vecops.language._compiler.backends.cpu.broadcasts import ExtentGeometry, collect_broadcast_analysis
-  from vecops.language._compiler.backends.cpu.verification import verify_extent_geometry
+  from vecops.language._compiler.backends.cpu.broadcasts import ScalarGeometry, collect_broadcast_analysis
+  from vecops.language._compiler.backends.cpu.verification import verify_scalar_geometry
 
   kernel, store, source, destination = clamp_example()
   analysis = collect_broadcast_analysis(kernel)
   artifact = prepared(kernel, analysis.proofs)
-  artifact.extent_geometry = analysis.geometry
-  verify_extent_geometry(artifact)
-  artifact.extent_geometry = {id(store): ExtentGeometry(replace(store), ((source, destination),))}
+  artifact.scalar_geometry = analysis.geometry
+  verify_scalar_geometry(artifact)
+  artifact.scalar_geometry = {id(store): ScalarGeometry(replace(store), ((source, destination),))}
   with pytest.raises(ValueError, match="identity"):
-    verify_extent_geometry(artifact)
-  artifact.extent_geometry = {id(store): ExtentGeometry(store, ((source, I.literal(1)),))}
+    verify_scalar_geometry(artifact)
+  artifact.scalar_geometry = {id(store): ScalarGeometry(store, ((source, I.literal(1)),))}
   with pytest.raises(ValueError, match="not proved"):
-    verify_extent_geometry(artifact)
+    verify_scalar_geometry(artifact)
 
 
 def test_group_geometry_unites_equal_pairs_without_leaking_to_a_copied_group():
@@ -305,13 +305,13 @@ def test_group_geometry_unites_equal_pairs_without_leaking_to_a_copied_group():
   body.statements[-1] = group
   analysis = collect_broadcast_analysis(kernel)
   emitter = MemoryEmitter()
-  emitter.prepared = SimpleNamespace(extent_geometry=analysis.geometry)
+  emitter.prepared = SimpleNamespace(scalar_geometry=analysis.geometry)
   emitter.chunk_cache = {}
-  with emitter.extent_geometry(group):
+  with emitter.scalar_geometry(group):
     assert emitter.same_geometry(source, destination)
     assert emitter.same_geometry(other, destination)
     assert emitter.same_geometry(source, other)
-  with emitter.extent_geometry(replace(group)):
+  with emitter.scalar_geometry(replace(group)):
     assert not emitter.same_geometry(source, other)
   assert group.stores == (first, second)
 
@@ -340,17 +340,17 @@ def test_prepared_representative_prefers_an_available_immutable_scalar():
   plan = analysis.geometry[id(store)]
   assert plan.representatives == (source,)
   emitter = Emitter()
-  emitter.prepared = SimpleNamespace(extent_geometry=analysis.geometry)
+  emitter.prepared = SimpleNamespace(scalar_geometry=analysis.geometry)
   from vecops.language._compiler.operations import snapshot
 
   emitter.environment = SimpleNamespace(operations=snapshot())
   emitter.hardware_scalar_bindings = {}
   emitter.hardware_scope = None
   emitter.chunk_cache = {}
-  with emitter.extent_geometry(store):
+  with emitter.scalar_geometry(store):
     assert emitter.scalar(destination) == emitter.scalar(source) == "captured"
     assert store.destination.shape[0] is destination
-  assert not emitter.active_extent_aliases
+  assert not emitter.active_scalar_aliases
   assert emitter.scalar(source) == "captured"
 
 
@@ -373,14 +373,14 @@ def test_geometry_representatives_reject_cross_class_alias_cycles():
 
 def test_geometry_verifier_rejects_a_different_scalar_representative():
   from vecops.language._compiler.backends.cpu.broadcasts import collect_broadcast_analysis
-  from vecops.language._compiler.backends.cpu.verification import verify_extent_geometry
+  from vecops.language._compiler.backends.cpu.verification import verify_scalar_geometry
 
   kernel, store, _source, destination = clamp_example()
   analysis = collect_broadcast_analysis(kernel)
   artifact = prepared(kernel, analysis.proofs)
-  artifact.extent_geometry = {id(store): replace(analysis.geometry[id(store)], representatives=(destination,))}
+  artifact.scalar_geometry = {id(store): replace(analysis.geometry[id(store)], representatives=(destination,))}
   with pytest.raises(ValueError, match="representatives"):
-    verify_extent_geometry(artifact)
+    verify_scalar_geometry(artifact)
 
 
 def separate_group_captures():
@@ -405,12 +405,12 @@ def test_group_iteration_root_connects_independent_historical_captures_only_in_g
   kernel, group, a, b = separate_group_captures()
   analysis = collect_broadcast_analysis(kernel)
   emitter = MemoryEmitter()
-  emitter.prepared = SimpleNamespace(extent_geometry=analysis.geometry)
+  emitter.prepared = SimpleNamespace(scalar_geometry=analysis.geometry)
   emitter.chunk_cache = {}
-  with emitter.extent_geometry(group):
+  with emitter.scalar_geometry(group):
     assert emitter.same_geometry(a, b)
   for store in group.stores:
-    with emitter.extent_geometry(store):
+    with emitter.scalar_geometry(store):
       assert not emitter.same_geometry(a, b)
 
 
@@ -426,9 +426,9 @@ def test_shared_group_cross_store_equality_intersects_all_execution_domains():
   kernel.body.statements.append(replace(loop, start=I.literal(0), stop=I.literal(1), body=copied))
   analysis = collect_broadcast_analysis(kernel)
   emitter = MemoryEmitter()
-  emitter.prepared = SimpleNamespace(extent_geometry=analysis.geometry)
+  emitter.prepared = SimpleNamespace(scalar_geometry=analysis.geometry)
   emitter.chunk_cache = {}
-  with emitter.extent_geometry(group):
+  with emitter.scalar_geometry(group):
     assert not emitter.same_geometry(a, b)
 
 
@@ -464,21 +464,21 @@ def test_group_cross_store_geometry_covers_every_aligned_dimension():
   kernel = I.KernelIR(I.Block([I.Assign("rows", I.literal(2)), I.Assign("cols", I.literal(3)), group]), {}, {})
   analysis = collect_broadcast_analysis(kernel)
   emitter = MemoryEmitter()
-  emitter.prepared = SimpleNamespace(extent_geometry=analysis.geometry)
+  emitter.prepared = SimpleNamespace(scalar_geometry=analysis.geometry)
   emitter.chunk_cache = {}
-  with emitter.extent_geometry(group):
+  with emitter.scalar_geometry(group):
     assert emitter.same_geometry(a, shape[0]) and emitter.same_geometry(b, shape[1])
     assert not emitter.same_geometry(a, shape[1])
 
 
 def test_verifier_uses_actual_final_group_vector_root_shape():
   from vecops.language._compiler.backends.cpu.broadcasts import collect_broadcast_analysis
-  from vecops.language._compiler.backends.cpu.verification import verify_extent_geometry
+  from vecops.language._compiler.backends.cpu.verification import verify_scalar_geometry
 
   kernel, group, _a, _b = separate_group_captures()
   analysis = collect_broadcast_analysis(kernel)
   artifact = prepared(kernel, analysis.proofs)
-  artifact.extent_geometry = analysis.geometry
+  artifact.scalar_geometry = analysis.geometry
   artifact.vectors.plans = {id(group): SimpleNamespace(shape=(I.literal(99),))}
   with pytest.raises(ValueError, match="not proved"):
-    verify_extent_geometry(artifact)
+    verify_scalar_geometry(artifact)

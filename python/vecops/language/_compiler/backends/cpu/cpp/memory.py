@@ -10,16 +10,16 @@ from functools import wraps
 from .... import ir as I
 from ....ir.traversal import walk_unique
 from ....operations import Trait
-from ..broadcasts import BroadcastProof, ExtentGeometry, broadcast_key
+from ..broadcasts import BroadcastProof, ScalarGeometry, broadcast_key
 from ..capabilities import CPP_TYPES
 
 
-def scoped_extent_geometry(emit):
+def scoped_scalar_geometry(emit):
   """Bind prepared geometry to exactly one store/group emission invocation."""
 
   @wraps(emit)
   def scoped(self, subject, *args, **kwargs):
-    with self.extent_geometry(subject):
+    with self.scalar_geometry(subject):
       return emit(self, subject, *args, **kwargs)
 
   return scoped
@@ -27,38 +27,38 @@ def scoped_extent_geometry(emit):
 
 class MemoryEmitter:
   @contextmanager
-  def extent_geometry(self, subject):
+  def scalar_geometry(self, subject):
     """Consume equality classes without rewriting retained Tile/View objects.
 
     A nested fallback store replaces the group's context rather than inheriting
     unrelated equalities. Branch-local vectors cannot escape the context.
     """
-    previous = getattr(self, "active_extent_classes", {})
-    previous_aliases = getattr(self, "active_extent_aliases", {})
+    previous = getattr(self, "active_scalar_classes", {})
+    previous_aliases = getattr(self, "active_scalar_aliases", {})
     cache = self.chunk_cache
-    plan = getattr(self.prepared, "extent_geometry", {}).get(id(subject))
+    plan = getattr(self.prepared, "scalar_geometry", {}).get(id(subject))
     classes, aliases = {}, {}
-    if type(plan) is ExtentGeometry and plan.subject is subject:
+    if type(plan) is ScalarGeometry and plan.subject is subject:
       for component, representative in zip(plan.classes, plan.representatives):
         for expression in component:
           classes[id(expression)] = component
           if representative is not None and expression is not representative:
             aliases[id(expression)] = (expression, representative)
-    self.active_extent_classes = classes
-    self.active_extent_aliases = aliases
+    self.active_scalar_classes = classes
+    self.active_scalar_aliases = aliases
     self.chunk_cache = {}
     try:
       yield
     finally:
-      self.active_extent_classes = previous
-      self.active_extent_aliases = previous_aliases
+      self.active_scalar_classes = previous
+      self.active_scalar_aliases = previous_aliases
       self.chunk_cache = cache
 
   def same_geometry(self, first, second):
     """Query only unconditional identity/literals or the current certificate."""
     if I.same_extent(first, second):
       return True
-    component = getattr(self, "active_extent_classes", {}).get(id(first), ())
+    component = getattr(self, "active_scalar_classes", {}).get(id(first), ())
     return any(expression is first for expression in component) and any(
       expression is second for expression in component
     )
@@ -126,7 +126,7 @@ class MemoryEmitter:
     )
     return f"vecops::vec::opt::masked({name})", name
 
-  @scoped_extent_geometry
+  @scoped_scalar_geometry
   def store(self, statement, *, plan=None):
     destination, value = statement.destination, statement.value
     if not destination.shape:
@@ -480,6 +480,7 @@ class MemoryEmitter:
     self.close()
     self.snapshots[id(load)] = (saved, condition)
 
+  @scoped_scalar_geometry
   def protect_store(self, statement, future):
     current = {id(load): load for load in I.loads_unique(statement.value)}
     if statement.mask is not None:

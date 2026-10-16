@@ -60,7 +60,7 @@ class PreparedKernel:
   immutable_geometry: object = field(default_factory=dict)
   partition_proofs: object = field(default_factory=dict)
   broadcast_proofs: object = field(default_factory=dict)
-  extent_geometry: object = field(default_factory=dict)
+  scalar_geometry: object = field(default_factory=dict)
   pass_trace: list = field(default_factory=list)
 
   def store(self, statement):

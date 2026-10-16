@@ -90,7 +90,7 @@ class ExpressionsEmitter:
       owned = self.hardware_scalar_bindings.get((value.op, value.data))
       if owned is not None:
         return owned
-    alias = getattr(self, "active_extent_aliases", {}).get(id(value))
+    alias = getattr(self, "active_scalar_aliases", {}).get(id(value))
     if alias is not None and alias[0] is value and getattr(self, "hardware_scope", None) is None:
       return self.scalar(alias[1])
     if value.op == "cache_bytes":

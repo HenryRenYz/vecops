@@ -1209,6 +1209,14 @@ availability across shared occurrences and rejects cycles between selected
 representatives. Printing substitutes only exact certified expression objects
 in the current store/group, preserving all historical load/View identities.
 Hardware-owner scalar bindings retain their existing spelling.
+The `ScalarGeometry` certificate also covers proved equal view offsets and
+strides, using the same total, bounded signed-integer analysis. Alias snapshot
+preparation consumes the exact store's certificate before printing its guards;
+it still compares actual pointers and runtime address spans. Equality never
+establishes nonaliasing or moves a metadata read, and unknown, effectful,
+trapping or potentially overflowing expressions retain their original form.
+Nested synthetic snapshot stores and sequential fusion fallbacks install their
+own certificate scope and restore the outer aliases and vector cache on exit.
 Group certificates additionally compare each store's historical source and
 destination extents with the actual prepared vector traversal shape. They
 intersect equality across every lexical occurrence; singleton compatibility
