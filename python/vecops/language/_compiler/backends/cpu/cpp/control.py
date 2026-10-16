@@ -8,9 +8,11 @@ import json
 
 from .... import ir as I
 from ....analysis.effects import read_accesses
+from .memory import scoped_extent_geometry
 
 
 class ControlEmitter:
+  @scoped_extent_geometry
   def elementwise_group(self, group, future):
     body = I.Block(list(group.stores))
     self.protect_region(body, future)
@@ -155,9 +157,7 @@ class ControlEmitter:
             # protect_region has already established these const bool
             # conditions. Resolve planned read identities, never recompute a
             # guard or copy its resizable snapshot Buffer owner.
-            captures.extend(
-              self.snapshots[id(read)][1] for read in plan.snapshot_reads if id(read) in self.snapshots
-            )
+            captures.extend(self.snapshots[id(read)][1] for read in plan.snapshot_reads if id(read) in self.snapshots)
           # The plan names existing immutable values only. Owners, mutable
           # results and any unplanned emission binding stay by reference.
           capture = ", ".join(("&", *dict.fromkeys(captures)))

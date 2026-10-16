@@ -119,8 +119,8 @@ def assert_source_algorithms_lowered(prepared) -> None:
   from dataclasses import replace
 
   from vecops.language._compiler.backends.cpu.transpose import TransposePlan
-  from vecops.language._compiler.ir.vector import VectorRegion
   from vecops.language._compiler.backends.cpu.verification import verify_prepared
+  from vecops.language._compiler.ir.vector import VectorRegion
 
   # The emitter appends the CPU transpose schedules it actually used to the
   # debug region list. The phase-boundary verifier runs before that emission.
@@ -135,9 +135,14 @@ def assert_source_algorithms_lowered(prepared) -> None:
 
 def parameter_snapshot_name(source: str, expression: str) -> str:
   """Resolve an ABI entry local without hardcoding generated suffixes."""
-  matches = re.findall(rf"const auto (dsl_c_parameter_\w+) = {re.escape(expression)};", source)
+  spellings = [expression]
+  axis = re.fullmatch(r"(\w+)\.(size|stride)\((\d+)\)", expression)
+  if axis:
+    spellings.append(f"static_cast<std::int64_t>({axis[1]}.template {axis[2]}<{axis[3]}>())")
+  alternatives = "|".join(re.escape(spelling) for spelling in spellings)
+  matches = re.findall(rf"const auto (dsl_c_parameter_\w+) = (?:{alternatives});", source)
   assert len(matches) == 1, f"expected one entry snapshot for {expression!r}"
-  assert source.count(expression) == 1, f"ABI metadata {expression!r} must be read once"
+  assert sum(source.count(spelling) for spelling in spellings) == 1, f"ABI metadata {expression!r} must be read once"
   return matches[0]
 
 

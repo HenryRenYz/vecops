@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from .....expr import Dynamic
 from .....types import TensorType
 from .... import ir as I
 from ....ir.traversal import nodes
@@ -194,10 +195,20 @@ class CPUEmitter(
         self.line(f"[[maybe_unused]] const auto {pointer} = {name}.data();")
         self.parameter_pointers[name] = pointer
         for operation in ("size", "stride"):
-          for axis in range(len(annotation.shape)):
+          dimensions = annotation.shape if operation == "size" else annotation.concrete_strides
+          for axis, dimension in enumerate(dimensions):
             expression = f"{name}.{operation}({axis})"
             local = self.unique(f"parameter_{name}_{operation}_{axis}")
-            self.line(f"[[maybe_unused]] const auto {local} = {expression};")
+            # Runtime-index access reads PackedStorage directly. Reify a
+            # Dynamic axis through its existing meta::Value conversion so
+            # native optimizers retain the validated bounds/alignment that
+            # kernel facts already used. Const axes already fold as written.
+            value = (
+              f"static_cast<std::int64_t>({name}.template {operation}<{axis}>())"
+              if isinstance(dimension, Dynamic)
+              else expression
+            )
+            self.line(f"[[maybe_unused]] const auto {local} = {value};")
             self.parameter_metadata[expression] = local
     if self.traces_memory:
       self.line(

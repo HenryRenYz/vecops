@@ -41,7 +41,7 @@ def metadata_template(*, grid=False, scratch=False):
 
 
 def snapshot_map(source):
-  return dict(re.findall(r"const auto (dsl_c_parameter_\w+) = (\w+\.(?:data|size|stride)\([^)]*\));", source))
+  return dict(re.findall(r"const auto (dsl_c_parameter_\w+) = ([^;\n]+);", source))
 
 
 @pytest.mark.parametrize("target", ("SVE", "AVX512"))
@@ -49,7 +49,15 @@ def snapshot_map(source):
 def test_entry_parameter_metadata_reads_once_and_uses_only_exact_raw_mapping(target, grid):
   source = CPUBackend().lower(metadata_template(grid=grid).ir, (), target=target).source
   snapshots = snapshot_map(source)
-  assert set(snapshots.values()) == {"A.data()", "A.size(0)", "A.stride(0)", "C.data()", "C.size(0)", "C.stride(0)"}
+  assert set(snapshots.values()) == {
+    "A.data()",
+    "C.data()",
+    *(
+      f"static_cast<std::int64_t>({name}.template {operation}<0>())"
+      for name in ("A", "C")
+      for operation in ("size", "stride")
+    ),
+  }
   assert all(source.count(expression) == 1 for expression in snapshots.values())
   # Runtime scalar arguments and induction/carried locals are not tensor
   # descriptor metadata. Their evaluation must remain in the loop domain.
@@ -67,7 +75,7 @@ def test_entry_parameter_metadata_reads_once_and_uses_only_exact_raw_mapping(tar
 def test_resizable_scratch_keeps_live_pointer_and_dynamic_extent_reads():
   source = CPUBackend().lower(metadata_template(scratch=True).ir, (), target="SVE").source
   snapshots = snapshot_map(source)
-  assert all(expression.startswith(("A.", "C.")) for expression in snapshots.values())
+  assert all(re.search(r"\b(?:A|C)\.", expression) for expression in snapshots.values())
   storage = re.search(r"vecops_dsl::Buffer<float> (dsl_f_\w+);", source).group(1)
   assert f"{storage}.data()" in source
   loop = source[source.index("for (vecops::nint_t") :]
@@ -101,6 +109,24 @@ def test_snapshot_policy_is_independently_disabled_and_type_checked():
   for invalid in (0, 1, None, "true"):
     with pytest.raises(TypeError, match="cpu_parameter_metadata_snapshot must be bool"):
       CPUBackend().lower(metadata_template().ir, (), target="SVE", options={"cpu_parameter_metadata_snapshot": invalid})
+
+
+def test_dynamic_axis_snapshots_preserve_existing_meta_value_constraints():
+  N = T.dynamic(alignment=4, lower=4, upper=128)
+
+  @T.template
+  def kernel(A: T.Tensor((N, 8), dtype=T.float32), C: T.Tensor((N, 8), dtype=T.float32, access="output")):
+    T.store(C, T.load(A) + 1)
+
+  source = CPUBackend().lower(kernel.ir, (), target="Scalar").source
+  snapshots = snapshot_map(source)
+  assert "static_cast<std::int64_t>(A.template size<0>())" in snapshots.values()
+  assert "static_cast<std::int64_t>(C.template size<0>())" in snapshots.values()
+  # Static axes already preserve Const metadata through the original accessor.
+  assert "A.size(1)" in snapshots.values()
+  assert "A.stride(0)" in snapshots.values()
+  assert "A.stride(1)" in snapshots.values()
+  assert "VECOPS_ASSUME" not in source[source.index("void __kernel__(") :]
 
 
 @pytest.fixture(scope="module")
@@ -152,3 +178,49 @@ def test_native_entry_snapshots_preserve_aliases_strides_resizes_and_loop_state(
         expected_output[:] = value
       compiled(inputs, output, 3)
       np.testing.assert_array_equal(output, expected_output, err_msg=f"{scratch}/{policy}/{length}/{layout}")
+
+
+def test_native_typed_metadata_preserves_required_dimension_validation(tmp_path):
+  N = T.dynamic(alignment=4, lower=4, upper=128)
+
+  @T.template
+  def kernel(A: T.Tensor((N, 8), dtype=T.float32), C: T.Tensor((N, 8), dtype=T.float32, access="output")):
+    T.store(C, T.load(A) + 1)
+
+  compiled = T.compile(
+    kernel, compiler=make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  )
+  for length in (4, 8, 128):
+    a = np.arange(length * 8, dtype=np.float32).reshape(length, 8)
+    c = np.empty_like(a)
+    compiled(a, c)
+    np.testing.assert_array_equal(c, a + 1)
+  for length in (0, 1, 5, 132):
+    a = np.ones((length, 8), dtype=np.float32)
+    c = np.full_like(a, -123)
+    with pytest.raises(ValueError, match=r"shape\[0\] violates Dynamic<4, 4, 128>"):
+      compiled(a, c)
+    np.testing.assert_array_equal(c, -123)
+
+
+def test_native_typed_metadata_preserves_required_stride_validation(tmp_path):
+  S = T.dynamic(alignment=16, lower=16, upper=128)
+
+  @T.template
+  def kernel(A: T.Tensor((4, 8), (S, 1), T.float32), C: T.Tensor((4, 8), dtype=T.float32, access="output")):
+    T.store(C, T.load(A) + 1)
+
+  compiled = T.compile(
+    kernel, compiler=make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  )
+  for stride in (16, 32, 128, 0, 8, 24, 144):
+    owner = np.arange(4 * 144 + 8, dtype=np.float32)
+    a = np.ndarray((4, 8), dtype=np.float32, buffer=owner, strides=(stride * owner.itemsize, owner.itemsize))
+    c = np.full((4, 8), -123, dtype=np.float32)
+    if stride in (16, 32, 128):
+      compiled(a, c)
+      np.testing.assert_array_equal(c, a + 1)
+    else:
+      with pytest.raises(ValueError, match=r"stride\[0\] violates Dynamic<16, 16, 128>"):
+        compiled(a, c)
+      np.testing.assert_array_equal(c, -123)

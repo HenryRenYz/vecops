@@ -141,7 +141,7 @@ class VectorsEmitter:
           if len(operand.type.shape) > len(value.type.shape):
             raise TypeError("load mask/inactive value cannot exceed the loaded region's rank")
           for a, b in zip(reversed(operand.type.shape), reversed(value.type.shape)):
-            if not getattr(self, "matrix_validated", False) and I.constant(a) != 1 and not I.same_expr(a, b):
+            if not getattr(self, "matrix_validated", False) and I.constant(a) != 1 and not self.same_geometry(a, b):
               self.line(f"vecops_dsl::check_broadcast({self.scalar(a)}, {self.scalar(b)});")
       broadcast = (
         view_axis < 0
@@ -149,7 +149,7 @@ class VectorsEmitter:
         and str(active) == "1"
         and self.environment.target.architecture != "x86"
         or I.constant(view.shape[view_axis]) == 1
-        and not I.same_expr(view.shape[view_axis], root_shape[axis])
+        and not self.same_geometry(view.shape[view_axis], root_shape[axis])
       )
       options, mask = self.memory_options(value.args[0] if value.args else None, tag, root_shape, coords, active, axis)
       options += self.conversion_layout_option()
@@ -171,7 +171,9 @@ class VectorsEmitter:
         else:
           strided = f"vecops::vec::load_convert({tag}{{}}, {pointer}, {options}, vecops::vec::opt::strided({stride}))"
           expression = f"(({stride}) == 1 ? {contiguous} : {strided})"
-        if I.constant(view.shape[view_axis]) is None and not I.same_expr(view.shape[view_axis], root_shape[axis]):
+        if I.constant(view.shape[view_axis]) is None and not self.same_geometry(
+          view.shape[view_axis], root_shape[axis]
+        ):
           filled = f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>(*{pointer}))"
           if mask is not None:
             filled = f"vecops::vec::blend({tag}{{}}, {other}, {mask}, (vecops::vec::mask_any({tag}{{}}, {mask}) ? {filled} : {other}))"
@@ -203,7 +205,9 @@ class VectorsEmitter:
               else f", vecops::vec::opt::strided({selected_stride})"
             )
             expression = f"vecops::vec::load_convert({tag}{{}}, {selected_pointer}, {options}{extra})"
-            if I.constant(view.shape[view_axis]) is None and not I.same_expr(view.shape[view_axis], root_shape[axis]):
+            if I.constant(view.shape[view_axis]) is None and not self.same_geometry(
+              view.shape[view_axis], root_shape[axis]
+            ):
               filled = f"vecops::vec::fill({tag}{{}}, static_cast<vecops::vec::ElementOf<{tag}>>(*{selected_pointer}))"
               expression = f"(({self.scalar(view.shape[view_axis])}) == 1 ? {filled} : {expression})"
           name = self.unique("v")

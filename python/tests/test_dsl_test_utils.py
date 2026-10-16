@@ -71,6 +71,13 @@ def test_metadata_assertion_resolves_exact_expression_not_tensor_prefix():
     dsl_test_utils.parameter_snapshot_name(source + "\nA.data();", "A.data()")
 
 
+def test_metadata_assertion_recognizes_typed_dynamic_axis_once():
+  source = "const auto dsl_c_parameter_A_size_7 = static_cast<std::int64_t>(A.template size<0>());"
+  assert dsl_test_utils.parameter_snapshot_name(source, "A.size(0)") == "dsl_c_parameter_A_size_7"
+  with pytest.raises(AssertionError, match="read once"):
+    dsl_test_utils.parameter_snapshot_name(source + "\nA.size(0);", "A.size(0)")
+
+
 def test_arm_cross_headers_use_explicit_private_pair_without_system_fallback(monkeypatch, tmp_path):
   generic = tmp_path / "gcc14/include/c++"
   target = generic / "aarch64-conda-linux-gnu"

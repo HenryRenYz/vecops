@@ -37,49 +37,93 @@ def verify_prepared(prepared):
         )
       slots.setdefault(slot, []).append(interval)
   verify_private_captures(prepared)
-  verify_partition_proofs(prepared)
+  confirmed = _memory_proofs(prepared)
+  verify_partition_proofs(prepared, confirmed.partitions)
+  verify_broadcast_proofs(prepared, confirmed.broadcasts)
+  verify_extent_geometry(prepared, confirmed.geometry)
   return prepared
 
 
-def verify_partition_proofs(prepared):
+def _memory_proofs(prepared):
+  from ...operations import current, use_catalog
+  from .memory_proofs import collect_memory_proofs
+
+  manager = getattr(prepared.vectors, "manager", None)
+  environment = (getattr(manager, "options", {}) or {}).get("_compiler_environment")
+  with use_catalog(environment.operations if environment is not None else current()):
+    return collect_memory_proofs(
+      prepared.vectors.kernel,
+      region_shapes={identity: region.shape for identity, region in getattr(prepared.vectors, "plans", {}).items()},
+    )
+
+
+def verify_broadcast_proofs(prepared, confirmed=None):
+  """Recompute extent certificates against final IR and its operation snapshot."""
+  from .broadcasts import BroadcastProof, broadcast_key
+
+  if confirmed is None:
+    confirmed = _memory_proofs(prepared).broadcasts
+  for key, proof in prepared.broadcast_proofs.items():
+    require(type(proof) is BroadcastProof, "invalid CPU broadcast certificate")
+    require(key == broadcast_key(proof.store, proof.source, proof.destination), "stale CPU broadcast identity")
+    actual = confirmed.get(key)
+    require(actual is not None, "CPU broadcast certificate is not proved in the final lexical domains")
+    require(
+      actual.store is proof.store and actual.source is proof.source and actual.destination is proof.destination,
+      "detached CPU broadcast subject",
+    )
+    require(proof.occurrences == actual.occurrences, "CPU broadcast proof missed a lexical occurrence")
+    require(type(proof.equal) is bool and proof.equal == actual.equal, "invalid CPU extent equality")
+
+
+def verify_extent_geometry(prepared, confirmed=None):
+  """Geometry may contain equality classes only, for the exact final subject."""
+  from .broadcasts import ExtentGeometry
+
+  if confirmed is None:
+    confirmed = _memory_proofs(prepared).geometry
+  for key, plan in getattr(prepared, "extent_geometry", {}).items():
+    require(type(plan) is ExtentGeometry and key == id(plan.subject), "stale CPU extent geometry identity")
+    actual = confirmed.get(key)
+    require(actual is not None and actual.subject is plan.subject, "detached CPU extent geometry subject")
+    require(
+      len(plan.classes) == len(actual.classes)
+      and all(len(a) == len(b) and all(x is y for x, y in zip(a, b)) for a, b in zip(plan.classes, actual.classes)),
+      "CPU extent geometry is not proved in the final lexical domains",
+    )
+    require(
+      len(plan.representatives) == len(actual.representatives)
+      and all(a is b for a, b in zip(plan.representatives, actual.representatives)),
+      "CPU extent representatives are not proved in the final lexical domains",
+    )
+
+
+def verify_partition_proofs(prepared, confirmed=None):
   """Certificates must retain their final group/views and lexical count."""
-  from ...ir.traversal import children
-  from .partitions import PartitionProof, collect_partition_proofs, partition_key
+  from .partitions import PartitionProof, partition_key
 
-  occurrences, groups, active = {}, {}, set()
-
-  def visit(block):
-    require(id(block) not in active, "cyclic CPU partition lexical scope")
-    active.add(id(block))
-    for statement in block.statements:
-      if isinstance(statement, I.ElementwiseGroup):
-        groups[id(statement)] = statement
-        occurrences[id(statement)] = occurrences.get(id(statement), 0) + 1
-      for child in children(statement):
-        visit(child)
-    active.remove(id(block))
-
-  visit(prepared.vectors.kernel.body)
-  confirmed = collect_partition_proofs(prepared.vectors.kernel) if prepared.partition_proofs else {}
+  if confirmed is None:
+    confirmed = _memory_proofs(prepared).partitions
   for key, proof in prepared.partition_proofs.items():
     require(type(proof) is PartitionProof, "invalid CPU partition certificate")
-    require(groups.get(id(proof.group)) is proof.group, "detached CPU partition group")
-    destinations = tuple(store.destination for store in proof.group.stores)
-    require(any(view is proof.first for view in destinations) and any(view is proof.second for view in destinations),
-            "detached CPU partition view")
     require(key == partition_key(proof.group, proof.first, proof.second), "stale CPU partition identity")
-    require(proof.occurrences == occurrences[id(proof.group)], "CPU partition proof missed a lexical occurrence")
-    require(key in confirmed, "CPU partition certificate is not proved in the final lexical domains")
+    actual = confirmed.get(key)
+    require(actual is not None, "CPU partition certificate is not proved in the final lexical domains")
+    require(
+      actual.group is proof.group and actual.first is proof.first and actual.second is proof.second,
+      "detached CPU partition subject",
+    )
+    require(proof.occurrences == actual.occurrences, "CPU partition proof missed a lexical occurrence")
 
 
 def verify_private_captures(prepared):
   """Reject stale, mutable or out-of-scope positive value-capture proofs."""
   from ....types import TensorType
-  from .capabilities import CPP_TYPES
-  from ...operations import Trait, current
   from ...ir.collective import TeamReduce
   from ...ir.state import ExitRegion
   from ...ir.traversal import children, nodes
+  from ...operations import Trait, current
+  from .capabilities import CPP_TYPES
 
   kernel = prepared.vectors.kernel
   definitions, excluded = {}, set()
@@ -91,19 +135,26 @@ def verify_private_captures(prepared):
     elif isinstance(node, I.Grid):
       excluded.update(node.targets)
   immutable = {
-    name for name, sites in definitions.items()
-    if len(sites) == 1 and isinstance(sites[0], I.Assign) and sites[0].declare
-    and isinstance(sites[0].value.type, I.ScalarType) and sites[0].value.type.dtype in CPP_TYPES
+    name
+    for name, sites in definitions.items()
+    if len(sites) == 1
+    and isinstance(sites[0], I.Assign)
+    and sites[0].declare
+    and isinstance(sites[0].value.type, I.ScalarType)
+    and sites[0].value.type.dtype in CPP_TYPES
     and name not in excluded
   }
   parameters = {
-    name for name, typ in kernel.parameters.items()
+    name
+    for name, typ in kernel.parameters.items()
     if not isinstance(typ, TensorType) and name not in definitions and name not in excluded
   }
   tensors = {name: typ for name, typ in kernel.parameters.items() if isinstance(typ, TensorType)}
   metadata = {
     f"{name}.{operation}({axis})"
-    for name, typ in tensors.items() for operation in ("size", "stride") for axis in range(len(typ.shape))
+    for name, typ in tensors.items()
+    for operation in ("size", "stride")
+    for axis in range(len(typ.shape))
   }
   seen = set()
   manager = getattr(prepared.vectors, "manager", None)
@@ -140,12 +191,18 @@ def verify_private_captures(prepared):
         require(set(plan.metadata) <= metadata, "private metadata capture is not an ABI snapshot")
         require(set(plan.pointers) <= tensors.keys(), "private pointer capture is not an ABI tensor")
         reads = read_references(statement)
-        require(len({id(read) for read in plan.snapshot_reads}) == len(plan.snapshot_reads),
-                "private snapshot capture contains duplicate reads")
-        require(all(reads.get(id(read)) is read for read in plan.snapshot_reads),
-                "private snapshot capture has a detached/non-read subject")
-        require(not hardware or not (plan.scalars or plan.metadata or plan.pointers or plan.snapshot_reads),
-                "private value capture crosses an active hardware scope")
+        require(
+          len({id(read) for read in plan.snapshot_reads}) == len(plan.snapshot_reads),
+          "private snapshot capture contains duplicate reads",
+        )
+        require(
+          all(reads.get(id(read)) is read for read in plan.snapshot_reads),
+          "private snapshot capture has a detached/non-read subject",
+        )
+        require(
+          not hardware or not (plan.scalars or plan.metadata or plan.pointers or plan.snapshot_reads),
+          "private value capture crosses an active hardware scope",
+        )
       for child in children(statement):
         block(child, available, hardware or isinstance(statement, I.HardwareRegion))
       assignments = statement.assignments if isinstance(statement, I.ReductionGroup) else (statement,)

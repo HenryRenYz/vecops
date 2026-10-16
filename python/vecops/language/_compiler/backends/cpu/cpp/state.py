@@ -145,7 +145,7 @@ class StateEmitter:
       return None
     if any(
       len(region.shape) != len(p.state.type.shape)
-      or not all(I.same_expr(a, b) for a, b in zip(region.shape, p.state.type.shape))
+      or not all(self.same_geometry(a, b) for a, b in zip(region.shape, p.state.type.shape))
       for p in plans
     ):
       return None
@@ -165,6 +165,45 @@ class StateEmitter:
       if finish:
         finish(tags, state)
 
+  def fixed_register_prefix(self, plan, value, tag, root_shape, own_coords, active, axis):
+    """Read a complete fixed prefix without extracting individual lanes.
+
+    X86 fixed and scalable tags at the native width share a representation.
+    Use that bridge only for a zero-origin, fully active fixed vector; the
+    public fixed-to-fixed bitcast truncates its low bytes. ARM sizeless
+    vectors and shifted, masked or partially active reads retain their
+    existing projection paths.
+    """
+    target = self.environment.codegen_target
+    wanted = self.fixed_tag_lanes.get(tag)
+    if not (
+      target.architecture == "x86"
+      and target.vector_bits
+      and not value.type.mask
+      and len(plan.pieces) == 1
+      and plan.pieces[0].scalable
+      and plan.pieces[0].coordinates == (0,)
+      and plan.pieces[0].power == 0
+      and len(value.type.shape) == len(root_shape) == 1
+      and axis in (-1, 0)
+      and own_coords == ("0",)
+      and type(wanted) is int
+      and I.constant(value.type.shape[0]) == wanted
+      and str(active) == str(wanted)
+      and value.type.dtype == plan.state.type.dtype
+      and self.tag_dtypes.get(tag) == value.type.dtype
+    ):
+      return None
+    native = target.vector_bits // (8 * ELEMENT_BYTES[value.type.dtype])
+    if not 0 < wanted <= native:
+      return None
+    source_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {native}>"
+    register = f"{value.data.name}_r0"
+    self.line(
+      f"static_assert(std::is_same_v<vecops::vec::Vec<{source_tag}>, std::remove_cvref_t<decltype({register})>>);"
+    )
+    return f"vecops::vec::bitcast({tag}{{}}, {source_tag}{{}}, {register}) /* fixed register prefix */"
+
   def state_vector(self, value, tag, root_shape, coords, active, axis):
     plan = self.prepared.states[value.data.name]
     if not plan.pieces:
@@ -181,13 +220,16 @@ class StateEmitter:
       if (
         own_coords == coordinate
         and axis == len(root_shape) - 1
-        and (I.constant(value.type.shape[-1]) != 1 or I.same_expr(value.type.shape[-1], root_shape[-1]))
+        and (I.constant(value.type.shape[-1]) != 1 or self.same_geometry(value.type.shape[-1], root_shape[-1]))
         and (
           self.same_register_tag(tag, own_tag)
           or tag == f"vecops::vec::Rebind<{CPP_TYPES[value.type.dtype]}, {own_tag}>"
         )
       ):
         return f"{value.data.name}_r{index}"
+    prefix = self.fixed_register_prefix(plan, value, tag, root_shape, own_coords, active, axis)
+    if prefix is not None:
+      return prefix
     # A dynamic logical prefix is still one physical register. Generic store
     # traversal can hide its zero origin behind a loop variable or broadcast
     # projection. Version that geometry rather than reconstruct every lane;
@@ -220,11 +262,12 @@ class StateEmitter:
     self.opening(f"for (vecops::nint_t {lane}=0; {lane}<({active}); ++{lane})")
     own_axis = axis - (len(root_shape) - len(value.type.shape))
     indices = []
+    offset = len(root_shape) - len(value.type.shape)
     for a, c in enumerate(own_coords):
       extent = I.constant(value.type.shape[a])
       if a != own_axis or extent == 1:
         indices.append(c)
-      elif extent is None:
+      elif extent is None and not self.same_geometry(value.type.shape[a], root_shape[offset + a]):
         # Broadcasting a singleton register does not advance its source lane.
         # Projection of the vector origin alone cannot express that stride.
         indices.append(f"(({self.scalar(value.type.shape[a])}) == 1 ? 0 : (({c}) + {lane}))")

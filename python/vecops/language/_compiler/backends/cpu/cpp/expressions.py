@@ -25,10 +25,13 @@ class ExpressionsEmitter:
 
   def scalar_convert(self, dtype, expression, source_dtype=None):
     """Use the public scalar counterpart of vector conversion semantics."""
-    metadata = (getattr(self, "hardware_scope", None) is not None
-                and not getattr(self, "streaming_selection_scope", False)
-                and dtype.startswith(("int", "uint"))
-                and source_dtype is not None and source_dtype.startswith(("int", "uint")))
+    metadata = (
+      getattr(self, "hardware_scope", None) is not None
+      and not getattr(self, "streaming_selection_scope", False)
+      and dtype.startswith(("int", "uint"))
+      and source_dtype is not None
+      and source_dtype.startswith(("int", "uint"))
+    )
     # Instruction indices use native integer casts. Numeric scalar casts
     # inside selection helpers retain public saturation/rounding semantics,
     # just like their ordinary vector counterparts.
@@ -87,6 +90,9 @@ class ExpressionsEmitter:
       owned = self.hardware_scalar_bindings.get((value.op, value.data))
       if owned is not None:
         return owned
+    alias = getattr(self, "active_extent_aliases", {}).get(id(value))
+    if alias is not None and alias[0] is value and getattr(self, "hardware_scope", None) is None:
+      return self.scalar(alias[1])
     if value.op == "cache_bytes":
       field = {"L1": "l1d_bytes", "L2": "l2_bytes", "L3": "l3_bytes", "LLC": "llc_bytes"}[value.data]
       text = f"vecops::platform::cache_info().{field}"
@@ -229,7 +235,8 @@ class ExpressionsEmitter:
         value.op in {"floordiv", "mod", "ceildiv"}
         and arm
         and value.type.dtype in {"int32", "int64"}
-        and type(divisor) is int and 0 < divisor <= (1 << (int(value.type.dtype[3:]) - 1)) - 1
+        and type(divisor) is int
+        and 0 < divisor <= (1 << (int(value.type.dtype[3:]) - 1)) - 1
       ):
         return f"static_cast<{cpp}>(vecops_dsl::{value.op}_positive<{divisor}>(static_cast<{cpp}>({arguments[0]})))"
       return f"static_cast<{cpp}>(vecops_dsl::{value.op}({', '.join(f'static_cast<{cpp}>({a})' for a in arguments)}))"

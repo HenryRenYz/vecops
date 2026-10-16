@@ -4,13 +4,65 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from functools import wraps
+
 from .... import ir as I
 from ....ir.traversal import walk_unique
 from ....operations import Trait
+from ..broadcasts import BroadcastProof, ExtentGeometry, broadcast_key
 from ..capabilities import CPP_TYPES
 
 
+def scoped_extent_geometry(emit):
+  """Bind prepared geometry to exactly one store/group emission invocation."""
+
+  @wraps(emit)
+  def scoped(self, subject, *args, **kwargs):
+    with self.extent_geometry(subject):
+      return emit(self, subject, *args, **kwargs)
+
+  return scoped
+
+
 class MemoryEmitter:
+  @contextmanager
+  def extent_geometry(self, subject):
+    """Consume equality classes without rewriting retained Tile/View objects.
+
+    A nested fallback store replaces the group's context rather than inheriting
+    unrelated equalities. Branch-local vectors cannot escape the context.
+    """
+    previous = getattr(self, "active_extent_classes", {})
+    previous_aliases = getattr(self, "active_extent_aliases", {})
+    cache = self.chunk_cache
+    plan = getattr(self.prepared, "extent_geometry", {}).get(id(subject))
+    classes, aliases = {}, {}
+    if type(plan) is ExtentGeometry and plan.subject is subject:
+      for component, representative in zip(plan.classes, plan.representatives):
+        for expression in component:
+          classes[id(expression)] = component
+          if representative is not None and expression is not representative:
+            aliases[id(expression)] = (expression, representative)
+    self.active_extent_classes = classes
+    self.active_extent_aliases = aliases
+    self.chunk_cache = {}
+    try:
+      yield
+    finally:
+      self.active_extent_classes = previous
+      self.active_extent_aliases = previous_aliases
+      self.chunk_cache = cache
+
+  def same_geometry(self, first, second):
+    """Query only unconditional identity/literals or the current certificate."""
+    if I.same_extent(first, second):
+      return True
+    component = getattr(self, "active_extent_classes", {}).get(id(first), ())
+    return any(expression is first for expression in component) and any(
+      expression is second for expression in component
+    )
+
   def live_loads(self, required):
     """Visit retained reads in capture order, independent of object addresses.
 
@@ -47,7 +99,7 @@ class MemoryEmitter:
       coordinate = coords[offset + axis]
       if I.constant(extent) == 1:
         coordinate = "0"
-      elif not I.same_expr(extent, root_shape[offset + axis]) and I.constant(extent) is None:
+      elif not self.same_geometry(extent, root_shape[offset + axis]) and I.constant(extent) is None:
         coordinate = f"(({self.scalar(extent)}) == 1 ? 0 : ({coordinate}))"
       result.append(coordinate)
     return tuple(result)
@@ -74,6 +126,7 @@ class MemoryEmitter:
     )
     return f"vecops::vec::opt::masked({name})", name
 
+  @scoped_extent_geometry
   def store(self, statement, *, plan=None):
     destination, value = statement.destination, statement.value
     if not destination.shape:
@@ -206,6 +259,13 @@ class MemoryEmitter:
       for source_extent, destination_extent in zip(reversed(operand.type.shape), reversed(destination.shape)):
         if I.constant(source_extent) == 1 or I.same_extent(source_extent, destination_extent):
           continue
+        proof = getattr(self.prepared, "broadcast_proofs", {}).get(
+          broadcast_key(statement, source_extent, destination_extent)
+        )
+        if type(proof) is BroadcastProof and (
+          proof.store is statement and proof.source is source_extent and proof.destination is destination_extent
+        ):
+          continue
         if source_extent.op == destination_extent.op == "literal":
           raise TypeError("store source does not broadcast to the destination shape")
         self.line(f"vecops_dsl::check_broadcast({self.scalar(source_extent)}, {self.scalar(destination_extent)});")
@@ -307,8 +367,10 @@ class MemoryEmitter:
       from ..partitions import partition_key
 
       proof = getattr(self.prepared, "partition_proofs", {}).get(partition_key(group, a, b))
-      if proof is not None and proof.group is group and (
-        proof.first is a and proof.second is b or proof.first is b and proof.second is a
+      if (
+        proof is not None
+        and proof.group is group
+        and (proof.first is a and proof.second is b or proof.first is b and proof.second is a)
       ):
         return True
     # Private scratch cannot alias a different live storage. This is the same
@@ -326,13 +388,23 @@ class MemoryEmitter:
         regions = (a.region, b.region)
         same_root = all(
           len(region.root_shape) == len(root.shape)
-          and all(I.same_expr(x, y) for x, y in zip((*region.root_shape, *region.root_strides), (*root.shape, *root.strides)))
+          and all(
+            I.same_expr(x, y) for x, y in zip((*region.root_shape, *region.root_strides), (*root.shape, *root.strides))
+          )
           for region in regions
         )
-        if dense and same_root and all(region.affine_partition and all(step == 1 for step in region.steps) for region in regions):
+        if (
+          dense
+          and same_root
+          and all(region.affine_partition and all(step == 1 for step in region.steps) for region in regions)
+        ):
           for start_a, start_b, width_a, width_b, clipped_a, clipped_b in zip(
-            a.region.exact_starts or a.region.starts, b.region.exact_starts or b.region.starts,
-            a.region.widths, b.region.widths, a.region.clipped, b.region.clipped
+            a.region.exact_starts or a.region.starts,
+            b.region.exact_starts or b.region.starts,
+            a.region.widths,
+            b.region.widths,
+            a.region.clipped,
+            b.region.clipped,
           ):
             if clipped_a or clipped_b:
               continue

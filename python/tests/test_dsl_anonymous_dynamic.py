@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: MIT
 """Independent anonymous symbols survive a TensorType-only factory boundary."""
 
-import re
-
 import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import make_compiler
+from dsl_test_utils import make_compiler, parameter_snapshot_name
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.source import _build_definition
 from vecops.language._compiler.frontend.parser import lower
@@ -39,15 +37,18 @@ def test_anonymous_factory_codegen_preserves_each_runtime_dimension():
   template = anonymous_template()
   source = CPUBackend().lower(template.ir, (), target="AVX512").source
   entry = {
-    expression: local
-    for local, expression in re.findall(
-      r"const auto (dsl_c_parameter_\w+) = (\w+\.(?:data|size|stride)\([^)]*\));", source
+    expression: parameter_snapshot_name(source, expression)
+    for name, rank in (("A", 2), ("B", 2), ("C", 2), ("P", 1))
+    for expression in (
+      f"{name}.data()",
+      *(f"{name}.{operation}({axis})" for operation in ("size", "stride") for axis in range(rank)),
     )
   }
   assert "pack_size<float, 0>(" + entry["A.size(0)"] + ", " + entry["A.size(1)"] + ")" in source
   assert "checked_shape({" + entry["P.size(0)"] + "})" in source
   assert len(entry.values()) == len(set(entry.values()))
-  assert all(source.count(expression) == 1 for expression in entry)
+  # The shared resolver also checks exactly one raw or typed metadata read.
+  assert all(parameter_snapshot_name(source, expression) == local for expression, local in entry.items())
   # Fresh factory/capture identity must preserve both the anonymous-symbol
   # bindings and their deterministic entry-local code-generation mapping.
   second = anonymous_template()
@@ -106,7 +107,7 @@ def test_anonymous_dense_strides_and_dtype_cross_tensor_factory_boundary():
   assert tuple(values.values()) == (vecops.float32,)
   definition._native()  # Derived dense strides cannot contain anonymous symbols.
   source = CPUBackend().lower(first.ir, (), target="Scalar").source
-  assert "A.size(1)" in source
+  parameter_snapshot_name(source, "A.size(1)")
 
 
 def test_generated_annotation_names_do_not_shadow_explicit_specializations():

@@ -1,22 +1,23 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
-"""Plan bounded, same-allocation register-store separation before emission.
+"""Plan bounded, same-base register-store separation before emission.
 
 Certificates are intersections over lexical occurrences, not node-identity
 caches. A shared group can occur under different induction domains. Unknown
 arithmetic, ownership or execution scopes retain runtime alias versioning.
 """
 
-from dataclasses import dataclass, replace
 import re
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
+from ....types import TensorType
 from ... import ir as I
 from ...analysis.affine import canonical_integer, interval, simplify_ordered
 from ...analysis.effects import ValueEffects, assigned_scalars, scalar_references
 from ...analysis.facts import ScalarAliases, ValueFacts, induction_facts
+from ...dtypes import dtype_name
 from ...ir.traversal import children, nodes, walk_unique
-from ...passes.manager import register_pass
 from ...operations import current
 
 
@@ -33,23 +34,26 @@ def partition_key(group, first, second):
 
 
 class _Scope:
-  def __init__(self, base, bindings=None, aliases=None, roots=None):
+  def __init__(self, base, bindings=None, aliases=None, roots=None, abi=None, effects=None):
     self.base = base
     self.facts = ValueFacts(base if bindings is None else bindings)
     self.aliases = aliases or ScalarAliases()
     self.roots = dict(roots or {})
+    self.abi = dict(abi or {})
+    self.effects = effects or ValueEffects(current())
     self.normalized = {}
 
   def copy(self):
-    return _Scope(self.base, self.facts.bindings, self.aliases.copy(), self.roots)
+    return _Scope(self.base, self.facts.bindings, self.aliases.copy(), self.roots, self.abi, self.effects)
 
   def forget(self, names):
     self.aliases.write(names)
+    for name in names:
+      self.abi.pop(name, None)
     # Allocate evaluates metadata once. A later write to any of that view's
     # symbolic dependencies cannot reinterpret the existing allocation as a
     # newly sized root, even when current scalar facts are exact again.
-    self.roots = {storage: root for storage, root in self.roots.items()
-                  if not scalar_references(root) & names}
+    self.roots = {storage: root for storage, root in self.roots.items() if not scalar_references(root) & names}
     bindings = {key: value for key, value in self.facts.bindings.items() if key[1] not in names}
     self.facts = ValueFacts(bindings)
     self.normalized.clear()
@@ -67,13 +71,17 @@ class _Scope:
     triangle bound also protects cancellation/reassociation intermediates;
     merely proving the final subtraction small would not establish that.
     """
-    magnitudes = {}
+    magnitudes, active = {}, set()
     ordered = list(walk_unique(value))
     if len(ordered) > ScalarAliases.max_nodes:
       return False
+
     def visit(node):
       if id(node) in magnitudes:
         return True
+      if type(node) is not I.Expr or id(node) in active or self.effects.owned_expressions(node) != ():
+        return False
+      active.add(id(node))
       if not all(visit(argument) for argument in node.args):
         return False
       if type(node.type) is not I.ScalarType or node.type.dtype != "int64":
@@ -82,13 +90,21 @@ class _Scope:
       if definition.effects != "none" or definition.may_trap and node.op not in {"floordiv", "mod"}:
         return False
       if node.op in {"local", "frozen", "raw", "symbol", "literal"}:
-        if node.args or node.op in {"raw", "symbol"} and (node.op, node.data) not in self.base:
+        if (
+          node.args
+          or node.op != "literal"
+          and type(node.data) is not str
+          or node.op in {"raw", "symbol"}
+          and (node.op, node.data) not in self.base
+        ):
           return False
         fact = self.facts.infer(node)
         if fact is None:
           return False
         size = max(abs(fact.lower), abs(fact.upper))
       elif node.op in {"add", "sub", "mul", "min", "max", "floordiv", "mod"} and len(node.args) == 2:
+        if node.data is not None:
+          return False
         sizes = [magnitudes.get(id(argument)) for argument in node.args]
         if any(size is None for size in sizes) or not self.facts.integer_semantics_modeled(node):
           return False
@@ -107,12 +123,13 @@ class _Scope:
       if size > (1 << 63) - 1 or not self.facts.arithmetic_fits(node):
         return False
       magnitudes[id(node)] = size
+      active.remove(id(node))
       return True
+
     return visit(value)
 
   def bounds(self, value):
-    references = {(node.op, node.data) for node in walk_unique(value)
-                  if node.op in {"local", "raw", "symbol"}}
+    references = {(node.op, node.data) for node in walk_unique(value) if node.op in {"local", "raw", "symbol"}}
     result = {}
     for (kind, name), fact in self.facts.bindings.items():
       if (kind, name) not in references:
@@ -165,11 +182,57 @@ class _Scope:
       self.aliases.define(statement.target, value, dependencies)
 
 
-def _separated(scope, first, second):
-  if first.storage != second.storage or not first.owned or not second.owned or first.dtype != second.dtype:
+def _address_span(scope, view):
+  """A conservative element-address span, not a capacity/bounds proof.
+
+  Physical offsets and strides are the ones consumed by pointer emission.
+  Holes stay inside the bounding interval, so interleaved views do not gain a
+  positive certificate merely because their individual elements are distinct.
+  """
+  if len(view.shape) != len(view.strides):
+    return None
+  offset = scope.range(view.offset)
+  if offset is None or offset[0] < 0:
+    return None
+  span = I.literal(1)
+  for extent, stride in zip(view.shape, view.strides):
+    count, step = scope.range(extent), scope.range(stride)
+    if count is None or step is None or count[0] < 0 or step[0] < 0:
+      return None
+    span = I.binary("add", span, I.binary("mul", I.binary("sub", extent, I.literal(1)), stride))
+  count = scope.range(span)
+  # Checking the end as well as the difference prevents cancellation from
+  # hiding a signed overflow in the actual address-span arithmetic.
+  end = scope.range(I.binary("add", view.offset, span))
+  return span if count is not None and count[0] >= 0 and end is not None else None
+
+
+def _abi_separated(scope, first, second):
+  if first.owned or second.owned or scope.abi.get(first.storage) != first.dtype:
     return False
+  spans = _address_span(scope, first), _address_span(scope, second)
+  if any(span is None for span in spans):
+    return False
+  for a, b, span in ((first, second, spans[0]), (second, first, spans[1])):
+    gap = scope.range(I.binary("sub", I.binary("sub", b.offset, a.offset), span))
+    if gap is not None and gap[0] >= 0:
+      return True
+  return False
+
+
+def _separated(scope, first, second):
+  if first.storage != second.storage or first.dtype != second.dtype:
+    return False
+  if not first.owned or not second.owned:
+    return _abi_separated(scope, first, second)
   root = scope.roots.get(first.storage)
-  if root is None or not root.owned or root.dtype != first.dtype or not root.shape or len(root.shape) != len(root.strides):
+  if (
+    root is None
+    or not root.owned
+    or root.dtype != first.dtype
+    or not root.shape
+    or len(root.shape) != len(root.strides)
+  ):
     return False
   expected = I.literal(1)
   for extent, stride in zip(reversed(root.shape), reversed(root.strides)):
@@ -183,20 +246,33 @@ def _separated(scope, first, second):
   for view in (first, second):
     region = view.region
     rank = len(root.shape)
-    if region is None or any(len(values) != rank for values in (
-      region.root_shape, region.root_strides, region.starts, region.widths, region.steps, region.clipped,
-      region.exact_starts or region.starts,
-    )):
+    if region is None or any(
+      len(values) != rank
+      for values in (
+        region.root_shape,
+        region.root_strides,
+        region.starts,
+        region.widths,
+        region.steps,
+        region.clipped,
+        region.exact_starts or region.starts,
+      )
+    ):
       return False
-    if len(region.axes) != len(view.shape) or len(view.shape) != len(view.strides) or (
-      len(set(region.axes)) != len(region.axes) or any(type(axis) is not int or not 0 <= axis < rank for axis in region.axes)
+    if (
+      len(region.axes) != len(view.shape)
+      or len(view.shape) != len(view.strides)
+      or (
+        len(set(region.axes)) != len(region.axes)
+        or any(type(axis) is not int or not 0 <= axis < rank for axis in region.axes)
+      )
     ):
       return False
     if any(step != 1 for step in region.steps):
       return False
-    if not all(I.same_extent(a, b) for a, b in zip(
-      (*region.root_shape, *region.root_strides), (*root.shape, *root.strides)
-    )):
+    if not all(
+      I.same_extent(a, b) for a, b in zip((*region.root_shape, *region.root_strides), (*root.shape, *root.strides))
+    ):
       return False
     starts = region.exact_starts or region.starts
     offset = root.offset
@@ -214,8 +290,16 @@ def _separated(scope, first, second):
       lower, count = scope.range(start), scope.range(width)
       coverage = scope.range(I.binary("sub", width, requested))
       remainder = scope.range(I.binary("sub", I.binary("add", start, width), extent))
-      if (lower is None or count is None or coverage is None or remainder is None
-          or lower[0] < 0 or count[0] < 0 or coverage[1] > 0 or remainder[1] > 0):
+      if (
+        lower is None
+        or count is None
+        or coverage is None
+        or remainder is None
+        or lower[0] < 0
+        or count[0] < 0
+        or coverage[1] > 0
+        or remainder[1] > 0
+      ):
         return False
       axes.append((start, width))
     intervals.append(axes)
@@ -227,27 +311,42 @@ def _separated(scope, first, second):
   return False
 
 
-def collect_partition_proofs(kernel):
-  """Intersect each group/pair proof across every lexical occurrence."""
+def walk_lexical_scopes(kernel, callback):
+  """Visit each statement after opaque invalidation, before its own writes.
+
+  Callbacks may query the temporary scope's normalizer/ranges, but must not
+  retain or mutate the scope. Shared blocks are visited at every occurrence.
+  Allocation identity, required ABI pointers and scalar facts use one common
+  lexical invalidation policy for prepared CPU certificates.
+  """
   required = {name: value for name, value in kernel.parameters.items() if not getattr(value, "optional", False)}
   bindings = {}
   for name, value in kernel.bindings.items():
-    match = re.fullmatch(r"([A-Za-z_]\w*)\.(?:size|stride)\(\d+\)", value.data) if (
-      value.op == "raw" and isinstance(value.data, str)
-    ) else None
+    match = (
+      re.fullmatch(r"([A-Za-z_]\w*)\.(?:size|stride)\(\d+\)", value.data)
+      if (value.op == "raw" and isinstance(value.data, str))
+      else None
+    )
     if match is not None and match[1] in required:
       bindings[name] = value
   base = ValueFacts.from_kernel(replace(kernel, parameters=required, bindings=bindings)).bindings
-  proofs, counts, failed, active = {}, {}, set(), set()
+  active = set()
   catalog = current()
   effects = ValueEffects(catalog)
+  # The frontend rejects optional/default-None DSL operands; explicitly filter
+  # optional annotations too for manually constructed or transformed IR.
+  # This records only pointer identity/dtype, never a capacity or nonalias
+  # promise between separate arguments. View arithmetic remains authoritative.
+  abi = {name: dtype_name(value.dtype) for name, value in required.items() if isinstance(value, TensorType)}
 
   def opaque(statement):
     return any(
       catalog.get(value).effects == "unknown"
-      or value.op == "raw" and not effects.discardable(value)
+      or value.op == "raw"
+      and not effects.discardable(value)
       or effects.owned_expressions(value) is None
-      for value in nodes(statement, skip=(I.Block,)) if isinstance(value, I.Expr)
+      for value in nodes(statement, skip=(I.Block,))
+      if isinstance(value, I.Expr)
     )
 
   def allocations(statement):
@@ -272,26 +371,18 @@ def collect_partition_proofs(kernel):
         if opaque(statement):
           scope = _Scope(base)
           uncertain = True
+        callback(statement, scope)
         if isinstance(statement, I.Assign):
           scope.assign(statement)
         elif isinstance(statement, I.Allocate):
+          scope.abi.pop(statement.view.storage, None)
           scope.roots[statement.view.storage] = statement.view
         elif isinstance(statement, I.BindTile):
           # This retains historical readers; it neither evaluates its value
           # nor rebinds storage (cpp.control handles the same distinction).
           pass
         elif isinstance(statement, I.ElementwiseGroup):
-          occurrence_pairs = set()
-          for index, first in enumerate(statement.stores):
-            for second in statement.stores[index + 1:]:
-              key = partition_key(statement, first.destination, second.destination)
-              if key in occurrence_pairs:
-                continue
-              occurrence_pairs.add(key)
-              counts[key] = counts.get(key, 0) + 1
-              if not _separated(scope, first.destination, second.destination):
-                failed.add(key)
-              proofs[key] = PartitionProof(statement, first.destination, second.destination, counts[key])
+          pass
         elif isinstance(statement, I.For):
           written = writes(statement.body)
           incoming = scope.copy().forget(written | {statement.target})
@@ -324,20 +415,57 @@ def collect_partition_proofs(kernel):
           scope = _Scope(base)
         elif isinstance(statement, I.ReductionGroup):
           scope.forget(writes(statement))
-        elif not isinstance(statement, (
-          I.Store, I.IndexedStore, I.Assert, I.BindTile, I.DeclareState, I.UpdateState,
-          I.ArchitectureCall, I.AMXTile, I.SMEVector, I.SMEMask,
-        )):
+        elif not isinstance(
+          statement,
+          (
+            I.Store,
+            I.IndexedStore,
+            I.Assert,
+            I.BindTile,
+            I.DeclareState,
+            I.UpdateState,
+            I.ArchitectureCall,
+            I.AMXTile,
+            I.SMEVector,
+            I.SMEMask,
+          ),
+        ):
           scope = _Scope(base)
           uncertain = True
     finally:
       active.remove(id(body))
     return uncertain
 
-  block(kernel.body, _Scope(base))
-  return MappingProxyType({key: proof for key, proof in proofs.items() if key not in failed})
+  block(kernel.body, _Scope(base, abi=abi, effects=effects))
 
 
-@register_pass("cpu-plan-partition-proofs", stage="cpu-memory", after=("cpu-plan-storage", "cpu-plan-register-programs"))
-def plan_partition_proofs(prepared, context):
-  return replace(prepared, partition_proofs=collect_partition_proofs(prepared.vectors.kernel))
+def make_partition_collector():
+  """Return an occurrence collector and its conservative proof finalizer."""
+  proofs, counts, failed = {}, {}, set()
+
+  def collect(statement, scope):
+    if not isinstance(statement, I.ElementwiseGroup):
+      return
+    occurrence_pairs = set()
+    for index, first in enumerate(statement.stores):
+      for second in statement.stores[index + 1 :]:
+        key = partition_key(statement, first.destination, second.destination)
+        if key in occurrence_pairs:
+          continue
+        occurrence_pairs.add(key)
+        counts[key] = counts.get(key, 0) + 1
+        if not _separated(scope, first.destination, second.destination):
+          failed.add(key)
+        proofs[key] = PartitionProof(statement, first.destination, second.destination, counts[key])
+
+  def finish():
+    return MappingProxyType({key: proof for key, proof in proofs.items() if key not in failed})
+
+  return collect, finish
+
+
+def collect_partition_proofs(kernel):
+  """Intersect each group/pair proof across every lexical occurrence."""
+  collect, finish = make_partition_collector()
+  walk_lexical_scopes(kernel, collect)
+  return finish()

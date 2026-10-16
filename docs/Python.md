@@ -966,6 +966,11 @@ serial iterations, aliases and atomics still observe the original memory
 effects. This does not hoist dynamic loop state, view offsets, or addresses
 of scratch buffers that can resize. The independent diagnostic pass option
 `cpu_parameter_metadata_snapshot=False` retains direct descriptor access.
+Dynamic axes use compile-time indexed size/stride access and convert the existing
+`meta::Value` to an integer. This preserves its validated range/alignment contract
+for the native compiler after IR constant propagation removes redundant guards.
+Const axes keep their original access, which already folds at C++ compilation.
+Only existing validated contracts are propagated; input validation is unchanged.
 
 Independent elementwise stores can version their vector traversal once on the
 current store's alias guards. On the disjoint fast branch, only conditional
@@ -1159,7 +1164,7 @@ Resource inspection lists each logical buffer's `physical_slot` and the
 ordinary executable IR, so there is no separate empty matmul-plan catalog.
 Managers snapshot the registry; analyses and traces are local to a run.
 
-The late `cpu-plan-partition-proofs` pass records disjoint destination regions
+The late `cpu-plan-memory-proofs` pass records disjoint destination regions
 for fused register programs after scalar facts and loop motion have finished.
 It combines bounded signed integer aliases with lexical induction domains,
 checks actual offsets/strides against a dense private allocation, and proves
@@ -1170,6 +1175,45 @@ operands, unknown effects, unsupported geometry and possible arithmetic overflow
 retain the existing alias guards and independent-store fallback. The prepared
 CPU verifier checks certificates against the final IR; C++ printing only looks
 up their group/view identities and does not run affine or induction analysis.
+For two destinations based on the same required tensor argument, a separate
+certificate can instead compare their actual offset/shape/stride address
+intervals. It checks dtype identity and bounded nonnegative signed arithmetic;
+holes remain inside a conservative bounding span. This proves only nonoverlap,
+not buffer capacity or view bounds, including when a logical reshape has a
+different rank from the ABI buffer. Original bounds/preflight checks remain.
+Optional operands, storage shadowing, unknown geometry and overlapping spans
+retain runtime versioning. Distinct tensor arguments receive no nonalias
+promise from this analysis.
+
+The same pass and lexical traversal also use bounded domains
+to prove store source and destination extents equal, or the source extent one.
+Captured scalar extents can simplify while historical tile and view descriptors
+retain their original expressions. Compatibility certificates remove a redundant
+broadcast check without rewriting those descriptors or reader identities.
+Equality certificates additionally identify equivalent extents within exactly
+one store or elementwise group, so vector coordinates, load broadcasting and
+register-state consumers can reuse matching geometry. A source proved to have
+extent one is compatible but does not identify it with a wider destination.
+Nested store emission replaces the surrounding geometry scope and isolates
+its vector cache; both are restored on exit, including exceptions.
+Prepared equality classes also select an original scalar representative for
+shape printing. A dominating scalar with one declaring assignment and no
+other definition takes precedence over expanding its historical clamp;
+remaining candidates use DAG cost and stable IR order. The planner intersects
+availability across shared occurrences and rejects cycles between selected
+representatives. Printing substitutes only exact certified expression objects
+in the current store/group, preserving all historical load/View identities.
+Hardware-owner scalar bindings retain their existing spelling.
+Group certificates additionally compare each store's historical source and
+destination extents with the actual prepared vector traversal shape. They
+intersect equality across every lexical occurrence; singleton compatibility
+never supplies a cross-store equality. These extra relations apply only to the
+exact group and do not pass into its sequential-store fallback.
+Every occurrence of a shared store must satisfy the proof; unknown bindings,
+scope effects, unsupported integer arithmetic and possible intermediate overflow
+preserve the runtime check. The verifier recomputes certificates against the
+final IR and its captured operation catalog. C++ printing consumes only the
+exact store/extent identities and performs no range analysis.
 
 ```python
 @T.passes.register_pass("my-analysis", before="fuse-reductions")
@@ -2157,7 +2201,11 @@ their original terms. Generated DSL C++ identifies this distinction explicitly.
 Generic vector traversal and carried registers share canonical physical tag
 geometry, including dtype rebinds and generated C++ tag aliases. A bounded
 one-word prefix is reused directly at its zero origin; a genuine shifted or
-wider projection retains the lane-extraction fallback. Singleton broadcasting
+wider projection retains the lane-extraction fallback. On x86, a fully active
+fixed vector can read the low bytes of one native scalable state word through
+the public fixed-to-fixed bitcast; emitted type assertions verify the physical
+representation bridge. Shifted, masked, partially active and ARM sizeless
+reads retain their existing paths. Singleton broadcasting
 replicates source lane zero rather than advancing through inactive lanes.
 
 An exact unit-step `T.simd` scatter into a known nonzero-stride rank-one view
