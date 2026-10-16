@@ -188,12 +188,17 @@ class CPUEmitter(
       raise TypeError("cpu_parameter_metadata_snapshot must be bool")
     if snapshot_parameters:
       self.line("/* invocation-invariant ABI tensor metadata, not tensor contents */")
+      # Materialize data pointers only for planned value captures. Keeping
+      # ordinary inline accesses on the descriptor avoids an unnecessary
+      # pointer/metadata materialization interaction in native optimization.
+      captured_pointers = frozenset(name for plan in self.prepared.private_captures.values() for name in plan.pointers)
       for name, annotation in self.ir.parameters.items():
         if not isinstance(annotation, TensorType):
           continue
-        pointer = self.unique(f"parameter_{name}_data")
-        self.line(f"[[maybe_unused]] const auto {pointer} = {name}.data();")
-        self.parameter_pointers[name] = pointer
+        if name in captured_pointers:
+          pointer = self.unique(f"parameter_{name}_data")
+          self.line(f"[[maybe_unused]] const auto {pointer} = {name}.data();")
+          self.parameter_pointers[name] = pointer
         for operation in ("size", "stride"):
           dimensions = annotation.shape if operation == "size" else annotation.concrete_strides
           for axis, dimension in enumerate(dimensions):

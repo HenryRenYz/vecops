@@ -318,7 +318,9 @@ already-active AMX/SME instruction region. Views and compile-time descriptors
 are not return values of private calls: use output arguments, or retain the
 default inline helper for descriptor construction.
 The CPU backend plans private-call captures after storage and hardware planning.
-Eligible existing invocation-invariant tensor pointer/metadata snapshots and lexically
+Entry tensor data-pointer snapshots are materialized only when these plans
+need them for value capture; ordinary inline accesses retain `.data()`.
+Eligible invocation-invariant tensor pointer/metadata snapshots and lexically
 available, singly defined scalar bindings are copied by value. Pointer copies
 retain the original pointee access and alias semantics. Mutable return slots,
 loop induction variables, tile states, resizable storage owners and unknown
@@ -959,8 +961,10 @@ The historical `row_normalization_streaming` and
 `row_normalization_release_captures` options remain aliases for
 `row_map_streaming` and `row_map_release_captures`, respectively.
 
-CPU lowering captures each ABI tensor parameter's data pointer, dimensions
-and strides into invocation-local const scalars at kernel entry. Those
+CPU lowering captures each ABI tensor parameter's dimensions and strides into
+invocation-local const scalars at kernel entry. Data pointers are materialized
+only when an existing private-call capture plan needs them by value; ordinary
+inline accesses continue to use the tensor descriptor's `.data()`. Those
 descriptors are invariant, but the pointed-to tensor contents are not:
 serial iterations, aliases and atomics still observe the original memory
 effects. This does not hoist dynamic loop state, view offsets, or addresses

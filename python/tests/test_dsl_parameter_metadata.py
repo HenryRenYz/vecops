@@ -12,8 +12,13 @@ from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
 
-def metadata_template(*, grid=False, scratch=False):
+def metadata_template(*, grid=False, scratch=False, outlined=False):
   N, AS, CS = T.dynamic(lower=0), T.dynamic(), T.dynamic()
+
+  @T.func(inline=False)
+  def private_copy(source, destination, bias):
+    T.store(destination, T.load(source) + bias)
+    return bias + 1
 
   @T.template
   def kernel(
@@ -27,14 +32,17 @@ def metadata_template(*, grid=False, scratch=False):
     else:
       offset = 0
       for iteration in T.serial(repeat, unroll=1):
-        if scratch:
+        if outlined:
+          offset = private_copy(A, C, offset)
+        elif scratch:
           temporary = T.alloc((N + iteration,), dtype=T.float32)
           T.store(temporary[:N], T.load(A))
           T.store(temporary[0:1], offset)
           T.store(C, T.load(temporary[:N]))
         else:
           T.store(C, T.load(A) + offset)
-        offset += 1  # noqa: SIM113 -- exercise explicit loop-carried DSL state
+        if not outlined:
+          offset += 1  # noqa: SIM113 -- exercise explicit loop-carried DSL state
         T.compiler_fence()
 
   return kernel
@@ -50,14 +58,13 @@ def test_entry_parameter_metadata_reads_once_and_uses_only_exact_raw_mapping(tar
   source = CPUBackend().lower(metadata_template(grid=grid).ir, (), target=target).source
   snapshots = snapshot_map(source)
   assert set(snapshots.values()) == {
-    "A.data()",
-    "C.data()",
     *(
       f"static_cast<std::int64_t>({name}.template {operation}<0>())"
       for name in ("A", "C")
       for operation in ("size", "stride")
     ),
   }
+  assert "parameter_A_data" not in source and "parameter_C_data" not in source
   assert all(source.count(expression) == 1 for expression in snapshots.values())
   # Runtime scalar arguments and induction/carried locals are not tensor
   # descriptor metadata. Their evaluation must remain in the loop domain.
@@ -92,7 +99,7 @@ def test_scalar_and_zero_extent_descriptor_snapshots_do_not_read_tensor_contents
 
   source = CPUBackend().lower(kernel.ir, (), target="SVE").source
   snapshots = snapshot_map(source)
-  assert len(snapshots) == 2 + 4 * len(shape)
+  assert len(snapshots) == 4 * len(shape)
   assert all("load_convert" not in expression and "[" not in expression for expression in snapshots.values())
   assert all(source.count(expression) == 1 for expression in snapshots.values())
 
@@ -129,32 +136,56 @@ def test_dynamic_axis_snapshots_preserve_existing_meta_value_constraints():
   assert "VECOPS_ASSUME" not in source[source.index("void __kernel__(") :]
 
 
+def test_only_planned_private_pointer_captures_materialize_at_entry():
+  N = T.dynamic(lower=0)
+
+  @T.func(inline=False)
+  def helper(source, destination):
+    T.store(destination, T.load(source) + 1)
+
+  @T.template
+  def kernel(A: T.Tensor((N,), dtype=T.float32),
+             C: T.Tensor((N,), dtype=T.float32, access="output"),
+             unused: T.Tensor((N,), dtype=T.float32)):
+    helper(A, C)
+
+  artifact = CPUBackend().lower(kernel.ir, (), target="AVX512")
+  pointers = {name for plan in artifact.backend_ir.private_captures.values() for name in plan.pointers}
+  assert pointers == {"A", "C"}
+  snapshots = snapshot_map(artifact.source)
+  assert {value for value in snapshots.values() if value.endswith(".data()")} == {"A.data()", "C.data()"}
+  assert "parameter_unused_data" not in artifact.source
+  assert "static_cast<std::int64_t>(unused.template size<0>())" in snapshots.values()
+  call = next(line for line in artifact.source.splitlines() if "vecops_dsl::private_call([" in line)
+  assert "parameter_A_data" in call and "parameter_C_data" in call
+
+
 @pytest.fixture(scope="module")
 def native_metadata_kernels(tmp_path_factory):
   path = tmp_path_factory.mktemp("parameter-metadata")
   compiler = make_compiler(jobs=4, cache_dir=path / "cache", build_dir=path / "build")
   kernels = {}
   with vecops.collect_compile_requests() as collector:
-    for scratch in (False, True):
+    for scratch, outlined in ((False, False), (False, True), (True, False)):
       for policy in (False, True):
         compiled = T.compile(
-          metadata_template(scratch=scratch),
+          metadata_template(scratch=scratch, outlined=outlined),
           compiler=compiler,
           pass_options={"cpu_parameter_metadata_snapshot": policy},
         )
         meta = vecops.TensorMeta((17,), dtype="float32")
         compiled.operator(meta, meta, 3, **compiled._core.specialization_values)
-        kernels[scratch, policy] = compiled
+        kernels[scratch, policy, outlined] = compiled
   vecops.compile_batch(collector.requests, parallelism=4, execution_parallelism=1)
   return kernels
 
 
-@pytest.mark.parametrize("scratch", (False, True))
+@pytest.mark.parametrize("scratch,outlined", ((False, False), (False, True), (True, False)))
 @pytest.mark.parametrize("policy", (False, True))
 def test_native_entry_snapshots_preserve_aliases_strides_resizes_and_loop_state(
-  native_metadata_kernels, scratch, policy
+  native_metadata_kernels, scratch, policy, outlined
 ):
-  compiled = native_metadata_kernels[scratch, policy]
+  compiled = native_metadata_kernels[scratch, policy, outlined]
   for length in (1, 17, 65):
     for layout in ("dense", "strided", "negative", "alias"):
       storage = np.linspace(-1, 1, length * 2 + 1, dtype=np.float32)
