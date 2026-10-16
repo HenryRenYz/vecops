@@ -239,7 +239,7 @@ def test_native_sliced_aliases_match_sequential_copy_oracle_and_full_owner_canar
                 np.full(width + 4, -19, dtype=np.float32), np.full(width + 4, -31, dtype=np.float32)]
       expected = [owner.copy() for owner in owners]
 
-      def views(storage):
+      def views(storage, width=width, layout=layout):
         a = storage[0][1:width + 1]
         c = storage[1][1:width + 1]
         d = storage[2][1:width + 1]
