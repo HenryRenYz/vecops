@@ -1122,6 +1122,16 @@ including their original operand bindings. This preserves the existing C++
 behavior rather than introducing a new integer promotion policy. Shared effect
 proofs include expression-owned type/data dependencies; loads, traps and cycles
 in those dependencies cannot become discardable through a pure wrapper.
+Conditional operand-cache selections follow the same lexical facts as their
+allocation guards. A safely proven false selector reuses the original producer,
+including its historical read/state identities. Allocation predicates stay
+protected until a subsequent cleanup round confirms that every selector use
+has disappeared. A single cleanup round remains correct and can retain unused
+private declarations. True or unknown selectors keep
+their conditional storage read. When an opaque consumer or owned metadata prevents
+that rewrite, dependent allocation predicates remain intact; unrelated boolean
+facts can still fold. Unknown metadata ownership conservatively preserves the
+control structure instead of inspecting extension objects or adding allocations.
 Shape compatibility compares representable integer literal dimensions by value,
 including equal weak and explicitly typed literals. Scalar expression identity
 and arithmetic promotion continue to distinguish their types.
