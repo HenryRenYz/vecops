@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import vecops.language as T
+from dsl_test_utils import parameter_snapshot_name
 from vecops._arm_vector_state import VectorState
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 
@@ -98,7 +99,7 @@ def test_math_chunk_uses_original_public_factories_unroll_and_strict_contract(be
         assert "std::int64_t{128}" in artifact.source
       else:
         assert all(not T.is_value(extent) for extent in artifact.kernel.parameters["A"].shape)
-        assert "A.size(1)" in artifact.source
+        parameter_snapshot_name(artifact.source, "A.size(1)")
       assert "for (vecops::nint_t dsl_f_iteration_1" in artifact.source
       if case.operation == "softmax":
         assert "vecops::vec::opt::math::strict" in artifact.source
