@@ -910,12 +910,13 @@ Oversized virtual vectors remain streamable, not forced into one native value.
 Nonadjacent reduction-axis copies retain distinct lane domains. Loop-carried
 scalar dependencies and break/continue retain ordered loops; alias-dependent
 serial iterations have a runtime ordered fallback. Tails are always guarded.
-Ordinary SVE traversals may split only their masked remainder into native-word
+Ordinary SVE/SME and x86 AVX traversals may split only their masked remainder into native-word
 register fragments, accounting for wider load/store dtypes. Full-loop grouping
 and the requested unroll remain unchanged. Reduction banks are reconstructed
 before their original horizontal reduction, preserving their lane/order
 contract; explicit SIMD and loop-carried vector extents retain their existing
-lowering. This internal policy does not relax masks or conversion rounding.
+lowering. Empty physical words then avoid grouped zero-mask operations.
+This internal policy does not relax masks or conversion rounding.
 
 Adjacent compatible, independent reductions with the same unroll count can
 share a traversal (currently up to two reductions). An independent elementwise
@@ -2227,6 +2228,18 @@ requires a known x86 native width, equal element types, rank one, and no
 hardware-owned register region. Empty, shifted, singleton, masked and ARM
 sizeless reads retain their existing projection paths. Singleton broadcasting
 replicates source lane zero rather than advancing through inactive lanes.
+
+A state whose complete typed register programs prove a physical `FixedTag<T,N>`
+keeps that exact representation when consumed. Generated register aliases
+record the descriptor's physical geometry; logical shape alone never supplies
+it. Equal fixed consumers reuse the register directly. A wider rank-one x86
+consumer may zero-extend a single closed fixed piece at zero origin, using
+public `concat` operations for exact power-of-two widths and public resize
+otherwise. Its predicate is clipped to both active lanes and the logical
+source length: small fixed vectors can have nonzero physical padding bytes.
+Unknown, shifted, singleton, masked and hardware-owned cases retain the
+projection fallback. The scalable-word and closed-fixed proofs stay separate
+while sharing the checked bridge and isolated lazy-fallback printer.
 
 An exact unit-step `T.simd` scatter into a known nonzero-stride rank-one view
 can become a bounded vector store without requiring a `unique=True` hint.

@@ -92,7 +92,10 @@ def legalize_math(region, context):
 
 @register_pass("cpu-plan-native-word-tails", stage="vector", after="legalize-vector-types")
 def plan_native_word_tails(region, context):
-  """Keep full groups, but avoid grouped SVE predicates in a masked remainder.
+  """Keep full groups and split masked remainders into physical word fragments.
+
+  Grouped x86 tails also execute zero-mask operations for inactive words.
+  A word-sized remainder lets ordinary empty-fragment guards remove them.
 
   A native compute vector can still widen to multiple memory words. Account
   for every dtype domain with the already-legalized rebind headroom, instead
@@ -108,8 +111,10 @@ def plan_native_word_tails(region, context):
   target = context.environment.codegen_target
   if (
     not enabled
-    or target.architecture != "arm"
-    or target.isa not in {"sve", "sme"}
+    or not (
+      target.architecture == "arm" and target.isa in {"sve", "sme"}
+      or target.architecture == "x86" and target.isa in {"avx", "avx2", "avx512"}
+    )
     or not region.full_chunks
     or region.single_chunk
     or region.iteration_axis is not None

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import vecops.language as T
+from dsl_state_consumer_utils import assert_closed_store_consumers, state_consumers
 from dsl_test_utils import cpp_compile_command, make_compiler, x86_target_available_for_test
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
@@ -190,15 +191,17 @@ def packing_template():
 
 
 def test_public_packing_and_compensation_reaches_runtime_wide_prefix():
-  source = CPUBackend().lower(packing_template().ir, (), target="AVX512").source
-  assert "/* wide register prefix */" in source
-  assert "else /* shifted or singleton state projection */" in source
+  with state_consumers() as records:
+    artifact = CPUBackend().lower(packing_template().ir, (), target="AVX512")
+  assert_closed_store_consumers(artifact.backend_ir, artifact.source, records, resized=True)
 
 
 @pytest.mark.skipif(not x86_target_available_for_test(), reason="physical prefix bridge targets x86")
 def test_native_public_packing_compensation_and_full_owners(tmp_path):
   compiler = make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
-  compiled = T.compile(packing_template(), compiler=compiler)
+  with state_consumers() as records:
+    compiled = T.compile(packing_template(), compiler=compiler)
+  assert_closed_store_consumers(compiled.backend_ir, compiled.generated_source, records, resized=True)
   input_owner = np.full((32 * 64 + 38,), 0xA6, dtype=np.uint8)
   a = input_owner[19:-19].reshape(32, 64).T
   a[:] = (np.arange(64 * 32).reshape(64, 32) * 5 + 1) % 127

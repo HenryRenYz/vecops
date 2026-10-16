@@ -70,6 +70,10 @@ class RegistersEmitter:
           spelling = f"vecops::vec::FixedTag<{CPP_TYPES[own_dtype]}, {descriptor.N}>"
         self.line(f"using {own} = {spelling};")
         self.tag_dtypes[own] = own_dtype
+        if descriptor.N is not None:
+          # Physical geometry comes from the actual emitted descriptor,
+          # never from a scalable vector's clipped logical shape.
+          self.tag_geometry[own] = False, descriptor.N
         if lanes is not None:
           self.fixed_tag_lanes[own] = lanes
         tags[key] = own

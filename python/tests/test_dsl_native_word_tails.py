@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import platform
+import os
 import re
 
 import numpy as np
@@ -14,7 +14,7 @@ import vecops.language as T
 from dsl_test_utils import assert_no_vec_mask_arrays, make_compiler
 from vecops._arm_vector_state import VectorState
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.backends.cpu.cost import CPUTarget
+from vecops.language._compiler.backends.cpu.cost import CPUTarget, resolve_target
 from vecops.language._compiler.ir.vector import group_vectors
 
 
@@ -104,10 +104,11 @@ def full_blocks(source):
   ),
 )
 @pytest.mark.parametrize("power", (0, 2))
-def test_native_tail_fragments_keep_full_groups_and_bank_lane_tree(source, compute, power):
+@pytest.mark.parametrize("target", ("SVE", "AVX2", "AVX512"))
+def test_native_tail_fragments_keep_full_groups_and_bank_lane_tree(source, compute, power, target):
   template = reduction_template(source, compute, exponential=True)
-  ordinary = lower(template, enabled=False, power=power)
-  artifact = lower(template, power=power)
+  ordinary = lower(template, enabled=False, power=power, target=target)
+  artifact = lower(template, power=power, target=target)
   regions = [region for region in artifact.lowered.regions if region.native_tails]
   assert regions
   assert tuple(full_blocks(ordinary.source)) == tuple(full_blocks(artifact.source))
@@ -130,9 +131,16 @@ def test_native_tail_fragments_keep_full_groups_and_bank_lane_tree(source, compu
   assert_no_vec_mask_arrays(artifact.source)
 
 
-@pytest.mark.parametrize("target,selected", (("SVE", True), ("SME", True), ("AVX512", False), ("Scalar", False)))
+@pytest.mark.parametrize(
+  "target,selected",
+  (("SVE", True), ("SME", True), ("AVX", True), ("AVX2", True), ("AVX512", True), ("NEON", False), ("Scalar", False)),
+)
 def test_native_tail_selection_uses_codegen_isa_not_cost_override(target, selected):
-  cost = CPUTarget("x86", "avx512", vector_bits=512) if selected else CPUTarget("arm", "sme", vector_bits=512)
+  cost = (
+    CPUTarget("x86", "avx512", vector_bits=512)
+    if target in {"SVE", "SME", "NEON"}
+    else CPUTarget("arm", "sme", vector_bits=512)
+  )
   artifact = lower(reduction_template(), target=target, cost=cost)
   assert any(region.native_tails for region in artifact.lowered.regions) is selected
   assert ("native-word masked remainder" in artifact.source) is selected
@@ -163,8 +171,9 @@ def test_native_tail_keeps_min_max_identity_and_explicit_fma():
 
 
 @pytest.mark.parametrize("unroll", (1, 2, 7, 17))
-def test_native_tail_fragments_cover_each_original_bank_once(unroll):
-  artifact = lower(reduction_template(unroll=unroll))
+@pytest.mark.parametrize("target", ("SVE", "AVX2", "AVX512"))
+def test_native_tail_fragments_cover_each_original_bank_once(unroll, target):
+  artifact = lower(reduction_template(unroll=unroll), target=target)
   for region in artifact.lowered.regions:
     for variant, fragments in region.native_tails.items():
       base_power = region.base_power if variant is not None else 0
@@ -180,9 +189,10 @@ def test_native_tail_fragments_cover_each_original_bank_once(unroll):
 
 
 @pytest.mark.parametrize("compute,output,power", (("float16", "float64", -2), ("float32", "float64", -1)))
-def test_native_tail_legalizes_wider_store_memory_without_changing_full_groups(compute, output, power):
+@pytest.mark.parametrize("target", ("SVE", "AVX2", "AVX512"))
+def test_native_tail_legalizes_wider_store_memory_without_changing_full_groups(compute, output, power, target):
   template = reduction_template(compute, compute, output=output)
-  ordinary, artifact = lower(template, enabled=False), lower(template)
+  ordinary, artifact = lower(template, enabled=False, target=target), lower(template, target=target)
   assert tuple(full_blocks(ordinary.source)) == tuple(full_blocks(artifact.source))
   fragments = [
     fragment
@@ -318,6 +328,6 @@ def test_native_fragments_preserve_bits_specials_masks_branch_and_alias(
             np.testing.assert_array_equal(outputs[1][1], (0, np.inf, -np.inf))
   assert_no_vec_mask_arrays(pair[1].generated_source)
   assert not re.search(r"std::(?:array|vector)\s*<\s*vecops::vec::(?:Vec|Mask)", pair[1].generated_source)
-  if platform.machine().lower() in {"aarch64", "arm64"}:
+  if resolve_target(os.environ.get("VECOPS_TEST_TARGET", "Native")).isa in {"sve", "sme", "avx", "avx2", "avx512"}:
     assert "native-word masked remainder" in pair[1].generated_source
     assert "native-word masked remainder" not in pair[0].generated_source

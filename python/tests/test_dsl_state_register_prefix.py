@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
+from dsl_state_consumer_utils import assert_closed_store_consumers, state_consumers
 from dsl_test_utils import make_compiler, x86_target_available_for_test
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
@@ -46,10 +47,9 @@ def shifted_masked_template(dtype):
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", SHAPES)
 def test_x86_transpose_uses_a_checked_fixed_register_prefix(dtype, shape):
-  source = CPUBackend().lower(transpose_template(dtype, shape).ir, (), target="AVX512").source
-  assert "/* fixed register prefix */" in source
-  assert "static_assert(std::is_same_v<vecops::vec::Vec<vecops::vec::FixedTag<" in source
-  assert "vecops::vec::bitcast(" in source
+  with state_consumers() as records:
+    artifact = CPUBackend().lower(transpose_template(dtype, shape).ir, (), target="AVX512")
+  assert_closed_store_consumers(artifact.backend_ir, artifact.source, records, efficient=True)
 
 
 def test_arm_transpose_never_reinterprets_a_sizeless_register_as_a_fixed_vector():
@@ -134,7 +134,9 @@ def native_kernels(tmp_path_factory):
   with vecops.collect_compile_requests() as collector:
     for dtype in DTYPES:
       for shape in SHAPES:
-        compiled = T.compile(transpose_template(dtype, shape), compiler=compiler)
+        with state_consumers() as records:
+          compiled = T.compile(transpose_template(dtype, shape), compiler=compiler)
+        kernels["proof", dtype, shape] = records
         compiled.operator(
           vecops.TensorMeta(shape, dtype=dtype),
           vecops.TensorMeta(shape[::-1], dtype=dtype),
@@ -166,7 +168,9 @@ def guarded_array(shape, dtype):
 @pytest.mark.parametrize("shape", SHAPES)
 def test_native_transpose_all_lanes_tails_and_owner_guards(native_kernels, dtype, shape):
   compiled = native_kernels[dtype, shape]
-  assert "/* fixed register prefix */" in compiled.generated_source
+  assert_closed_store_consumers(
+    compiled.backend_ir, compiled.generated_source, native_kernels["proof", dtype, shape], efficient=True
+  )
   input_owner, a = guarded_array(shape, dtype)
   output_owner, c = guarded_array(shape[::-1], dtype)
   input_owner.view(np.uint8).fill(0xA6)

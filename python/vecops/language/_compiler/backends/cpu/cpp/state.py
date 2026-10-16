@@ -204,6 +204,57 @@ class StateEmitter:
     )
     return f"vecops::vec::bitcast({tag}{{}}, {source_tag}{{}}, {register}) /* fixed register prefix */"
 
+  def _emit_prefix_projection(
+    self,
+    plan,
+    value,
+    tag,
+    root_shape,
+    coords,
+    own_coords,
+    own_tags,
+    active,
+    axis,
+    *,
+    source_tag,
+    destination_tag,
+    lanes,
+    resized,
+    predicate_active,
+    prefix,
+    guard_comment,
+    fallback_comment,
+    reject_singleton=False,
+  ):
+    """Print an already-proven prefix bridge and its isolated lazy fallback."""
+    register = f"{value.data.name}_r0"
+    result = self.unique(prefix)
+    self.line(f"vecops::vec::Vec<{tag}> {result};")
+    guard = f"if (({active}) > 0 && ({active}) <= {lanes} && ({own_coords[0]}) == 0"
+    # Keep scalar printing after the result declaration, as in the wide path.
+    if reject_singleton:
+      guard += f" && ({self.scalar(value.type.shape[0])}) != 1"
+    self.opening(f"{guard}) /* {guard_comment} */")
+    self.line(
+      f"static_assert(std::is_same_v<vecops::vec::Vec<{source_tag}>, std::remove_cvref_t<decltype({register})>>);"
+    )
+    self.line(f"static_assert(std::is_same_v<vecops::vec::Vec<{destination_tag}>, vecops::vec::Vec<{tag}>>);")
+    self.line(
+      f"{result} = vecops::vec::blend({tag}{{}}, vecops::vec::zeros({tag}{{}}), "
+      f"vecops::vec::mwhilelt({tag}{{}}, 0, {predicate_active}), {resized});"
+    )
+    self.close()
+    previous_cache = self.chunk_cache
+    self.chunk_cache = dict(previous_cache)
+    try:
+      self.opening(f"else /* {fallback_comment} */")
+      projected = self.state_projection(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
+      self.line(f"{result} = {projected};")
+      self.close()
+    finally:
+      self.chunk_cache = previous_cache
+    return result
+
   def wide_register_prefix(self, plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis):
     """Resize a zero-origin physical word, preserving projected inactive zeros.
 
@@ -236,34 +287,105 @@ class StateEmitter:
     source_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {native}>"
     destination_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {lanes}>"
     register = f"{value.data.name}_r0"
-    result = self.unique("state_prefix")
-    self.line(f"vecops::vec::Vec<{tag}> {result};")
-    # Check active before origin: empty traversals do not newly evaluate a
-    # shifted source coordinate. Large active counts retain the old fallback.
-    self.opening(
-      f"if (({active}) > 0 && ({active}) <= {lanes} && ({own_coords[0]}) == 0 "
-      f"&& ({self.scalar(value.type.shape[0])}) != 1) /* wide register prefix */"
+    return self._emit_prefix_projection(
+      plan,
+      value,
+      tag,
+      root_shape,
+      coords,
+      own_coords,
+      own_tags,
+      active,
+      axis,
+      source_tag=source_tag,
+      destination_tag=destination_tag,
+      lanes=lanes,
+      resized=f"vecops::vec::bitcast({destination_tag}{{}}, {source_tag}{{}}, {register})",
+      predicate_active=active,
+      prefix="state_prefix",
+      guard_comment="wide register prefix",
+      fallback_comment="shifted or singleton state projection",
+      reject_singleton=True,
     )
-    self.line(
-      f"static_assert(std::is_same_v<vecops::vec::Vec<{source_tag}>, std::remove_cvref_t<decltype({register})>>);"
-    )
-    self.line(f"static_assert(std::is_same_v<vecops::vec::Vec<{destination_tag}>, vecops::vec::Vec<{tag}>>);")
+
+  def closed_fixed_register_resize(self, plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis):
+    """Resize a proven complete Fixed state in a wider consumer.
+
+    The resize reads exactly the stored physical prefix and zeroes every
+    lane outside that prefix, matching state_projection's piece bounds.
+    Shifted, singleton, masked and unknown physical geometries stay lazy.
+    """
+    target = self.environment.codegen_target
+    geometry = self.tag_geometry.get(tag)
+    if not (
+      target.architecture == "x86"
+      and target.vector_bits
+      and self.hardware_scope is None
+      and plan.closed_fixed
+      and not value.type.mask
+      and len(plan.pieces) == 1
+      and not plan.pieces[0].scalable
+      and plan.pieces[0].coordinates == (0,)
+      and len(value.type.shape) == len(root_shape) == 1
+      and axis == 0
+      and value.type.dtype == plan.state.type.dtype
+      and self.tag_dtypes.get(tag) == value.type.dtype
+      and geometry is not None
+    ):
+      return None
+    source_lanes = plan.pieces[0].lanes
+    extent = value.type.shape[0]
+    if not (
+      type(source_lanes) is int
+      and source_lanes > 1
+      and source_lanes * ELEMENT_BYTES[value.type.dtype] * 8 <= target.vector_bits
+      and type(extent) is I.Expr
+      and type(extent.type) is I.ScalarType
+      and extent.type.dtype == "int64"
+      and extent.op == "literal"
+      and not extent.args
+      and type(extent.data) is int
+      and extent.data == source_lanes
+    ):
+      return None
+    scalable, width = geometry
+    if type(width) is not int or (scalable and width < 0):
+      return None
+    native = target.vector_bits // (8 * ELEMENT_BYTES[value.type.dtype])
+    lanes = native * (1 << width) if scalable else width
+    if lanes <= source_lanes:
+      return None
+    source_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {source_lanes}>"
+    destination_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {lanes}>"
+    register = f"{value.data.name}_r0"
     resized = f"vecops::vec::bitcast({destination_tag}{{}}, {source_tag}{{}}, {register})"
-    self.line(
-      f"{result} = vecops::vec::blend({tag}{{}}, vecops::vec::zeros({tag}{{}}), "
-      f"vecops::vec::mwhilelt({tag}{{}}, 0, {active}), {resized});"
+    if source_lanes & (source_lanes - 1) == 0 and lanes & (lanes - 1) == 0:
+      resized = register
+      current_lanes = source_lanes
+      while current_lanes < lanes:
+        half_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {current_lanes}>"
+        current_lanes *= 2
+        next_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {current_lanes}>"
+        resized = f"vecops::vec::concat({next_tag}{{}}, {resized}, vecops::vec::zeros({half_tag}{{}}))"
+    return self._emit_prefix_projection(
+      plan,
+      value,
+      tag,
+      root_shape,
+      coords,
+      own_coords,
+      own_tags,
+      active,
+      axis,
+      source_tag=source_tag,
+      destination_tag=destination_tag,
+      lanes=lanes,
+      resized=resized,
+      predicate_active=f"(({active}) < {source_lanes} ? ({active}) : {source_lanes})",
+      prefix="closed_fixed_resize",
+      guard_comment="closed fixed register resize",
+      fallback_comment="shifted or inactive closed fixed projection",
     )
-    self.close()
-    previous_cache = self.chunk_cache
-    self.chunk_cache = dict(previous_cache)
-    try:
-      self.opening("else /* shifted or singleton state projection */")
-      projected = self.state_projection(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
-      self.line(f"{result} = {projected};")
-      self.close()
-    finally:
-      self.chunk_cache = previous_cache
-    return result
 
   def state_vector(self, value, tag, root_shape, coords, active, axis):
     plan = self.prepared.states[value.data.name]
@@ -292,6 +414,9 @@ class StateEmitter:
     if prefix is not None:
       return prefix
     prefix = self.wide_register_prefix(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
+    if prefix is not None:
+      return prefix
+    prefix = self.closed_fixed_register_resize(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
     if prefix is not None:
       return prefix
     return self.state_projection(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
