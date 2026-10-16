@@ -185,7 +185,7 @@ class StateEmitter:
       and plan.pieces[0].coordinates == (0,)
       and plan.pieces[0].power == 0
       and len(value.type.shape) == len(root_shape) == 1
-      and axis in (-1, 0)
+      and axis == 0
       and own_coords == ("0",)
       and type(wanted) is int
       and I.constant(value.type.shape[0]) == wanted
@@ -203,6 +203,67 @@ class StateEmitter:
       f"static_assert(std::is_same_v<vecops::vec::Vec<{source_tag}>, std::remove_cvref_t<decltype({register})>>);"
     )
     return f"vecops::vec::bitcast({tag}{{}}, {source_tag}{{}}, {register}) /* fixed register prefix */"
+
+  def wide_register_prefix(self, plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis):
+    """Resize a zero-origin physical word, preserving projected inactive zeros.
+
+    Runtime singleton and shifted projections still use the common lane
+    projection below. The physical representation bridge is limited to x86
+    with a known native width, outside hardware-owned register regions.
+    """
+    target = self.environment.codegen_target
+    geometry = self.tag_geometry.get(tag)
+    if not (
+      target.architecture == "x86"
+      and target.vector_bits
+      and self.hardware_scope is None
+      and not value.type.mask
+      and len(plan.pieces) == 1
+      and plan.pieces[0].scalable
+      and plan.pieces[0].coordinates == (0,)
+      and plan.pieces[0].power == 0
+      and len(value.type.shape) == len(root_shape) == 1
+      and axis == 0
+      and value.type.dtype == plan.state.type.dtype
+      and self.tag_dtypes.get(tag) == value.type.dtype
+      and geometry is not None
+      and geometry[0]
+      and geometry[1] > 0
+    ):
+      return None
+    native = target.vector_bits // (8 * ELEMENT_BYTES[value.type.dtype])
+    lanes = native * (1 << geometry[1])
+    source_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {native}>"
+    destination_tag = f"vecops::vec::FixedTag<{CPP_TYPES[value.type.dtype]}, {lanes}>"
+    register = f"{value.data.name}_r0"
+    result = self.unique("state_prefix")
+    self.line(f"vecops::vec::Vec<{tag}> {result};")
+    # Check active before origin: empty traversals do not newly evaluate a
+    # shifted source coordinate. Large active counts retain the old fallback.
+    self.opening(
+      f"if (({active}) > 0 && ({active}) <= {lanes} && ({own_coords[0]}) == 0 "
+      f"&& ({self.scalar(value.type.shape[0])}) != 1) /* wide register prefix */"
+    )
+    self.line(
+      f"static_assert(std::is_same_v<vecops::vec::Vec<{source_tag}>, std::remove_cvref_t<decltype({register})>>);"
+    )
+    self.line(f"static_assert(std::is_same_v<vecops::vec::Vec<{destination_tag}>, vecops::vec::Vec<{tag}>>);")
+    resized = f"vecops::vec::bitcast({destination_tag}{{}}, {source_tag}{{}}, {register})"
+    self.line(
+      f"{result} = vecops::vec::blend({tag}{{}}, vecops::vec::zeros({tag}{{}}), "
+      f"vecops::vec::mwhilelt({tag}{{}}, 0, {active}), {resized});"
+    )
+    self.close()
+    previous_cache = self.chunk_cache
+    self.chunk_cache = dict(previous_cache)
+    try:
+      self.opening("else /* shifted or singleton state projection */")
+      projected = self.state_projection(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
+      self.line(f"{result} = {projected};")
+      self.close()
+    finally:
+      self.chunk_cache = previous_cache
+    return result
 
   def state_vector(self, value, tag, root_shape, coords, active, axis):
     plan = self.prepared.states[value.data.name]
@@ -230,6 +291,13 @@ class StateEmitter:
     prefix = self.fixed_register_prefix(plan, value, tag, root_shape, own_coords, active, axis)
     if prefix is not None:
       return prefix
+    prefix = self.wide_register_prefix(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
+    if prefix is not None:
+      return prefix
+    return self.state_projection(plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis)
+
+  def state_projection(self, plan, value, tag, root_shape, coords, own_coords, own_tags, active, axis):
+    """Emit the shared lane projection, including singleton broadcasting."""
     # A dynamic logical prefix is still one physical register. Generic store
     # traversal can hide its zero origin behind a loop variable or broadcast
     # projection. Version that geometry rather than reconstruct every lane;

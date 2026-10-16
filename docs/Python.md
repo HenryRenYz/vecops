@@ -2200,12 +2200,16 @@ their original terms. Generated DSL C++ identifies this distinction explicitly.
 
 Generic vector traversal and carried registers share canonical physical tag
 geometry, including dtype rebinds and generated C++ tag aliases. A bounded
-one-word prefix is reused directly at its zero origin; a genuine shifted or
-wider projection retains the lane-extraction fallback. On x86, a fully active
+one-word prefix is reused directly at its zero origin. On x86, a fully active
 fixed vector can read the low bytes of one native scalable state word through
 the public fixed-to-fixed bitcast; emitted type assertions verify the physical
-representation bridge. Shifted, masked, partially active and ARM sizeless
-reads retain their existing paths. Singleton broadcasting
+representation bridge. A wider scalable consumer can similarly resize one
+native state word when its runtime source origin is zero and its logical
+extent is not one. A predicate clears every inactive destination lane, and
+the public resize zeros bytes beyond the physical source word. This path
+requires a known x86 native width, equal element types, rank one, and no
+hardware-owned register region. Empty, shifted, singleton, masked and ARM
+sizeless reads retain their existing projection paths. Singleton broadcasting
 replicates source lane zero rather than advancing through inactive lanes.
 
 An exact unit-step `T.simd` scatter into a known nonzero-stride rank-one view
