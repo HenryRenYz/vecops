@@ -37,13 +37,14 @@ def test_anonymous_factory_codegen_preserves_each_runtime_dimension():
   template = anonymous_template()
   source = CPUBackend().lower(template.ir, (), target="AVX512").source
   entry = {
-    expression: parameter_snapshot_name(source, expression)
+    f"{name}.{operation}({axis})": parameter_snapshot_name(source, f"{name}.{operation}({axis})")
     for name, rank in (("A", 2), ("B", 2), ("C", 2), ("P", 1))
-    for expression in (
-      f"{name}.data()",
-      *(f"{name}.{operation}({axis})" for operation in ("size", "stride") for axis in range(rank)),
-    )
+    for operation in ("size", "stride")
+    for axis in range(rank)
   }
+  # ABI dimensions/strides retain entry snapshots. Data pointers are only
+  # materialized when an outlined private helper actually captures them.
+  assert all(f"{name}.data()" in source for name in ("A", "B", "C", "P"))
   assert "pack_size<float, 0>(" + entry["A.size(0)"] + ", " + entry["A.size(1)"] + ")" in source
   assert "checked_shape({" + entry["P.size(0)"] + "})" in source
   assert len(entry.values()) == len(set(entry.values()))

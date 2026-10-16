@@ -75,6 +75,11 @@ def _half_rounding_pipeline(source):
   """
   tags = dict(re.findall(r"using (\w+)\s*=\s*([^;]+);", source))
   aliases = dict(re.findall(r"\bauto (\w+)\s*=\s*(\w+)\s*;", source))
+  pointers = dict(re.findall(r"\bconst auto (\w+)\s*=\s*(\w+)\.data\(\);", source))
+
+  def accesses_pointer(expression, parameter):
+    spellings = {parameter + ".data()", *(name for name, owner in pointers.items() if owner == parameter)}
+    return any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", expression) for name in spellings)
 
   def dtype(tag):
     tag = tag.removesuffix("{}").strip()
@@ -103,11 +108,11 @@ def _half_rounding_pipeline(source):
     if assignment:
       for arguments in calls(line, "load_convert"):
         if dtype(arguments[0]) == "vecops::float16_t":
-          assert "dsl_c_parameter_C_data_" not in arguments[1]
-          if "dsl_c_parameter_A_data_" in arguments[1]:
+          assert not accesses_pointer(arguments[1], "C")
+          if accesses_pointer(arguments[1], "A"):
             half_loads.add(assignment[1])
     for arguments in calls(line, "store_convert"):
-      if dtype(arguments[0]) == "vecops::float16_t" and "dsl_c_parameter_D_data_" in arguments[1]:
+      if dtype(arguments[0]) == "vecops::float16_t" and accesses_pointer(arguments[1], "D"):
         stores.append(arguments[2])
   assert half_loads, "no typed F16 conversion of captured F32 input A"
   assert stores, "no typed F16 -> F32 store into D"
@@ -129,18 +134,26 @@ def _half_rounding_pipeline(source):
     ("using Tag = vecops::vec::ScalableTag<float, 1>;", "vecops::vec::Rebind<vecops::float16_t, Tag>"),
   ),
 )
-def test_half_rounding_pipeline_checks_dtype_and_connected_value(tag_declaration, tag):
+@pytest.mark.parametrize("pointer_snapshot", (False, True))
+def test_half_rounding_pipeline_checks_dtype_and_connected_value(tag_declaration, tag, pointer_snapshot):
+  declarations = "const auto saved_input = A.data();\nconst auto saved_output = D.data();" if pointer_snapshot else ""
+  input_pointer, output_pointer = ("saved_input", "saved_output") if pointer_snapshot else ("A.data()", "D.data()")
   source = f"""
   {tag_declaration}
-  auto half = vecops::vec::load_convert({tag}{{}}, dsl_c_parameter_A_data_1);
+  {declarations}
+  auto half = vecops::vec::load_convert({tag}{{}}, {input_pointer});
   auto forwarded = half;
-  vecops::vec::store_convert({tag}{{}}, dsl_c_parameter_D_data_10, forwarded);
+  vecops::vec::store_convert({tag}{{}}, {output_pointer}, forwarded);
   """
   _half_rounding_pipeline(source)
   with pytest.raises(AssertionError, match="does not reach"):
     _half_rounding_pipeline(source.replace(", forwarded)", ", unrelated)"))
   with pytest.raises(AssertionError, match="no typed F16"):
     _half_rounding_pipeline(source.replace("vecops::float16_t", "float"))
+  with pytest.raises(AssertionError):
+    _half_rounding_pipeline(source.replace("A.data()", "C.data()"))
+  with pytest.raises(AssertionError, match="no typed F16"):
+    _half_rounding_pipeline(source.replace("D.data()", "C.data()"))
 
 
 @pytest.mark.parametrize("masked", (False, True))
