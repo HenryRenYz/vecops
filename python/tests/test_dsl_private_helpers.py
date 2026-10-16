@@ -54,7 +54,13 @@ def test_scalar_tuple_early_exit_and_nested_calls(compiler):
     result = np.empty(2, dtype=np.int64)
     kernel(result, x=7, count=count)
     np.testing.assert_array_equal(result, [8, 21 if count > 2 else 14])
-  assert "vecops_dsl::private_call([&]()" in kernel.generated_source
+  calls = [line for line in kernel.generated_source.splitlines() if "vecops_dsl::private_call([" in line]
+  assert calls and all("[&" in line for line in calls)
+  assert any("x" in plan.scalars for plan in kernel.backend_ir.private_captures.values())
+  assert all(
+    not any("helper_returned" in name or "helper_result" in name for name in plan.scalars)
+    for plan in kernel.backend_ir.private_captures.values()
+  )
   assert "static VECOPS_NOINLINE void private_call" in kernel.generated_source
 
 
@@ -107,3 +113,36 @@ def test_void_private_scratch_loop_and_exception(compiler):
   np.testing.assert_array_equal(c, a + 2)
   with pytest.raises(Exception, match="private helper flag"):
     kernel(a, c, flag=-1)
+
+
+def test_dynamic_strided_alias_and_scratch_owner_keep_call_time_values(compiler):
+  n = T.dynamic(lower=0)
+  source_stride, output_stride = T.dynamic(), T.dynamic()
+
+  @T.func(inline=False)
+  def helper(old, output, bias):
+    scratch = T.alloc(output.shape, dtype=output.dtype)
+    T.store(scratch, old + bias)
+    T.store(output, T.load(scratch))
+    return bias + 1
+
+  @T.jit(compiler=compiler)
+  def factory():
+    @T.template
+    def kernel(A: T.Tensor((n,), (source_stride,), dtype="float32", access="inout"),
+               C: T.Tensor((n,), (output_stride,), dtype="float32", access="output"), *, bias: int):
+      for _ in T.serial(2):
+        result = helper(T.load(A), C, bias)
+        assert result > bias
+    return kernel
+
+  kernel = factory()
+  for count in (0, 3, 19):
+    for alias in (False, True):
+      a = np.arange(2 * count + 4, dtype=np.float32)[1:1 + 2 * count:2]
+      c = a if alias else np.empty(max(1, count) * 2, dtype=np.float32)[::2][:count][::-1]
+      before = a.copy()
+      kernel(a, c, bias=3)
+      np.testing.assert_array_equal(c, before + (6 if alias else 3))
+      if not alias:
+        np.testing.assert_array_equal(a, before)

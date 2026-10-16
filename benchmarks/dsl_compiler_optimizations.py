@@ -6,6 +6,8 @@ Run this same driver in each frozen baseline/candidate snapshot. Native repeat
 loops amortize Python dispatch; compilation is forbidden in the timing phase.
 Results retain correctness checks, source/DSO sizes and lowering/build times.
 This is a fixed evaluation suite, not a configuration search or autotuner.
+The versioned buffer protocol fixes allocation order, first-touch CPU and
+4096-byte address-window offsets; results require a matching-protocol baseline.
 """
 
 from __future__ import annotations
@@ -25,6 +27,55 @@ from dsl_timing import isolate_compilation, reserve_cpu
 from vecops._identity import implementation_identity
 
 CASES = ("invariant-metadata", "invariant-branch", "scratch-lifetimes", "fusion-pressure", "dead-store")
+BUFFER_PROTOCOL = {
+  "version": "compileropt-fixed-buffers-v1",
+  "address_window_bytes": 4096,
+  "tensor_offsets": {"A": 0, "C": 64, "D": 128},
+  "padding_windows_per_block": 1,
+  "allocation_and_first_touch": "reserved-cpu-before-factories",
+  "ownership": "one-byte-allocation-per-case-with-disjoint-float32-views",
+}
+
+
+def fixed_buffers(rows, width):
+  """Allocate one fixed layout; callers pin the CPU before the first write.
+
+  The address window is a protocol constant, not an OS page-size assumption.
+  Each tensor gets a page-rounded payload plus padding, with a fixed offset
+  inside its own block. Keeping the owner alive retains all three views.
+  """
+  window = BUFFER_PROTOCOL["address_window_bytes"]
+  payload_bytes = rows * width * np.dtype(np.float32).itemsize
+  block_bytes = ((payload_bytes + window - 1) // window + BUFFER_PROTOCOL["padding_windows_per_block"]) * window
+  owner = np.empty(3 * block_bytes + window - 1, dtype=np.uint8)
+  base_offset = (-int(owner.ctypes.data)) % window
+  arrays = {
+    name: np.ndarray((rows, width), dtype=np.float32, buffer=owner,
+                     offset=base_offset + index * block_bytes + offset)
+    for index, (name, offset) in enumerate(BUFFER_PROTOCOL["tensor_offsets"].items())
+  }
+  owner.fill(0)
+  arrays["A"][:] = np.linspace(-1, 1, rows * width, dtype=np.float32).reshape(rows, width)
+  arrays["C"].fill(np.nan)
+  arrays["D"].fill(np.nan)
+  layout = {
+    "owner_address": int(owner.ctypes.data),
+    "owner_bytes": owner.nbytes,
+    "aligned_base_address": int(owner.ctypes.data) + base_offset,
+    "block_bytes": block_bytes,
+    "payload_bytes": payload_bytes,
+    "tensors": {
+      name: {
+        "address": int(array.ctypes.data),
+        "address_mod_4096": int(array.ctypes.data) % window,
+        "address_mod_64": int(array.ctypes.data) % 64,
+        "shape": list(array.shape),
+        "strides": list(array.strides),
+      }
+      for name, array in arrays.items()
+    },
+  }
+  return owner, arrays["A"], arrays["C"], arrays["D"], layout
 
 
 def declaration(case, width):
@@ -131,30 +182,41 @@ def main(argv=None):
     "cxx": args.cxx,
     "implementation": implementation_identity(),
     "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    "buffer_protocol": BUFFER_PROTOCOL,
   }
   manifest = args.work_dir / "manifest.json"
   if args.phase == "time" and (not manifest.is_file() or json.loads(manifest.read_text())["configuration"] != identity):
     raise ValueError("timing requires a completed build with exactly matching configuration")
   isolate_compilation(args.cpu)
-  compiler = vecops.Compiler(
-    target=args.target,
-    cc=args.cc,
-    cxx=args.cxx,
-    jobs=4,
-    cache_mode="cache-only" if args.phase == "time" else "read-write",
-    cache_dir=args.work_dir / "cache",
-    build_dir=args.work_dir / "build",
-  )
   prepared, rows = [], []
   try:
+    compilation_affinity = os.sched_getaffinity(0)
+    lease = reserve_cpu(args.cpu)
+    try:
+      os.sched_setaffinity(0, {args.cpu})
+      # Allocate and first-touch the whole selected suite before any factory
+      # or compiler work can change the allocator's history. Retain owners.
+      buffer_sets = [fixed_buffers(args.rows, width) for _case in args.cases for width in args.widths]
+    finally:
+      os.sched_setaffinity(0, compilation_affinity)
+      lease.close()
+    buffer_inputs = iter(buffer_sets)
+    compiler = vecops.Compiler(
+      target=args.target,
+      cc=args.cc,
+      cxx=args.cxx,
+      jobs=4,
+      cache_mode="cache-only" if args.phase == "time" else "read-write",
+      cache_dir=args.work_dir / "cache",
+      build_dir=args.work_dir / "build",
+    )
     for case in args.cases:
       for width in args.widths:
+        _owner, a, c, d, buffer_layout = next(buffer_inputs)
         template = declaration(case, width)
         start = time.perf_counter()
         compiled = T.compile(template, compiler=compiler)
         lowering_seconds = time.perf_counter() - start
-        a = np.linspace(-1, 1, args.rows * width, dtype=np.float32).reshape(args.rows, width)
-        c, d = np.empty_like(a), np.empty_like(a)
         start = time.perf_counter()
         compiled.compile_for(a, c, d, 1, args.repeat)
         build_seconds = time.perf_counter() - start
@@ -174,6 +236,7 @@ def main(argv=None):
           "source_bytes": len(source.encode()),
           "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
           "kernel_pass_count": len(compiled.kernel_ir.pass_trace),
+          "buffers": buffer_layout,
         }
         rows.append(row)
         prepared.append((compiled, a, c, d, row))
@@ -189,8 +252,8 @@ def main(argv=None):
       expected_sources = {(row["case"], row["width"]): row["source_sha256"] for row in built["results"]}
       if any(expected_sources.get((row["case"], row["width"])) != row["source_sha256"] for row in rows):
         raise ValueError("generated source changed after the build phase")
-      # All artifacts are ready before pinning. cache-only forbids an implicit
-      # background compiler, so every sample is native execution only.
+      # Repin after compilation/cache preparation. All buffers were already
+      # first-touched on this CPU; cache-only forbids background compilation.
       lease = reserve_cpu(args.cpu)
       try:
         os.sched_setaffinity(0, {args.cpu})
@@ -205,11 +268,25 @@ def main(argv=None):
             invoke()
             samples.append((time.perf_counter_ns() - start) / args.repeat)
           row.update(samples_ns=samples, median_ns=statistics.median(samples))
+          for mode in (-1, 1):
+            compiled(a, c, d, mode, 1)
+            e, f = expected(row["case"], a, mode)
+            np.testing.assert_allclose(c, e, rtol=2e-6, atol=2e-6)
+            np.testing.assert_allclose(d, f, rtol=2e-6, atol=2e-6)
+          row["post_timing_correct"] = True
       finally:
         lease.close()
       document = {"configuration": identity, "results": rows, "build": built}
     args.output.write_text(json.dumps(document, indent=2) + "\n")
-    print(json.dumps({"phase": args.phase, "cases": len(rows), "output": str(args.output)}), flush=True)
+    print(json.dumps({
+      "phase": args.phase,
+      "cases": len(rows),
+      "output": str(args.output),
+      "buffer_protocol": BUFFER_PROTOCOL,
+      "primary_metric": "wall_ns_per_repeat",
+      "layout_scope": "fixed 64-byte alignment and 4096-byte offsets; absolute/physical addresses and cache placement can differ",
+      "comparison_scope": "requires the same buffer protocol; historical layouts are separate results",
+    }), flush=True)
   finally:
     os.sched_setaffinity(0, allowed)
 

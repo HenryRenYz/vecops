@@ -39,6 +39,7 @@ _BUILTIN_MODULES = (
   "backends.cpu.registers",
   "backends.cpu.hardware",
   "backends.cpu.storage",
+  "backends.cpu.captures",
   "passes.verification",
 )
 

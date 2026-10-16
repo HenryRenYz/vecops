@@ -20,7 +20,7 @@ def vector(ir, context):
   return PassResult(ir, changed=False, preserved=tuple(context.analyses))
 
 
-@register_pass("verify-cpu-plan", stage="cpu-memory", after="cpu-plan-storage")
+@register_pass("verify-cpu-plan", stage="cpu-memory", after="cpu-plan-private-captures")
 def prepared(ir, context):
   if context.options.get("verify_ir", True):
     verify_prepared(ir)

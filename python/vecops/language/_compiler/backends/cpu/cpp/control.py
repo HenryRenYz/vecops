@@ -137,7 +137,22 @@ class ControlEmitter:
       elif isinstance(statement, I.ExitRegion):
         self.protect_region(statement.body, self.expression_loads(I.Block(block.statements[index + 1 :])))
         if statement.outlined:
-          self.opening("vecops_dsl::private_call([&]()")
+          plan = self.prepared.private_captures.get(id(statement))
+          captures = []
+          if plan is not None and self.hardware_scope is None and not self.hardware_scalar_bindings:
+            captures.extend(plan.scalars)
+            captures.extend(self.parameter_metadata[name] for name in plan.metadata if name in self.parameter_metadata)
+            captures.extend(self.parameter_pointers[name] for name in plan.pointers if name in self.parameter_pointers)
+            # protect_region has already established these const bool
+            # conditions. Resolve planned read identities, never recompute a
+            # guard or copy its resizable snapshot Buffer owner.
+            captures.extend(
+              self.snapshots[id(read)][1] for read in plan.snapshot_reads if id(read) in self.snapshots
+            )
+          # The plan names existing immutable values only. Owners, mutable
+          # results and any unplanned emission binding stay by reference.
+          capture = ", ".join(("&", *dict.fromkeys(captures)))
+          self.opening(f"vecops_dsl::private_call([{capture}]()")
         self.opening("/* inlined helper exit region */")
         self.block(statement.body)
         self.close()

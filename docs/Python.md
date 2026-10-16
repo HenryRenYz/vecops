@@ -317,6 +317,19 @@ still use registers. Calls may contain hardware regions, but cannot cross an
 already-active AMX/SME instruction region. Views and compile-time descriptors
 are not return values of private calls: use output arguments, or retain the
 default inline helper for descriptor construction.
+The CPU backend plans private-call captures after storage and hardware planning.
+Eligible existing invocation-invariant tensor pointer/metadata snapshots and lexically
+available, singly defined scalar bindings are copied by value. Pointer copies
+retain the original pointee access and alias semantics. Mutable return slots,
+loop induction variables, tile states, resizable storage owners and unknown
+bindings remain by reference. The plan does not change private-call boundaries,
+evaluate expressions earlier, or copy scratch pointers before a resize.
+For each referenced ABI tensor root, the plan includes its existing size/stride
+snapshots as well as logical-view metadata: alias guards may inspect the whole
+physical root. Historical-read identities also select any already-established
+snapshot condition for value capture after region protection. These conditions
+are immutable booleans; snapshot Buffer owners and their live data pointers
+retain their existing reference and lifetime semantics.
 The tested BiSheng Clang 19 toolchain crashes while optimizing the large
 outlined SME cache schedule, so that library schedule remains inline. Private
 calls are currently used by the smaller ordinary-SVE PackedDot leaf; moving an
@@ -2479,8 +2492,11 @@ enables a multi-tile body on nonaligned problems.
 It outlines only the ordinary vector fallback in automatic native dispatch;
 native resident and cache drivers retain their existing inlining. This can
 change native code size and adds a private call when the vector fallback is
-selected. Isolating the cold recipe limits compiler work and register pressure
-in large packing/matmul owners, including dynamic x86 native dispatch. This
+selected. Isolating a large recipe can reduce compiler work and register pressure
+in packing/matmul owners. The fallback is not inherently cold: runtime shape
+dispatch may select it frequently, and a disabled instruction feature can make
+it the only active implementation. Profitability depends on the target, caller
+and selected path; the default does not promise a speedup for every kernel. This
 boundary does not change the fallback recipe or the native tile schedule.
 An explicit boolean override remains available for target-specific experiments.
 

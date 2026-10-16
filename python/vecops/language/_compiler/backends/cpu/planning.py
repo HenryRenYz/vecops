@@ -56,6 +56,8 @@ class PreparedKernel:
   register_programs: object = field(default_factory=dict)
   hardware: object = field(default_factory=dict)
   storage: object = None
+  private_captures: object = field(default_factory=dict)
+  immutable_geometry: object = field(default_factory=dict)
   pass_trace: list = field(default_factory=list)
 
   def store(self, statement):

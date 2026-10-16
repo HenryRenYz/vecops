@@ -145,6 +145,21 @@ Python实现身份。packing采用双poison逐字节oracle，lifecycle保留原�
 `--phase build`记录源码、构建成本并验证数值；`--phase time`只允许已有缓存。
 两版使用同一驱动、参数及各自独立的`--work-dir`，静默后按旧/新/新/旧顺序测量。
 
+该驱动的`compileropt-fixed-buffers-v1`协议在任何`T.compile`和程序factory之前，
+先reserve并绑定目标CPU，为全部选中程序分配、首次写入输入及输出，再恢复编译核心
+亲和性。每个程序的A/C/D来自同一个owning byte allocation的互不重叠视图：
+base按4096字节对齐，各块容量为payload向4096上取整后再留4096字节padding，
+A/C/D相对各块起点的固定偏移为0/64/128字节。4096是地址布局协议粒度，
+不是对操作系统页大小的假设；选择这组固定偏移是为了控制布局，没有搜索更快布局。
+结果逐项记录真实指针、`ptr%4096`和`ptr%64`，配置和manifest包含协议版本。
+旧manifest因此不能用于新协议的`--phase time`，应使用新的独立目录重新构建两版。
+
+原有两mode数值oracle保留，time完成后再对每个程序完整复验两mode。
+主度量仍为原生ABI重复循环的wall ns/repeat，不做CPU时间归一化，也未新增paired API。
+固定64字节对齐及页内偏移会改变评测条件，绝对地址、物理页和cache放置仍可能不同；
+这组结果应与同协议基线比较，不能替换或改写此前独立布局的R1/R2结果，
+也不能仅据新结果推断原差异来自NUMA、分配器或某个pass。
+
 `dsl_scratch_lifetimes.py`另外覆盖晚期存储规划：两个顶层循环使用互不重叠的
 私有buffer，宽度17/257/4096、行数1/32共6项。原有优化benchmark的重复循环
 会使保守顶层区间重叠，不能据此验证slot复用；这个补充程序将重复放在计时驱动中。
