@@ -2185,6 +2185,15 @@ a short vector to a larger unrelated tile does not make that tile a vector.
 CPU state placement splits at the widest vector intermediate/consumer, and
 canonicalizes equivalent physical rebinds, avoiding multiword state objects
 and scalar get/set repacking across a widening/narrowing boundary.
+Closed fixed-register programs are planned before state placement. On x86
+with a known native register width, an explicitly typed rank-one fixed state
+may retain that fixed representation when every declaration and update has
+a complete, matching register program whose intermediates fit the native
+register and whose bit reinterpretations preserve byte counts. Shape alone
+does not establish this proof. Masks, partial or unknown descriptors, matrix
+state, private-call crossings, other targets and exhausted register budgets
+retain the existing placement rules. Prepared verification rechecks the
+original writes and program subjects before code emission.
 
 `T.view_disjoint(a, b)` also accepts captured scalar/tile/vector producer
 values. It expands to pairwise runtime disjointness checks for their memory

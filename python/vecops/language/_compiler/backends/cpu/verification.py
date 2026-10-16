@@ -37,11 +37,64 @@ def verify_prepared(prepared):
         )
       slots.setdefault(slot, []).append(interval)
   verify_private_captures(prepared)
+  verify_closed_fixed_states(prepared)
   confirmed = _memory_proofs(prepared)
   verify_partition_proofs(prepared, confirmed.partitions)
   verify_broadcast_proofs(prepared, confirmed.broadcasts)
   verify_extent_geometry(prepared, confirmed.geometry)
   return prepared
+
+
+def verify_closed_fixed_states(prepared):
+  """Recheck fixed-state placement against all original writes and programs."""
+  from ... import ir as I
+  from ...ir.traversal import nodes, walk_unique
+  from .state import StatePiece, closed_fixed_lanes
+
+  marked = []
+  for name, plan in prepared.states.items():
+    require(type(plan.closed_fixed) is bool, "invalid closed fixed-state marker")
+    if plan.closed_fixed:
+      require(plan.state.name == name, "detached closed fixed-state subject")
+      marked.append(plan)
+  if not marked:
+    return
+  manager = getattr(prepared.vectors, "manager", None)
+  options = getattr(manager, "options", {}) or {}
+  environment = options.get("_compiler_environment")
+  require(environment is not None, "closed fixed-state proof lacks compiler environment")
+  budget = options.get("cpu_state_register_budget", 12)
+  require(type(budget) is int and 0 < budget <= 64, "closed fixed-state exceeds register budget")
+  definitions, excluded = {}, set()
+  for statement in nodes(prepared.vectors.kernel.body):
+    if isinstance(statement, (I.DeclareState, I.UpdateState)):
+      definitions.setdefault(statement.state.name, []).append(statement)
+      if any(e.op == "dot" for e in walk_unique(statement.value)):
+        excluded.add(statement.state.name)
+    if isinstance(statement, I.ExitRegion) and statement.outlined:
+      contained = tuple(nodes(statement.body))
+      local = {s.state.name for s in contained if isinstance(s, I.DeclareState)}
+      excluded.update(s.name for s in contained if isinstance(s, I.TileState) and s.name not in local)
+    value = getattr(statement, "value", None)
+    if isinstance(value, I.Expr):
+      excluded.update(
+        ref.data.name
+        for expression in walk_unique(value)
+        if expression.op == "dot"
+        for accumulator in expression.args[2:]
+        for ref in walk_unique(accumulator)
+        if ref.op == "state_ref"
+      )
+  for plan in marked:
+    require(plan.state.name not in excluded, "closed fixed-state crosses call or matrix storage")
+    lanes = closed_fixed_lanes(
+      plan.state,
+      definitions.get(plan.state.name, ()),
+      prepared.register_programs,
+      environment,
+    )
+    require(lanes is not None, "closed fixed-state is not proved by every original write")
+    require(plan.pieces == (StatePiece((0,), lanes),), "closed fixed-state has incompatible physical pieces")
 
 
 def _memory_proofs(prepared):

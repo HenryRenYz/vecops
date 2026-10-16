@@ -27,6 +27,93 @@ class StatePlan:
   state: I.TileState
   view: I.View
   pieces: tuple[StatePiece, ...]
+  closed_fixed: bool = False
+
+
+def closed_fixed_lanes(state, statements, programs, environment):
+  """Prove one fixed physical representation for every original state write.
+
+  A register transform alone does not prove this: its complete typed program,
+  including every update, must fit a known x86 register. This query neither
+  changes expression identities nor relies on the current state placement.
+  """
+  from ...ir.vector import RegisterProgram
+  from .registers import CPURegisterPlan, closed_register_program
+
+  target = environment.codegen_target
+  if (
+    target.architecture != "x86"
+    or target.isa in {"scalar", "neon"}
+    or type(target.vector_bits) is not int
+    or target.vector_bits <= 0
+  ):
+    return None
+  limit = target.vector_bits // 8
+
+  def fixed_type(typ):
+    return (
+      type(typ) is I.VectorType
+      and not typ.mask
+      and type(typ.tag) is I.VectorTag
+      and type(typ.tag.N) is int
+      and typ.tag.N > 0
+      and not typ.tag.N & (typ.tag.N - 1)
+      and typ.tag.pow == 0
+      and typ.tag.domain == "simd"
+      and len(typ.shape) == 1
+      and I.constant(typ.shape[0]) == typ.tag.N
+      and typ.dtype in ELEMENT_BYTES
+      and typ.tag.basis_dtype in ELEMENT_BYTES
+      and typ.tag.N * ELEMENT_BYTES[typ.dtype] <= limit
+    )
+
+  typ = state.type
+  if not fixed_type(typ) or sum(type(s) is I.DeclareState for s in statements) != 1:
+    return None
+  catalog = environment.operations
+  for statement in statements:
+    if type(statement) not in {I.DeclareState, I.UpdateState} or statement.state is not state:
+      return None
+    value = statement.value
+    plan = programs.get(id(value))
+    if (
+      type(value) is not I.Expr
+      or not fixed_type(value.type)
+      or value.type.dtype != typ.dtype
+      or value.type.mask != typ.mask
+      or value.type.tag != typ.tag
+      or type(plan) is not CPURegisterPlan
+      or type(plan.program) is not RegisterProgram
+      or len(plan.program.outputs) != 1
+      or plan.program.outputs[0] is not value
+    ):
+      return None
+    # Recompute the actual closed DAG rather than trusting its key or marker.
+    confirmed = closed_register_program(value, catalog, limit)
+    if confirmed is None:
+      return None
+    inputs, operations = confirmed.inputs, confirmed.operations
+    if (
+      len(inputs) != len(plan.program.inputs)
+      or any(a is not b for a, b in zip(inputs, plan.program.inputs))
+      or len(operations) != len(plan.program.operations)
+      or any(a is not b for a, b in zip(operations, plan.program.operations))
+    ):
+      return None
+    for expression in operations:
+      if (
+        type(expression) is not I.Expr
+        or not fixed_type(expression.type)
+        or plan.tags.get(id(expression)) != expression.type.tag
+      ):
+        return None
+      if expression.op in {"bitreinterpret", "bitcast"}:
+        if len(expression.args) != 1:
+          return None
+        source = expression.args[0].type
+        if source.tag.N * ELEMENT_BYTES[source.dtype] != expression.type.tag.N * ELEMENT_BYTES[expression.type.dtype]:
+          return None
+  return typ.tag.N
 
 
 def state_view(state):
@@ -45,7 +132,7 @@ def stored_value(state, value):
   return I.Expr(typ, "where", (value, I.literal(1, "uint8"), I.literal(0, "uint8")))
 
 
-@register_pass("cpu-plan-state", stage="cpu-memory", before="cpu-plan-grids")
+@register_pass("cpu-plan-state", stage="cpu-memory", after="cpu-plan-register-programs", before="cpu-plan-grids")
 def plan_state(prepared, context):
   budget = context.options.get("cpu_state_register_budget", 12)
   if isinstance(budget, bool) or not isinstance(budget, int) or not 0 <= budget <= 64:
@@ -59,7 +146,10 @@ def plan_state(prepared, context):
   state_links = {}
   initial_word_bytes = {}
   call_states = set()
+  definitions = {}
   for statement in nodes(prepared.vectors.kernel.body):
+    if isinstance(statement, (I.DeclareState, I.UpdateState)):
+      definitions.setdefault(statement.state.name, []).append(statement)
     if isinstance(statement, I.ExitRegion) and statement.outlined:
       contained = tuple(nodes(statement.body))
       local = {s.state.name for s in contained if isinstance(s, I.DeclareState)}
@@ -81,9 +171,14 @@ def plan_state(prepared, context):
             for source in expression.args:
               for reference in walk_unique(source):
                 typ = reference.type
-                if (reference.op == "state_ref" and isinstance(typ, I.VectorType) and
-                    typ.tag.N is None and typ.tag.pow == 0 and typ.tag.domain == "simd" and
-                    typ.tag.basis_dtype == typ.dtype):
+                if (
+                  reference.op == "state_ref"
+                  and isinstance(typ, I.VectorType)
+                  and typ.tag.N is None
+                  and typ.tag.pow == 0
+                  and typ.tag.domain == "simd"
+                  and typ.tag.basis_dtype == typ.dtype
+                ):
                   sve_word_states.add(reference.data.name)
         for reference in expressions:
           if reference.op == "state_ref":
@@ -164,12 +259,19 @@ def plan_state(prepared, context):
     source_type = declarations.get(name)
     for neighbor in state_links.get(name, ()):
       typ = declarations.get(neighbor)
-      if (neighbor not in sve_word_states and source_type is not None and
-          isinstance(typ, I.VectorType) and not typ.mask and
-          typ.dtype == source_type.dtype and typ.tag.N is None and
-          typ.tag.pow == 0 and typ.tag.domain == "simd" and
-          typ.tag.basis_dtype == typ.dtype and len(typ.shape) == 1 and
-          I.same_expr(typ.shape[0], I.Expr(I.ScalarType("int64"), "lanes", data=(typ.dtype, 0)))):
+      if (
+        neighbor not in sve_word_states
+        and source_type is not None
+        and isinstance(typ, I.VectorType)
+        and not typ.mask
+        and typ.dtype == source_type.dtype
+        and typ.tag.N is None
+        and typ.tag.pow == 0
+        and typ.tag.domain == "simd"
+        and typ.tag.basis_dtype == typ.dtype
+        and len(typ.shape) == 1
+        and I.same_expr(typ.shape[0], I.Expr(I.ScalarType("int64"), "lanes", data=(typ.dtype, 0)))
+      ):
         sve_word_states.add(neighbor)
         pending.append(neighbor)
 
@@ -196,9 +298,15 @@ def plan_state(prepared, context):
           # Partial FixedTags change the shuffle word/block width. Keep native
           # scalable words with clipped active counts, or stage scalar memory.
           explicit_word = (
-            isinstance(typ, I.VectorType) and not typ.mask and typ.tag.N is None and
-            typ.tag.pow == 0 and typ.tag.domain == "simd" and typ.tag.basis_dtype == typ.dtype and
-            len(pieces) == 1 and pieces[0].scalable and pieces[0].power == 0
+            isinstance(typ, I.VectorType)
+            and not typ.mask
+            and typ.tag.N is None
+            and typ.tag.pow == 0
+            and typ.tag.domain == "simd"
+            and typ.tag.basis_dtype == typ.dtype
+            and len(pieces) == 1
+            and pieces[0].scalable
+            and pieces[0].power == 0
           )
           if explicit_word:
             # Register transforms do not invalidate an already proven native
@@ -210,6 +318,19 @@ def plan_state(prepared, context):
             pieces = [StatePiece((i,), 0, True) for i in range(count)] if count <= budget else []
           else:
             pieces = []
+        closed_fixed = False
+        if (
+          budget
+          and state.name not in matrix_states
+          and len(pieces) == 1
+          and pieces[0].scalable
+          and pieces[0].coordinates == (0,)
+          and pieces[0].power == 0
+        ):
+          lanes = closed_fixed_lanes(state, definitions[state.name], prepared.register_programs, context.environment)
+          if lanes is not None:
+            pieces = [StatePiece((0,), lanes)]
+            closed_fixed = True
         if (
           not pieces
           and state.name not in word_states
@@ -247,7 +368,8 @@ def plan_state(prepared, context):
         # States local to the outlined body retain ordinary register planning.
         if len(pieces) > budget or state.name in call_states:
           pieces = []
-        plans[state.name] = StatePlan(state, state_view(state), tuple(pieces))
+          closed_fixed = False
+        plans[state.name] = StatePlan(state, state_view(state), tuple(pieces), closed_fixed)
         placement = f"{len(pieces)} independent register pieces" if pieces else "private scalar scratch"
         prepared.vectors.kernel.diagnostics.append(f"tile state {state.name}: {placement}")
       for child in children(statement):
