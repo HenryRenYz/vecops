@@ -18,6 +18,8 @@ import random
 import re
 import statistics
 import time
+
+from dsl_timing import warmup_native
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -236,6 +238,7 @@ def main():
       # Native ABI dispatch has fixed overhead. Calibrate each implementation
       # separately to >=25 ms: equal tiny repeat counts severely overstate the
       # cost of a fast C++ kernel relative to the original AttentionBench.
+      warmup = warmup_native([calls((kernel,), buffers, 1)[0] for kernel in group.values()])
       repeats, invokes = {}, {}
       for name, kernel in group.items():
         repeat = 1
@@ -261,7 +264,7 @@ def main():
           log.write(json.dumps({"case": asdict(case), "implementation": name, "round": round_, "repeat": repeats[name], "ns": ns}) + "\n")
       log.flush()
       medians = {name: statistics.median(values) for name, values in samples.items()}
-      row = {"case": asdict(case), "median_ns": medians, "dsl_over_cpp_auto":
+      row = {"case": asdict(case), "warmup": warmup, "median_ns": medians, "dsl_over_cpp_auto":
              {name: ns / medians["cpp_automatic"] for name, ns in medians.items() if name.startswith("dsl_")},
              "max_abs_error": errors, "cpp_workspace_bytes": sizes, "repeats": repeats}
       rows.append(row)

@@ -238,7 +238,7 @@ def main():
   import numpy as np
   import vecops
   import vecops.language as T
-  from dsl_timing import reserve_cpu
+  from dsl_timing import reserve_cpu, warmup_native
   from dsl_transpose import MODES, aligned_empty, calls, catalog, numpy_dtype
 
   args.output = args.output.resolve()
@@ -360,8 +360,7 @@ def main():
         invoke()
         check(c, expected)
       invocations = invoke_all(pair, data, repeat)
-      for invoke in invocations:
-        invoke()
+      warmup = warmup_native(invocations)
       samples, raw = [[], [], []], []
       for round_ in range(args.rounds):
         for position, label in enumerate(orders[round_ % len(orders)]):
@@ -376,6 +375,7 @@ def main():
       rows.append(
         {
           "case": case,
+          "warmup": warmup,
           "median_ns": medians,
           "new_over_old": medians[1] / medians[0],
           "old_over_cpp": medians[0] / medians[2],

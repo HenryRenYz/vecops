@@ -37,7 +37,39 @@ def verify_prepared(prepared):
         )
       slots.setdefault(slot, []).append(interval)
   verify_private_captures(prepared)
+  verify_partition_proofs(prepared)
   return prepared
+
+
+def verify_partition_proofs(prepared):
+  """Certificates must retain their final group/views and lexical count."""
+  from ...ir.traversal import children
+  from .partitions import PartitionProof, collect_partition_proofs, partition_key
+
+  occurrences, groups, active = {}, {}, set()
+
+  def visit(block):
+    require(id(block) not in active, "cyclic CPU partition lexical scope")
+    active.add(id(block))
+    for statement in block.statements:
+      if isinstance(statement, I.ElementwiseGroup):
+        groups[id(statement)] = statement
+        occurrences[id(statement)] = occurrences.get(id(statement), 0) + 1
+      for child in children(statement):
+        visit(child)
+    active.remove(id(block))
+
+  visit(prepared.vectors.kernel.body)
+  confirmed = collect_partition_proofs(prepared.vectors.kernel) if prepared.partition_proofs else {}
+  for key, proof in prepared.partition_proofs.items():
+    require(type(proof) is PartitionProof, "invalid CPU partition certificate")
+    require(groups.get(id(proof.group)) is proof.group, "detached CPU partition group")
+    destinations = tuple(store.destination for store in proof.group.stores)
+    require(any(view is proof.first for view in destinations) and any(view is proof.second for view in destinations),
+            "detached CPU partition view")
+    require(key == partition_key(proof.group, proof.first, proof.second), "stale CPU partition identity")
+    require(proof.occurrences == occurrences[id(proof.group)], "CPU partition proof missed a lexical occurrence")
+    require(key in confirmed, "CPU partition certificate is not proved in the final lexical domains")
 
 
 def verify_private_captures(prepared):

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 
 from .... import ir as I
+from ....analysis.effects import read_accesses
 
 
 class ControlEmitter:
@@ -32,13 +33,21 @@ class ControlEmitter:
       self.block(body)
       return
     guards = []
+    accesses = [
+      read_accesses((store.value, store.mask) if store.mask is not None else store.value, self.environment.operations)
+      for store in group.stores
+    ]
+    if any(reads is None for reads in accesses):
+      # Conditional/opaque read addresses must not be evaluated speculatively
+      # to decide whether the stores can share one vector traversal.
+      self.block(body)
+      return
     for index, store in enumerate(group.stores):
-      own_loads = list(I.loads(store.value)) + (list(I.loads(store.mask)) if store.mask is not None else [])
-      for later in group.stores[index + 1 :]:
+      own_loads = accesses[index]
+      for later_index, later in enumerate(group.stores[index + 1 :], index + 1):
         guards.append(f"!({self.overlap(store.destination, later.destination)})")
-        later_loads = list(I.loads(later.value)) + (list(I.loads(later.mask)) if later.mask is not None else [])
-        guards.extend(f"!({self.overlap(store.destination, load.data)})" for load in later_loads)
-        guards.extend(f"!({self.overlap(later.destination, load.data)})" for load in own_loads)
+        guards.extend(f"!({self.overlap(store.destination, load.view)})" for load in accesses[later_index])
+        guards.extend(f"!({self.overlap(later.destination, load.view)})" for load in own_loads)
     self.opening("if (" + (" && ".join(guards) or "true") + ") /* independent elementwise fusion */")
     old_snapshots = dict(self.snapshots)
     for store in group.stores:

@@ -7,8 +7,10 @@ loads, shape validation, allocations and hardware state are never moved on the
 strength of an effects='none' label alone. Unknown operations are barriers.
 """
 
+from __future__ import annotations
+
 import re
-from dataclasses import fields
+from dataclasses import dataclass, fields
 
 from .. import ir as I
 from ..ir.iteration import AxisFold, AxisResult, IterationDomain, LoopSchedule, ReductionSpec
@@ -165,3 +167,70 @@ def scalar_references(value):
 
 def assigned_scalars(value):
   return {node.target for node in nodes(value) if isinstance(node, (I.Assign, I.For))}
+
+
+@dataclass(frozen=True)
+class ReadAccess:
+  """A real reader identity and its accessed view; no synthetic load identity."""
+
+  expression: I.Expr
+  view: I.View
+  indices: I.Expr | None = None
+
+
+def read_accesses(expressions, catalog):
+  """Unconditional read views, or None when alias versioning is unsafe.
+
+  Historical ``loads_unique`` remains an argument-edge identity query. This
+  query also follows value-owned metadata and conditional cache storage. An
+  unknown cache choice is a barrier: even evaluating its inactive view's
+  address for an alias predicate could be invalid. Exact boolean choices visit
+  only the executable arm. Shared DAGs/metadata are visited once per query.
+  """
+  effects = ValueEffects(catalog)
+  pending = list(expressions) if type(expressions) in (tuple, list) else [expressions]
+  seen, result = {}, []
+  while pending:
+    expression = pending.pop()
+    if type(expression) is not I.Expr:
+      return None
+    if id(expression) in seen:
+      continue
+    seen[id(expression)] = expression
+    if expression.op == "cached_value":
+      data = expression.data
+      if type(data) is not tuple or len(data) != 2 or type(data[0]) is not I.View or len(expression.args) != 1:
+        return None
+      view, condition = data
+      choice = I.boolean_literal(condition)
+      if choice is None:
+        return None
+      if choice:
+        result.append(ReadAccess(expression, view))
+      else:
+        pending.extend(expression.args)
+      owned = effects._metadata_edges((expression.type, condition, view) if choice else (expression.type, condition))
+    else:
+      pending.extend(expression.args)
+      definition = catalog.get(expression)
+      if definition.effects not in {"none", "read"}:
+        return None
+      if (catalog.has(expression, Trait.MEMORY_READ) or definition.effects == "read") and not catalog.has(
+        expression, Trait.STATE_REFERENCE
+      ):
+        data = expression.data
+        if expression.op == "gather":
+          view = data[0] if type(data) is tuple else data
+          indices = expression.args[0] if expression.args else None
+        elif expression.op == "packed_load" and type(data) is I.PackedView:
+          view, indices = data.view, None
+        else:
+          view, indices = data, None
+        if type(view) is not I.View:
+          return None
+        result.append(ReadAccess(expression, view, indices))
+      owned = effects.owned_expressions(expression)
+    if owned is None:
+      return None
+    pending.extend(owned)
+  return tuple(result)

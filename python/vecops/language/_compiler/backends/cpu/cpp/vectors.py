@@ -78,6 +78,14 @@ class VectorsEmitter:
       return name
     if value.op == "cached_value":
       view, condition = value.data
+      # An exact boolean leaf has no executable condition effects. Do not
+      # print an unreachable cache arm: cleanup may have removed its owner.
+      choice = I.boolean_literal(condition)
+      if choice is not None:
+        selected = I.Expr(value.type, "load", data=view) if choice else value.args[0]
+        name = self.vector(selected, tag, root_shape, coords, active, axis)
+        self.chunk_cache[key] = name
+        return name
       load = I.Expr(value.type, "load", data=view)
       name = self.conditional_vector(
         value.type,

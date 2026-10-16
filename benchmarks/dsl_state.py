@@ -108,8 +108,10 @@ def main():
         lambda k=k, a=a, c=c: k.operator.native(a, c, args.count, args.repeat, **k._core.specialization_values)
         for k in variants
       )
-      times = measure(calls, args.repeat, args.rounds)
-      row = {"width": width, "count": args.count, "register_us": times[0], "scratch_us": times[1], "cpp_us": times[2]}
+      warmup = {}
+      times = measure(calls, args.repeat, args.rounds, warmup_record=warmup)
+      row = {"width": width, "count": args.count, "register_us": times[0], "scratch_us": times[1], "cpp_us": times[2],
+             "warmup": warmup}
       results.append(row)
       print(json.dumps(row), flush=True)
   finally:

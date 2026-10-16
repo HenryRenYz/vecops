@@ -402,6 +402,20 @@ def broadcast_shape(a, b):
   return tuple(reversed(result))
 
 
+def boolean_literal(expr):
+  """An exact effect-free boolean leaf, or None when evaluation is required."""
+  if (
+    type(expr) is Expr
+    and type(expr.type) is ScalarType
+    and expr.type.dtype == "bool"
+    and expr.op == "literal"
+    and not expr.args
+    and type(expr.data) is bool
+  ):
+    return expr.data
+  return None
+
+
 def loads(expr):
   """Memory-read occurrences, preserving repeated incoming argument edges."""
   if operation_snapshot().has(expr, Trait.MEMORY_READ):

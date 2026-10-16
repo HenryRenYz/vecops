@@ -1124,7 +1124,7 @@ proofs include expression-owned type/data dependencies; loads, traps and cycles
 in those dependencies cannot become discardable through a pure wrapper.
 Conditional operand-cache selections follow the same lexical facts as their
 allocation guards. A safely proven false selector reuses the original producer,
-including its historical read/state identities. Allocation predicates stay
+including its historical read/state identities. Named allocation predicates stay
 protected until a subsequent cleanup round confirms that every selector use
 has disappeared. A single cleanup round remains correct and can retain unused
 private declarations. True or unknown selectors keep
@@ -1132,6 +1132,14 @@ their conditional storage read. When an opaque consumer or owned metadata preven
 that rewrite, dependent allocation predicates remain intact; unrelated boolean
 facts can still fold. Unknown metadata ownership conservatively preserves the
 control structure instead of inspecting extension objects or adding allocations.
+At emission, an exact effect-free boolean literal selects only its executable
+cache-read or original-producer arm. An unreachable cache arm is not printed
+after cleanup removes its owner. Nonliteral, malformed and extension-owned
+selectors retain the lazy conditional path.
+Fusion dependency checks include the selected cache-storage read as well as
+ordinary producer reads. An unresolved cache choice preserves separate stores
+instead of evaluating an inactive cache address for an alias predicate;
+historical load identity queries retain their existing contract.
 Shape compatibility compares representable integer literal dimensions by value,
 including equal weak and explicitly typed literals. Scalar expression identity
 and arithmetic promotion continue to distinguish their types.
@@ -1150,6 +1158,18 @@ Resource inspection lists each logical buffer's `physical_slot` and the
 `memory_lowering.scratch_slots` count. Source dot recipes have already become
 ordinary executable IR, so there is no separate empty matmul-plan catalog.
 Managers snapshot the registry; analyses and traces are local to a run.
+
+The late `cpu-plan-partition-proofs` pass records disjoint destination regions
+for fused register programs after scalar facts and loop motion have finished.
+It combines bounded signed integer aliases with lexical induction domains,
+checks actual offsets/strides against a dense private allocation, and proves
+separation on at least one root axis. Clipping on another axis does not erase
+a valid separation proof. Every lexical occurrence of a shared group must
+satisfy the certificate. Writes to allocation metadata, optional unvalidated
+operands, unknown effects, unsupported geometry and possible arithmetic overflow
+retain the existing alias guards and independent-store fallback. The prepared
+CPU verifier checks certificates against the final IR; C++ printing only looks
+up their group/view identities and does not run affine or induction analysis.
 
 ```python
 @T.passes.register_pass("my-analysis", before="fuse-reductions")
@@ -1796,6 +1816,13 @@ Profiling explicitly executes and mutates outputs. Compilation/preparation is
 outside timed samples; `mode="python"` includes binding/output allocation and
 `mode="native"` prebinds NumPy ABI arguments (Torch uses its native bridge).
 Both retain provider dispatch, and neither claims pure instruction timing.
+
+Native compiler regression benchmarks warm their compared callbacks in round-robin
+order for at least 100 ms after establishing CPU affinity, first-touch buffers and
+the grid thread budget. Results record the warmup duration and invocation rounds.
+This lets an idle powersave CPU reach its working performance state without
+changing the system governor. Calibration and timed samples follow the warmup;
+source, numerical and allocation checks remain outside those samples.
 Reports include frequency/governor/affinity without changing them. Memory
 instrumentation records DSL scratch allocation/release plus existing workspace
 sites; timeline instrumentation records kernel/grid-program regions. IDs are

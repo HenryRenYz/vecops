@@ -302,7 +302,15 @@ class MemoryEmitter:
 
     return f"vecops_dsl::overlap({span(source)}, {span(destination)})"
 
-  def register_disjoint_proven(self, a, b):
+  def register_disjoint_proven(self, a, b, *, group=None):
+    if group is not None:
+      from ..partitions import partition_key
+
+      proof = getattr(self.prepared, "partition_proofs", {}).get(partition_key(group, a, b))
+      if proof is not None and proof.group is group and (
+        proof.first is a and proof.second is b or proof.first is b and proof.second is a
+      ):
+        return True
     # Private scratch cannot alias a different live storage. This is the same
     # ownership fact used by snapshot(); do not add runtime span arithmetic
     # for independently allocated permutation inputs and outputs.

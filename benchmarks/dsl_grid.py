@@ -90,8 +90,9 @@ def worker(arguments):
   with vecops.cpu_thread_limit(len(cpus)):
     compiled(a, b, c, 1)
     check_outputs(a, b, c, operation)
-    (elapsed,) = measure((lambda: compiled.operator.native(a, b, c, repeat),), repeat, rounds)
-  return {"pid": os.getpid(), "cpus": sorted(cpus), "us": elapsed, "correct": True}
+    warmup = {}
+    (elapsed,) = measure((lambda: compiled.operator.native(a, b, c, repeat),), repeat, rounds, warmup_record=warmup)
+  return {"pid": os.getpid(), "cpus": sorted(cpus), "us": elapsed, "correct": True, "warmup": warmup}
 
 
 def main():
@@ -198,7 +199,8 @@ def main():
         for threads in args.threads:
           with vecops.cpu_thread_limit(threads):
             calls = tuple(lambda k=k, a=a, b=b, c=c: k.operator.native(a, b, c, args.repeat) for _, k in variants)
-            times = None if args.prepare_only else measure(calls, args.repeat, args.rounds)
+            warmup = {}
+            times = None if args.prepare_only else measure(calls, args.repeat, args.rounds, warmup_record=warmup)
             # Check every budget/provider path, outside the timing window.
             for _, compiled in variants:
               compiled.operator.native(a, b, c, 1)
@@ -212,6 +214,7 @@ def main():
               continue
             for (name, _), elapsed in zip(variants, times):
               row = {
+                "warmup": warmup,
                 "operation": operation,
                 "rows": rows,
                 "width": args.width,

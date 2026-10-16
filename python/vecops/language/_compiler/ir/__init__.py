@@ -31,6 +31,7 @@ from .kernel import (
   ViewRegion,
   While,
   binary,
+  boolean_literal,
   broadcast_shape,
   constant,
   literal,

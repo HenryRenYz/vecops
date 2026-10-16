@@ -7,6 +7,7 @@ butterfly, loop order or tile size, and never represents values as Vec arrays.
 """
 
 from .... import ir as I
+from ....analysis.effects import read_accesses
 from ....dtypes import ELEMENT_BYTES
 from ..capabilities import CPP_TYPES
 
@@ -137,17 +138,23 @@ class RegistersEmitter:
     plan = self.prepared.register_programs.get(id(group))
     if plan is None:
       return False
+    reads = read_accesses(
+      tuple(value for store in group.stores for value in
+            ((store.value, store.mask) if store.mask is not None else (store.value,))),
+      self.environment.operations,
+    )
+    if reads is None:
+      return False
     # As for ordinary stores, an empty prefix must not evaluate its inputs.
     self.opening(f"if (({self.scalar(group.stores[0].destination.shape[0])}) > 0)")
-    loads = {id(load): load for store in group.stores for load in I.loads_unique(store.value)}
     guards = []
     for index, store in enumerate(group.stores):
       for other in group.stores[index + 1:]:
-        if not self.register_disjoint_proven(store.destination, other.destination):
+        if not self.register_disjoint_proven(store.destination, other.destination, group=group):
           guards.append(f"!({self.overlap(store.destination, other.destination)})")
-      for load in loads.values():
-        if not self.register_disjoint_proven(load.data, store.destination):
-          guards.append(f"!({self.overlap(load.data, store.destination)})")
+      for read in reads:
+        if not self.register_disjoint_proven(read.view, store.destination, group=group):
+          guards.append(f"!({self.overlap(read.view, store.destination)})")
     conditional = bool(guards)
     self.opening("if (" + " && ".join(dict.fromkeys(guards)) + ") /* shared register outputs */"
                  if conditional else "/* shared register outputs: private disjoint storage */")

@@ -289,7 +289,7 @@ def stage_availability(old, new, *, packing_only, packing_expected, reference_on
 def compare(args):
   import vecops
   from dsl_matmul_source_catalog import result_metadata, source_arguments, validate_kernel_pair
-  from dsl_timing import reserve_cpu
+  from dsl_timing import reserve_cpu, warmup_native
 
   reference_only = args.baseline_index is None
   indexes = [json.loads(path.read_text()) for path in (args.baseline_index or args.candidate_index, args.candidate_index)]
@@ -341,6 +341,7 @@ def compare(args):
             partial(validate_complete_writes, calls[label], (values[2],), label=label),
             partial(validate_complete_writes, calls['cpp'], (values[2],), label='C++ reference'),
             values[2], expected, tolerance=tolerance)
+      warmup = warmup_native(calls.values())
       repeats = {}
       for label, path in paths.items():
         repeat = 1
@@ -367,7 +368,7 @@ def compare(args):
       stream.flush()
       medians = {label: statistics.median(samples[label]) for label in paths}
       row = dict(result_metadata(scenario), stage='packing' if args.packing_only else 'compute', median_ns=medians, speedup=None if reference_only else medians['baseline']/medians['candidate'],
-                 candidate_over_cpp=medians['candidate']/medians['cpp'], artifacts=paths)
+                 candidate_over_cpp=medians['candidate']/medians['cpp'], artifacts=paths, warmup=warmup)
       rows.append(row)
       print(scenario.execution_id, row['speedup'], row['candidate_over_cpp'], flush=True)
   (args.output_dir / 'results.json').write_text(json.dumps({'cpu': args.cpu, 'rounds': args.rounds,

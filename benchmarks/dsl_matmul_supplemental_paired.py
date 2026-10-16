@@ -94,6 +94,9 @@ def guard_main(arguments):
 
 
 def measure(calls, rounds):
+  from dsl_timing import warmup_native
+
+  warmup = warmup_native([lambda call=call: call(1) for call in calls.values()])
   repeats = {}
   for label, call in calls.items():
     repeat = 1
@@ -118,7 +121,8 @@ def measure(calls, rounds):
       elapsed = time.perf_counter_ns() - start
       samples[label].append(elapsed / repeats[label])
       raw.append({"round": round_, "label": label, "repeat": repeats[label], "elapsed_ns": elapsed})
-  return {"median_ns": {label: statistics.median(values) for label, values in samples.items()}, "samples": raw}
+  return {"median_ns": {label: statistics.median(values) for label, values in samples.items()}, "samples": raw,
+          "warmup": warmup}
 
 
 def source_admission(proof_path, root, candidate_root, candidate_suite):

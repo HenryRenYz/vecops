@@ -132,9 +132,11 @@ def main():
           lambda k=k, a=a, b=b, c=c, r=r: k.operator.native(a, b, c, r, args.repeat, **k._core.specialization_values)
           for k in variants
         )
-        times = measure(calls, args.repeat, args.rounds)
+        warmup = {}
+        times = measure(calls, args.repeat, args.rounds, warmup_record=warmup)
         row = {
           "kind": ("simd", "moments", "scan")[kind],
+          "warmup": warmup,
           "size": size,
           "dsl_us": times[0],
           "off_us": times[1],

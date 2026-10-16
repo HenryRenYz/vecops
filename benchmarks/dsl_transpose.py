@@ -18,6 +18,8 @@ import random
 import re
 import statistics
 import time
+
+from dsl_timing import warmup_native
 from pathlib import Path
 
 import numpy as np
@@ -156,11 +158,12 @@ def calls(kernels_, a, c, repeat):
   return tuple(lambda k=k: k.operator.native(a, c, repeat, **k._core.specialization_values) for k in kernels_)
 
 
-def measure(calls_, repeat, rounds):
+def measure(calls_, repeat, rounds, *, warmup_record=None):
   samples = [[] for _ in calls_]
   rng = random.Random(42)
-  for call in calls_:
-    call()
+  warmup = warmup_native(calls_)
+  if warmup_record is not None:
+    warmup_record.update(warmup)
   for _ in range(rounds):
     order = list(range(len(calls_)))
     rng.shuffle(order)

@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import vecops
 import vecops.language as T
-from dsl_timing import reserve_cpu
+from dsl_timing import reserve_cpu, warmup_native
 
 
 def declaration(width):
@@ -131,6 +131,7 @@ def main():
               ordinary._core.specialization_values,
             )
             invoke = ordinary.operator.native.invoke
+            warmup = warmup_native(lambda: invoke(call))
             repeat = 1
             while True:
               begin = time.perf_counter_ns()
@@ -146,7 +147,7 @@ def main():
               for _ in range(repeat):
                 invoke(call)
               samples.append((time.perf_counter_ns() - begin) / repeat)
-            record.update(median_ns=statistics.median(samples), samples_ns=samples, repeat=repeat)
+            record.update(median_ns=statistics.median(samples), samples_ns=samples, repeat=repeat, warmup=warmup)
             np.testing.assert_array_equal(c, (a + 1) * 2)
             np.testing.assert_array_equal(d, (a - 1) * 3)
           results.append(record)

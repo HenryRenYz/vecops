@@ -21,7 +21,7 @@ import dsl_compiler_optimizations as buffer_driver
 import numpy as np
 import vecops
 import vecops.language as T
-from dsl_timing import isolate_compilation, reserve_cpu
+from dsl_timing import isolate_compilation, reserve_cpu, warmup_native
 from vecops._identity import implementation_identity
 
 CASES = ("forward-congruence", "full-span", "reverse-range", "captured-full-span")
@@ -230,7 +230,7 @@ def main(argv=None):
           invoke = lambda k=compiled, a=a, c=c, d=d: k.operator.native(
             a, c, d, 1, args.repeat, **k._core.specialization_values
           )
-          invoke()
+          row["warmup"] = warmup_native(invoke)
           samples = []
           for _ in range(args.rounds):
             start = time.perf_counter_ns()

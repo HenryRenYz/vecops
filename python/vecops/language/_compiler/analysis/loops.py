@@ -12,8 +12,9 @@ from dataclasses import dataclass, fields, replace
 
 from .. import ir as I
 from ..ir.iteration import domain
-from ..ir.traversal import nodes, walk
+from ..ir.traversal import nodes, values, walk
 from ..operations import Trait
+from .effects import read_accesses
 
 
 @dataclass(frozen=True)
@@ -80,16 +81,24 @@ def effects(loop, catalog):
       return replace(value, **{f.name: resolve(getattr(value, f.name)) for f in fields(value)})
     return value
 
+  roots = list(values(loop.body))
+  for node in body_nodes:
+    if isinstance(node, (I.Store, I.IndexedStore)):
+      view = node.destination
+      roots.extend((*view.shape, *view.strides, view.offset))
+  reads = read_accesses(roots, catalog)
+  if reads is None:
+    result.opaque = True
+  else:
+    result.reads.extend(
+      Access(resolve(read.view), resolve(read.indices) if read.indices is not None else None, read.expression)
+      for read in reads
+    )
   for node in body_nodes:
     if isinstance(node, I.Expr):
       if catalog.has(node, Trait.REFERENCE):
         result.references.add(node.data)
-      if node.op == "load":
-        result.reads.append(Access(resolve(node.data), node=node))
-      elif node.op == "gather":
-        view = node.data[0] if isinstance(node.data, tuple) else node.data
-        result.reads.append(Access(resolve(view), resolve(node.args[0]), node))
-      elif catalog.get(node).effects not in {"none", "read"}:
+      if catalog.get(node).effects not in {"none", "read"}:
         result.opaque = True
     elif isinstance(node, I.Assign) and not node.declare:
       result.updates.add(node.target)

@@ -44,6 +44,7 @@ def main():
   import vecops
   import vecops.language as T
   from dsl_norm_catalog import Case, calls, catalog, metadata, validate
+  from dsl_timing import warmup_native
   from dsl_norm_library import library_kernel
 
   assert Path(vecops.__file__).resolve() == root / "python/vecops/__init__.py"
@@ -120,8 +121,7 @@ def main():
     # Preserve the original input family and the independent NumPy oracle.
     operands = validate(case, (pair[1], pair[0]))
     invocations = calls(pair, operands, max(1, min(512, 4_000_000 // math.prod(case.shape))))
-    for invoke in invocations:
-      invoke()
+    warmup = warmup_native(invocations)
     samples = [[], []]
     raw = []
     for round_ in range(args.rounds):
@@ -132,7 +132,8 @@ def main():
         samples[label].append(end - begin)
         raw.append({"round": round_, "label": label, "begin_ns": begin, "end_ns": end})
     medians = [statistics.median(s) for s in samples]
-    rows.append({"case": case.__dict__, "median_ns": medians, "new_over_old": medians[1] / medians[0], "raw": raw})
+    rows.append({"case": case.__dict__, "median_ns": medians, "new_over_old": medians[1] / medians[0], "raw": raw,
+                 "warmup": warmup})
     print(case.key, rows[-1]["new_over_old"], flush=True)
     # Both variants must still agree after all repeated invocations.
     invocations[0]()
