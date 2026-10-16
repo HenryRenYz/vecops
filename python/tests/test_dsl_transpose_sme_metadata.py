@@ -11,7 +11,12 @@ import numpy as np
 import pytest
 import vecops
 import vecops.language as T
-from dsl_test_utils import arm_cross_cxx_include_flags, assert_no_vec_mask_arrays, make_compiler
+from dsl_test_utils import (
+  arm_cross_cxx_include_flags,
+  assert_no_vec_mask_arrays,
+  make_compiler,
+  parameter_snapshot_name,
+)
 from vecops._arm_vector_state import VectorState
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
 from vecops.language._compiler.backends.cpu.capabilities import CPP_TYPES
@@ -105,7 +110,7 @@ def test_transpose_owner_snapshots_exact_geometry_before_za_loops(source, output
       storage = "A" if "source_m" in name else "C"
       descriptor = f"{storage}.stride(0)"
       if metadata:
-        descriptor = re.search(rf"const auto (\w+) = {storage}\.stride\(0\);", artifact.source)[1]
+        descriptor = parameter_snapshot_name(artifact.source, f"{storage}.stride(0)")
       assert value == descriptor
   origins = {name: value for name, value in declarations if "_base_" in name}
   assert len(origins) == 2
@@ -149,7 +154,7 @@ def test_batch_origins_include_offset_and_leading_coordinate_once():
   assert len(origins) == 2
   for name, value in origins:
     storage = "A" if "source" in name else "C"
-    stride = re.search(rf"const auto (\w+) = {storage}\.stride\(0\);", artifact.source)[1]
+    stride = parameter_snapshot_name(artifact.source, f"{storage}.stride(0)")
     assert "transpose_batch_" in value and stride in value
   loops = body[body.index("for (vecops::nint_t") :]
   assert "transpose_batch_" not in loops
