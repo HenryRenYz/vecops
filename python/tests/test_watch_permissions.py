@@ -39,7 +39,7 @@ def test_native_dnotify_budget_does_not_exhaust_process_descriptors(tmp_path):
 
 
 @pytest.mark.skipif(os.uname().sysname != "Linux", reason="Linux dnotify fallback")
-def test_loaded_extension_dnotify_budget_preserves_unwatched_content_hashes(tmp_path):
+def test_loaded_extension_dnotify_budget_preserves_content_reads(tmp_path):
   """Check the real Python/native boundary, including the hash fallback."""
   script = """
 import hashlib
@@ -61,9 +61,6 @@ from vecops import _C
 assert Path(_C.__file__).resolve() == Path(sys.argv[3]).resolve()
 
 root = Path(sys.argv[1])
-if watch._descriptor >= 0:
-    os.close(watch._descriptor)
-    watch._descriptor = -1
 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (min(soft, 64), hard))
 budget = min(128, min(soft, 64) // 8)
@@ -73,6 +70,7 @@ for index in range(200):
     directory.mkdir()
     source = directory / 'header.h'
     source.write_bytes(b'before')
+    _C.content_watch_directory(directory)
     assert watch.content_hash(source) == hashlib.sha256(b'before').hexdigest()
     source.write_bytes(b'after!')
     assert watch.content_hash(source) == hashlib.sha256(b'after!').hexdigest()
@@ -94,13 +92,6 @@ if not _C.content_watch_directory(root / '0'):
   assert result.returncode == 0, result.stdout + result.stderr
 
 
-def _clear_watch_caches():
-  with watch._lock:
-    watch._files.clear()
-    watch._trees.clear()
-    watch._watches.clear()
-
-
 def _identity_text(value):
   return repr(value)
 
@@ -113,7 +104,6 @@ def test_tree_scan_permission_is_explicit_and_not_memoized(tmp_path, monkeypatch
   readable = tmp_path / "readable.h"
   readable.write_text("visible before")
   real_scandir = os.scandir
-  _clear_watch_caches()
 
   def denied_scandir(path):
     if Path(path).absolute() == blocked.absolute():
@@ -146,7 +136,6 @@ def test_content_read_permission_is_explicit_and_not_memoized(tmp_path, monkeypa
   source = tmp_path / "source.h"
   source.write_text("before")
   real_open = Path.open
-  _clear_watch_caches()
 
   def denied_open(path, *args, **kwargs):
     if path.absolute() == source.absolute():
@@ -176,7 +165,6 @@ def test_content_metadata_permission_is_explicit_and_not_memoized(tmp_path, monk
   source.write_text("before")
   real_operation = getattr(Path, operation)
   blocked = source.parent if operation == "resolve" else source
-  _clear_watch_caches()
 
   def denied(path, *args, **kwargs):
     if path.absolute() == blocked.absolute():
@@ -186,7 +174,6 @@ def test_content_metadata_permission_is_explicit_and_not_memoized(tmp_path, monk
   monkeypatch.setattr(Path, operation, denied)
   failed = file_identity(source)
   assert failed == (str(source.absolute()), f"unreadable:{sentinel}:{errno.EACCES}")
-  assert not watch._files
 
   monkeypatch.setattr(Path, operation, real_operation)
   source.write_text("after!")
@@ -197,7 +184,6 @@ def test_tree_root_resolution_permission_is_explicit_and_not_memoized(tmp_path, 
   source = tmp_path / "source.h"
   source.write_text("before")
   real_resolve = Path.resolve
-  _clear_watch_caches()
 
   def denied(path, *args, **kwargs):
     if path.absolute() == tmp_path.absolute():
@@ -206,7 +192,6 @@ def test_tree_root_resolution_permission_is_explicit_and_not_memoized(tmp_path, 
 
   monkeypatch.setattr(Path, "resolve", denied)
   assert tree_identity(tmp_path) == ((str(tmp_path.absolute()), f"unreadable:resolve_root:{errno.EACCES}"),)
-  assert not watch._trees
 
   monkeypatch.setattr(Path, "resolve", real_resolve)
   assert dict(tree_identity(tmp_path))[str(source.absolute())] == hashlib.sha256(b"before").hexdigest()
@@ -227,7 +212,6 @@ def test_missing_and_unreadable_explicit_sources_have_distinct_identities(tmp_pa
       raise PermissionError(errno.EACCES, "permission denied", str(path))
     return real_open(path, *args, **kwargs)
 
-  _clear_watch_caches()
   monkeypatch.setattr(Path, "open", denied_open)
   denied_identity = file_identity(source)
   assert denied_identity[0] == str(source.absolute())
@@ -242,7 +226,6 @@ def test_tree_stat_permission_is_explicit_for_nested_system_header_dir(tmp_path,
   header = c_api / "public.h"
   header.write_text("before")
   real_scandir = os.scandir
-  _clear_watch_caches()
 
   class Entry:
     def __init__(self, path, *, directory=False, fail_stat=False):

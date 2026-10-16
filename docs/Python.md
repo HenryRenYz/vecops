@@ -1986,10 +1986,13 @@ manually incrementing `-v2/-v6` recipe labels is unnecessary. Explicit
 cover external macro-generated includes outside declared include directories.
 Custom opaque native/plugin state must provide `__vecops_cache_token__` or its
 identity is deliberately non-cacheable. Directory inventories also detect new
-shadowing headers. Linux mutation notifications accelerate content hashing;
-the dnotify fallback uses an unused process signal when inotify quota is full,
-and unavailable/overflowed watches fall back to rehashing, never size/mtime-only
-identity. Toolchain attestations are atomically published under writer locks.
+shadowing headers. Python identities read file contents and sorted directory
+inventories on every check. Filesystem notifications and size/mtime do not
+authorize content reuse: shared mappings, external hard links and ancestor
+rebinding can escape directory notifications. Cold compilation validates its
+inputs before and after the build. These reads do not provide an atomic
+snapshot of a concurrently changing filesystem. Toolchain attestations are
+atomically published under writer locks.
 
 Relative include paths and the include environment are anchored at the
 `Compiler` creation directory, including nonempty path lists' empty components
