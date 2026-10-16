@@ -8,11 +8,22 @@ strength of an effects='none' label alone. Unknown operations are barriers.
 """
 
 import re
+from dataclasses import fields
 
 from .. import ir as I
+from ..ir.iteration import AxisFold, AxisResult, IterationDomain, LoopSchedule, ReductionSpec
 from ..ir.traversal import nodes
 from ..operations import Trait
 from .facts import ValueFacts, type_range
+
+# Value descriptors own expression dependencies without evaluating statements.
+# Use exact classes: an extension subclass can add executable ownership. Other
+# Nodes (including Block, RowMap, state updates and hardware owners) remain opaque even
+# when every contained expression is individually pure.
+_VALUE_METADATA = frozenset((
+  I.ScalarType, I.TileType, I.VectorType, I.VectorTag, I.View, I.ViewRegion,
+  I.PackedView, I.DotOptions, I.TileState, AxisFold, AxisResult, IterationDomain, LoopSchedule, ReductionSpec,
+))
 
 
 class ValueEffects:
@@ -23,7 +34,52 @@ class ValueEffects:
     # effectful expression cannot inherit a recycled object's proof.
     self._discard = {}
     self._speculate = {}
+    self._owned = {}
+    self._metadata = {}
     self.facts = facts or ValueFacts()
+
+  def _metadata_edges(self, value):
+    """Immediate owned Expr dependencies, stopping at each expression.
+
+    Cache non-expression ownership too: shared View/type/container diamonds
+    must not be re-walked for every consumer. Strong subjects prevent id reuse;
+    a provisional unknown result makes ownership cycles conservatively unsafe.
+    None denotes opaque ownership, not an empty dependency list: flattening a
+    statement to its values would erase its write/control effects.
+    """
+    if isinstance(value, I.Expr):
+      return (value,)
+    if not isinstance(value, (I.Node, tuple, list, dict)):
+      return ()
+    identity = id(value)
+    if identity in self._metadata:
+      return self._metadata[identity][1]
+    self._metadata[identity] = value, None
+    if isinstance(value, I.Node):
+      if type(value) not in _VALUE_METADATA:
+        return None
+      items = (getattr(value, field.name) for field in fields(value))
+    elif isinstance(value, dict):
+      items = (item for pair in value.items() for item in pair)
+    else:
+      items = iter(value)
+    owned = {}
+    for item in items:
+      edges = self._metadata_edges(item)
+      if edges is None:
+        return None
+      owned.update((edge, None) for edge in edges)
+    result = tuple(owned)
+    self._metadata[identity] = value, result
+    return result
+
+  def owned_expressions(self, expression):
+    """Direct value dependencies, or None for opaque/cyclic metadata ownership."""
+    if expression not in self._owned:
+      kind = self._metadata_edges(expression.type)
+      data = self._metadata_edges(expression.data)
+      self._owned[expression] = None if kind is None or data is None else tuple(dict.fromkeys((*kind, *data)))
+    return self._owned[expression]
 
   def overflow_safe(self, expression):
     if expression.op not in {"add", "sub", "mul", "neg"} or not expression.type.dtype.startswith("int"):
@@ -50,17 +106,21 @@ class ValueEffects:
     if expression.op not in {"floordiv", "mod"} or len(expression.args) != 2:
       return False
     divisor = I.constant(expression.args[1])
+    limits = type_range(expression.type.dtype) if isinstance(expression.type, I.ScalarType) else None
     return (
       isinstance(expression.type, I.ScalarType)
       and "int" in expression.type.dtype
       and type(divisor) is int
-      and 0 < divisor <= (1 << 63) - 1
+      and limits is not None
+      and 0 < divisor <= min(limits.upper, (1 << 63) - 1)
     )
 
   def discardable(self, expression):
     """Whether dropping evaluation cannot remove an observable effect/trap."""
     if expression not in self._discard:
+      self._discard[expression] = False
       definition = self.catalog.get(expression)
+      owned = self.owned_expressions(expression)
       raw = (
         expression.op != "raw"
         or isinstance(expression.data, str)
@@ -71,20 +131,26 @@ class ValueEffects:
         and (not definition.may_trap or self.total_division(expression))
         and raw
         and not self.catalog.has(expression, Trait.STATE_REFERENCE)
+        and owned is not None
         and all(self.discardable(argument) for argument in expression.args)
+        and all(self.discardable(value) for value in owned)
       )
     return self._discard[expression]
 
   def speculatable(self, expression):
     """Whether a scalar integer/boolean expression can run on an empty path."""
     if expression not in self._speculate:
+      self._speculate[expression] = False
+      owned = self.owned_expressions(expression)
       self._speculate[expression] = (
         isinstance(expression.type, I.ScalarType)
         and (expression.type.dtype == "bool" or "int" in expression.type.dtype)
         and (self.catalog.get(expression).speculatable or self.total_division(expression))
         and self.discardable(expression)
         and self.overflow_safe(expression)
+        and owned is not None
         and all(self.speculatable(argument) for argument in expression.args)
+        and all(self.speculatable(value) for value in owned)
       )
     return self._speculate[expression]
 

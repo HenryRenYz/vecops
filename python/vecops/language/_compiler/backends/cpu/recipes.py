@@ -52,10 +52,10 @@ def expand_dot_recipes(ir, context):
     raise ValueError("cpu_gemv_k_unroll must be 1, 2 or 4")
 
   native_schedule = context.options.get("cpu_matmul_native_schedule", "default")
-  # Keep the automatic dispatch's cold vector recipe out of the native owner.
-  # Inlining it into a large packing/matmul owner can substantially increase
-  # register pressure even when that fallback is never selected at runtime.
-  outline_vector_fallback = context.options.get("cpu_outline_vector_fallback", True)
+  # SME keeps its large SIMD alternative separate from architectural owners.
+  # AMX uses an inline fallback: measured private boundaries regress common
+  # SIMD selections, including raw and physically packed operands.
+  outline_vector_fallback = context.options.get("cpu_outline_vector_fallback", target.isa == "sme")
   if type(outline_vector_fallback) is not bool:
     raise TypeError("cpu_outline_vector_fallback must be bool")
   if native_schedule not in {"default", "shared-owner", "prefetch", "stream-b", "paired-fringe"}:
@@ -736,13 +736,13 @@ def expand_dot_recipes(ir, context):
                     fallback_preamble.extend(preparation)
                   fallback_kwargs = {name: kwargs[name] for name in ("acc", "acc_dtype", "epilogue")}
                   fallback_kwargs.update(unroll=unroll, pipeline=pipeline, distance=distance, prefer_k=prefer_k)
-                  # Keep the measured GCC dynamic AMX owner unchanged: the
-                  # expanded grouped-dot fallback can regress its hot native
-                  # branch even when that fallback is not taken. Static
-                  # small/GEMV and explicit vector recipes retain it. On SME,
-                  # a wide producer converted to bytes also makes this cold
-                  # fallback prohibitively large for LLVM's inliner; retain
-                  # its ordinary vector contraction, not expanded grouped dot.
+                  # A dynamic grouped-dot fallback can regress GCC's AMX
+                  # owner even behind a private-call boundary. Keep its compact
+                  # vector contraction; static small/GEMV and explicit vector
+                  # recipes retain the DSL's typed grouped contraction.
+                  # On SME, a wide producer converted to bytes makes the
+                  # expanded fallback too large for LLVM's inliner; retain
+                  # its ordinary vector contraction.
                   fallback_kwargs["widening"] = not (
                     any(type(I.constant(size)) is not int for size in product.type.shape)
                     and (

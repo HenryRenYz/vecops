@@ -141,9 +141,9 @@ def test_native_outlined_fallback_preserves_tail_seed_epilogue_and_alias(native,
     np.testing.assert_array_equal(backing[m * n * 4 :], before[m * n * 4 :])
 
 
-@pytest.mark.parametrize("target", ["SME", "AVX512"])
-def test_default_outline_policy_isolates_the_cold_vector_recipe(target):
+@pytest.mark.parametrize("target,outlined", [("SME", True), ("AVX512", False)])
+def test_default_outline_policy_uses_the_measured_target_boundary(target, outlined):
   artifact = CPUBackend().lower(template().ir, (), target=target)
   calls = [node for node in nodes(artifact.kernel.body) if isinstance(node, I.ExitRegion) and node.outlined]
-  assert calls
+  assert bool(calls) is outlined
   assert all(not any(isinstance(node, I.HardwareRegion) for node in nodes(call.body)) for call in calls)

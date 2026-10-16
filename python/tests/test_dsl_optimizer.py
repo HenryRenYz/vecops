@@ -238,16 +238,197 @@ def test_default_pipeline_exposes_repeated_cleanup_and_explicit_empty_is_empty()
 
 @pytest.mark.parametrize("dtype", ["int8", "uint8", "int32", "int64"])
 def test_integer_range_analysis_does_not_assume_overflow_is_impossible(dtype):
-  from vecops.language._compiler.analysis.facts import IntegerFacts, ValueFacts, type_range
+  from vecops.language._compiler.analysis.facts import IntegerFacts, ValueFacts
 
-  limits = type_range(dtype)
   x = I.Expr(I.ScalarType(dtype), "raw", data="x")
   one = I.Expr(x.type, "literal", data=1)
   result = ValueFacts().infer(I.Expr(x.type, "add", (x, one)))
-  assert result == limits
+  assert result is None
   bounded = ValueFacts({("raw", "x"): IntegerFacts(0, 30, 2)})
   fact = bounded.infer(I.Expr(x.type, "add", (x, one)))
-  assert (fact.lower, fact.upper, fact.divisor, fact.residue) == (1, 31, 2, 1)
+  if dtype.startswith("uint"):
+    assert fact is None, "unsigned scalar promotion is deliberately unmodeled"
+  else:
+    assert (fact.lower, fact.upper, fact.divisor, fact.residue) == (1, 31, 2, 1)
+
+
+@pytest.mark.parametrize("payload", ["load", "trap", "unknown", "state"])
+def test_effects_include_immediate_owned_metadata_expressions(payload):
+  from vecops.language._compiler.operations.registry import OperationCatalog
+
+  definitions = dict(snapshot().definitions)
+  definitions["optimizer-owned"] = OpDef("optimizer-owned", "metadata", may_trap=False, speculatable=True)
+  catalog = OperationCatalog(definitions, "optimizer-owned-effects")
+  if payload == "load":
+    value = I.Expr(I.ScalarType("int64"), "load", data=view("A"))
+  elif payload == "trap":
+    value = I.Expr(I.ScalarType("int64"), "broadcast_dim", (I.literal(2), I.literal(3)))
+  elif payload == "state":
+    value = I.Expr(I.ScalarType("int64"), "state_ref", data="state")
+  else:
+    value = I.Expr(I.ScalarType("int64"), "optimizer-unknown")
+  wrapped = I.Expr(I.ScalarType("int64"), "optimizer-owned", data={"metadata": (value,)})
+  effects = ValueEffects(catalog)
+  assert not effects.discardable(wrapped)
+  assert not effects.speculatable(wrapped)
+  shaped = I.Expr(I.TileType("int64", (value,)), "fill", (I.literal(0),))
+  assert not effects.discardable(shaped), "type-owned evaluation must retain its effects too"
+
+
+@pytest.mark.parametrize("payload", ["store", "block", "nested-block", "control", "row-map", "unknown-node", "descriptor-subclass", "state-subclass"])
+def test_owned_statement_metadata_is_an_effect_barrier_for_dce(payload):
+  from dataclasses import dataclass
+
+  from vecops.language._compiler.passes.kernel.cleanup import dead_code_elimination
+
+  @dataclass(frozen=True)
+  class UnknownMetadata(I.Node):
+    value: I.Expr
+
+  @dataclass(frozen=True)
+  class ExtendedView(I.View):
+    body: object = None
+
+  @dataclass(frozen=True)
+  class ExtendedState(I.TileState):
+    body: object = None
+
+  store = I.Store(view(), I.literal(7))
+  data = {
+    "store": store,
+    "block": I.Block([store]),
+    "nested-block": {"program": (I.Block([store]),)},
+    "control": I.Control("break"),
+    "row-map": I.RowMap(I.literal(0), I.Block([store]), I.literal(7)),
+    "unknown-node": UnknownMetadata(I.literal(7)),
+    "descriptor-subclass": ExtendedView("C", "int64", (), (), I.literal(0), body=I.Block([store])),
+    "state-subclass": ExtendedState("carry", I.TileType("int64", (I.literal(4),)), body=I.Block([store])),
+  }[payload]
+  definition = OpDef("optimizer-owned-statement", "metadata", may_trap=False, speculatable=True)
+  register_operation(definition)
+  try:
+    # Internal extension metadata is legal IR; no existing builtin miscompile
+    # is asserted. The pure wrapper cannot hide an owned statement's effects.
+    wrapped = I.Expr(I.ScalarType("int64"), definition.name, data=data)
+    ir = verify_kernel(kernel([I.Assign("unused", wrapped)]))
+    ctx = context()
+    effects = ValueEffects(ctx.environment.operations)
+    result = dead_code_elimination(ir, ctx)
+    verify_kernel(result.ir)
+    assert ir.body.statements == [I.Assign("unused", wrapped)]
+    assert not result.changed
+    assert effects.owned_expressions(wrapped) is None
+    assert not effects.discardable(wrapped)
+    assert not effects.speculatable(wrapped)
+  finally:
+    unregister_operation(definition.name)
+
+
+@pytest.mark.parametrize("descriptor", [
+  "scalar", "tile", "vector", "tag", "view", "region", "packed", "dot", "tile-state",
+  "domain", "schedule", "reducer", "axis-fold", "axis-result",
+])
+def test_owned_value_descriptors_keep_precise_effect_dependencies(descriptor):
+  from vecops.language._compiler.ir.iteration import AxisFold, AxisResult, IterationDomain, LoopSchedule, ReductionSpec
+  from vecops.language._compiler.operations.registry import OperationCatalog
+
+  extent = I.literal(4)
+  fold = AxisFold((extent,), 0, ("sum",), 2)
+  data = {
+    "scalar": I.ScalarType("int64"),
+    "tile": I.TileType("int64", (extent,)),
+    "vector": I.VectorType("int64", (extent,)),
+    "tag": I.VectorTag(N=4),
+    "view": I.View("A", "int64", (extent,), (I.literal(1),), I.literal(0)),
+    "region": I.ViewRegion((extent,), (I.literal(1),), (I.literal(0),), (extent,), (1,), (0,), (False,)),
+    "packed": I.PackedView(view("A"), (extent,), "a", "dense"),
+    "dot": I.DotOptions(),
+    "tile-state": I.TileState("carry", I.TileType("int64", (extent,))),
+    "domain": IterationDomain((extent,)),
+    "schedule": LoopSchedule(),
+    "reducer": ReductionSpec("sum", "int64"),
+    "axis-fold": fold,
+    "axis-result": AxisResult(fold, 0),
+  }[descriptor]
+  definitions = dict(snapshot().definitions)
+  definitions["optimizer-value-descriptor"] = OpDef("optimizer-value-descriptor", "metadata", may_trap=False, speculatable=True)
+  catalog = OperationCatalog(definitions, "optimizer-value-descriptors")
+  wrapped = I.Expr(I.ScalarType("int64"), "optimizer-value-descriptor", data=data)
+  effects = ValueEffects(catalog)
+  assert effects.owned_expressions(wrapped) is not None
+  assert effects.discardable(wrapped)
+  assert effects.speculatable(wrapped)
+  # A dependency hidden by one of the allowed descriptor classes is still
+  # evaluated, and cannot disappear behind its otherwise pure container.
+  if descriptor in {"tile", "vector", "view", "region", "packed", "tile-state", "domain", "axis-fold", "axis-result"}:
+    object.__setattr__(extent, "op", "optimizer-unknown")
+    assert not ValueEffects(catalog).discardable(wrapped)
+    assert not ValueEffects(catalog).speculatable(wrapped)
+
+
+@pytest.mark.parametrize("shape_trap", [False, True])
+def test_tile_state_descriptor_preserves_state_read_and_shape_effects(shape_trap):
+  extent = I.Expr(I.ScalarType("int64"), "broadcast_dim", (I.literal(2), I.literal(3))) if shape_trap else I.literal(4)
+  typ = I.TileType("int64", (extent,))
+  state = I.TileState("carry", typ)
+  read = I.Expr(typ, "state_ref", data=state)
+  effects = ValueEffects(snapshot())
+  assert effects.owned_expressions(read) is not None, "a named descriptor is not an opaque executable body"
+  assert not effects.discardable(read)
+  assert not effects.speculatable(read)
+  if shape_trap:
+    # Even a pure scalar shell must retain a shape check owned by the state
+    # descriptor. Merely allowing its class does not mark all contents pure.
+    shell = I.Expr(I.ScalarType("int64"), "identity", (I.literal(7),), data=state)
+    assert not effects.discardable(shell)
+    assert not effects.speculatable(shell)
+
+
+@pytest.mark.parametrize("kind", ["data", "args", "container"])
+def test_owned_metadata_and_expression_cycles_are_conservatively_unsafe(kind):
+  value = I.Expr(I.ScalarType("int64"), "identity", (I.literal(1),))
+  if kind == "container":
+    data = []
+    data.append(data)
+    object.__setattr__(value, "data", data)
+  else:
+    object.__setattr__(value, kind, (value,) if kind == "args" else value)
+  effects = ValueEffects(snapshot())
+  assert not effects.discardable(value)
+  assert not effects.speculatable(value)
+
+
+def test_owned_metadata_diamonds_are_memoized_without_transitive_expression_scans(monkeypatch):
+  from vecops.language._compiler.operations.registry import OperationCatalog
+
+  definitions = dict(snapshot().definitions)
+  definitions["optimizer-owned"] = OpDef("optimizer-owned", "metadata", may_trap=False, speculatable=True)
+  catalog = OperationCatalog(definitions, "optimizer-owned-diamond")
+  value = I.literal(7)
+  metadata = (value,)
+  for _ in range(24):
+    metadata = (metadata, metadata)
+  for _ in range(24):
+    value = I.Expr(value.type, "optimizer-owned", data=(value, value, metadata))
+  visits = 0
+  original = ValueEffects._metadata_edges
+
+  def counted(self, subject):
+    nonlocal visits
+    visits += 1
+    assert visits < 1000, "shared ownership DAG was expanded as a tree"
+    return original(self, subject)
+
+  monkeypatch.setattr(ValueEffects, "_metadata_edges", counted)
+  effects = ValueEffects(catalog)
+  assert effects.discardable(value) and effects.speculatable(value)
+  assert visits < 300
+
+
+@pytest.mark.parametrize("divisor", [128, 256, 511])
+def test_narrow_typed_division_cannot_claim_positive_divisor_after_narrowing(divisor):
+  expression = I.Expr(I.ScalarType("int8"), "floordiv", (I.literal(-128, "int8"), I.literal(divisor)))
+  assert not ValueEffects(snapshot()).speculatable(expression)
 
 
 def test_validated_dynamic_extents_share_range_and_alignment_facts():

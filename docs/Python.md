@@ -1099,6 +1099,26 @@ folded only when their evaluation is independently safe to discard; an actual
 load or shape check cannot disappear merely because its numerical result is
 known. Positive constant integer division/remainder has a separately checked
 nontrapping contract. No floating reassociation is introduced.
+Sequential scalar assignments and proven native-loop induction ranges refine
+these facts within their lexical scope. Loop-carried writes, mutable bounds,
+unknown effects and control transfers invalidate affected facts; loop and
+branch facts do not escape their region. Rewrites retain historical read and
+state identities. Single-definition lexical `int64`/boolean locals can also
+retain a bounded symbolic equality when every operation is total and effect
+free at both definition and use. Versioned transitive dependencies invalidate
+recomputation after a write; a captured value's independent interval remains
+valid. Missing equality lookups participate in memo invalidation. Expansion
+shares expression DAGs and stops at 64 unique nodes or 64 version dependencies;
+over-budget definitions retain their original bindings. Branch-local definitions
+do not escape, and mutable values, hardware queries, reads, owned metadata,
+unmodeled integer promotions and floating values are excluded.
+Unknown `auto` locals do not inherit their nominal IR dtype's range: existing
+C++ integer promotions can make their executable type wider. Unsigned scalar
+rewrites and unmodeled signed/unsigned conversions are retained intact,
+including their original operand bindings. This preserves the existing C++
+behavior rather than introducing a new integer promotion policy. Shared effect
+proofs include expression-owned type/data dependencies; loads, traps and cycles
+in those dependencies cannot become discardable through a pure wrapper.
 
 The late `cpu-plan-storage` pass computes branch declaration scopes and
 conservative lexical live intervals before emission. `cpu_scratch_reuse`
@@ -2488,7 +2508,8 @@ retain the original modulo-aligned 2×2/2×4 dispatch and use the one-tile
 schedule for a nonaligned problem; the SME paired candidate additionally
 enables a multi-tile body on nonaligned problems.
 
-`cpu_outline_vector_fallback` is a boolean option, defaulting to `True`.
+`cpu_outline_vector_fallback` is a boolean option, defaulting to `False` on
+AMX targets and `True` on SME targets.
 It outlines only the ordinary vector fallback in automatic native dispatch;
 native resident and cache drivers retain their existing inlining. This can
 change native code size and adds a private call when the vector fallback is
@@ -2496,8 +2517,13 @@ selected. Isolating a large recipe can reduce compiler work and register pressur
 in packing/matmul owners. The fallback is not inherently cold: runtime shape
 dispatch may select it frequently, and a disabled instruction feature can make
 it the only active implementation. Profitability depends on the target, caller
-and selected path; the default does not promise a speedup for every kernel. This
-boundary does not change the fallback recipe or the native tile schedule.
+and selected path; the default does not promise a speedup for every kernel.
+Dynamic AMX fallbacks retain the compact contraction across either outline
+setting; expanding grouped dot can regress both inline and private owners.
+Static small products and explicit vector recipes retain the library's grouped
+BF16/byte contraction. The SME guard for wide producers converted to bytes
+remains independent of outlining. These choices do not alter the native tile
+schedule or generic FP32/FP64 reduction rules.
 An explicit boolean override remains available for target-specific experiments.
 
 `T.sve.iota`, `join_k_groups`, `broadcast_segment`, `row_pair`, and `mmla` expose pure

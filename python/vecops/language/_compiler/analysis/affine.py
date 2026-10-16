@@ -11,6 +11,7 @@ from dataclasses import fields, replace
 from functools import wraps
 
 from .. import ir as I
+from .facts import type_range
 
 # One proof query owns its identity/bounds caches. Strong references
 # retain both expressions and endpoints until that query exits, preventing id
@@ -359,9 +360,19 @@ def _canonical_integer(value, memo):
       try:
         # Reuse the operation registry's folds/promotion, including comparisons
         # and quotient/remainder after a captured length became a literal.
-        value = I.binary(value.op, *arguments)
-      except ZeroDivisionError:
-        # A dead branch is not permission to evaluate its undefined arithmetic.
+        candidate = I.binary(value.op, *arguments)
+        if value.op == "broadcast_dim":
+          limits = type_range(value.type.dtype)
+          if (candidate.op == "literal" and limits is not None and value.type.dtype != "bool"
+              and candidate.type.dtype == value.type.dtype and type(candidate.data) is int
+              and limits.lower <= candidate.data <= limits.upper):
+            candidate = I.Expr(value.type, "literal", data=candidate.data)
+          else:
+            candidate = value
+        value = candidate
+      except (ArithmeticError, ValueError):
+        # Keep invalid arithmetic/shape checks for their original path. A
+        # dead branch is not permission to raise its runtime failure early.
         pass
   if value.type.dtype == "bool":
     return value

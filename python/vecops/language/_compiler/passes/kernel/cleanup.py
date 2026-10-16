@@ -12,7 +12,7 @@ from dataclasses import fields, replace
 
 from ... import ir as I
 from ...analysis.effects import ValueEffects
-from ...analysis.facts import ValueFacts
+from ...analysis.facts import ValueFacts, type_range
 from ...ir.traversal import children, nodes
 from ...operations import Trait
 from ..manager import PassResult, register_pass
@@ -58,6 +58,16 @@ def simplify_ir(ir, context):
         candidate = I.binary(value.op, *args)
       except (ArithmeticError, ValueError, OverflowError):
         candidate = result
+      if value.op == "broadcast_dim" and candidate.op == "literal":
+        # A shape check has an explicit integer result type even if its
+        # dimensions originated as weak literals. Preserve that provenance;
+        # never use this rule to narrow a fold or to alter floating promotion.
+        limits = type_range(result.type.dtype) if isinstance(result.type, I.ScalarType) else None
+        if (limits is not None and result.type.dtype != "bool" and candidate.type.dtype == result.type.dtype
+            and type(candidate.data) is int and limits.lower <= candidate.data <= limits.upper):
+          candidate = I.Expr(result.type, "literal", data=candidate.data)
+        else:
+          candidate = result
       if candidate.type == result.type and (candidate.op != result.op or candidate.op == "literal"):
         # Constructor identities can equate two structurally matching reads.
         # Captures have value/version identity: dropping a distinct read or

@@ -5,6 +5,19 @@
 
 这套固定清单来自本地 x86 与 ARM 920f-4 的完整已通过目录，用于后续 DSL、编译器和 C++ 后端调整。主目录是 x86 2,622、ARM 3,856 个**执行配置**，包括 M/N/K、dtype、输入/输出 pipeline、packing、Const/Dynamic、batch、family/policy；不是数千个独立 M/N/K。加上独立 packing、WeightReuse 和 Stateful Legacy 后，可比较注册分别为 3,241 / 4,555。主目录 packing 阶段是附加测量，不重复计作 shape；每平台 Prepared 的 5 个 API 缺口与默认关闭的 ARM MMLA 实验单列。
 
+## 循环优化回归集
+
+`dsl_loop_facts.py` covers forward-loop congruences, complete-panel bounds and
+reverse-loop ranges independently of matrix scheduling. Its separate build and
+time phases use the fixed-buffer protocol shared with
+`dsl_compiler_optimizations.py`; both driver hashes participate in artifact
+identity. The default twelve configurations include a separate captured-panel case
+(`end = min(column + 16, Width); span = end - column`) for symbolic scalar
+relations. They validate both modes for row counts
+0, 1, 3, 4, 5 and 33, poisoning outputs and checking input/padding bytes before
+timing. Timing reports wall nanoseconds per repeat and verifies outputs again.
+Compare baseline and candidate within the same CPU-frequency epoch.
+
 ## 固定档位
 
 所有档位逐级包含：`smoke ⊂ standard ⊂ extended ⊂ full`。同一架构上复测必须沿用相同版本的清单，不要每次按候选结果重新选“好看”的样例。两平台按各自合法目录选择，不能混用清单。

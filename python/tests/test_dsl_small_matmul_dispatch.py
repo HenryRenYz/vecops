@@ -83,7 +83,8 @@ def test_empty_and_long_reduction_keep_existing_wrapper(monkeypatch, m, n, k):
   "target,tiled,static_m",
   (("AVX512", False, None), ("AVX512", True, None), ("AVX512", False, 32), ("SME", False, None)),
 )
-def test_unknown_spatial_amx_owner_retains_measured_vector_fallback(monkeypatch, target, tiled, static_m):
+@pytest.mark.parametrize("outlined", (False, True))
+def test_unknown_spatial_amx_keeps_compact_fallback_with_either_outline(monkeypatch, target, tiled, static_m, outlined):
   choices = []
   original = recipes.expand_helper
 
@@ -94,9 +95,12 @@ def test_unknown_spatial_amx_owner_retains_measured_vector_fallback(monkeypatch,
 
   monkeypatch.setattr(recipes, "expand_helper", record)
   kernel = template(m=T.dynamic(lower=1) if static_m is None else static_m, n=T.dynamic(lower=1), tiled=tiled)
-  artifact = CPUBackend().lower(kernel.ir, (), target=target)
-  assert choices == [target == "SME", target == "SME"]
-  assert ("vecops::vec::widening_dot" in artifact.source) == (target == "SME")
+  artifact = CPUBackend().lower(
+    kernel.ir, (), target=target, options={"cpu_outline_vector_fallback": outlined}
+  )
+  grouped = target == "SME"
+  assert choices == [grouped, grouped]
+  assert ("vecops::vec::widening_dot" in artifact.source) == grouped
 
 
 def test_explicit_dynamic_vector_keeps_grouped_dot(monkeypatch):
@@ -108,7 +112,8 @@ def test_explicit_dynamic_vector_keeps_grouped_dot(monkeypatch):
   assert "vecops::vec::widening_dot" in artifact.source
 
 
-def test_dynamic_sme_byte_conversion_uses_compact_fallback(monkeypatch):
+@pytest.mark.parametrize("outlined", (False, True))
+def test_dynamic_sme_byte_conversion_uses_compact_fallback(monkeypatch, outlined):
   choices = []
   original = recipes.expand_helper
 
@@ -125,5 +130,5 @@ def test_dynamic_sme_byte_conversion_uses_compact_fallback(monkeypatch):
              C: T.Tensor((m, n), dtype="int32", access="output")):
     T.dot((T.cast(T.load(A) * 1.25 + 3, "uint8"), B), C)
 
-  CPUBackend().lower(kernel.ir, (), target="SME")
+  CPUBackend().lower(kernel.ir, (), target="SME", options={"cpu_outline_vector_fallback": outlined})
   assert choices == [False, False]

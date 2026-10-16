@@ -109,6 +109,19 @@ _BINARY_FOLDS = {
   "shl": operator.lshift,
   "shr": operator.rshift,
 }
+
+
+def _broadcast_dim(a, b):
+  """Fold integer dimensions with the runtime helper's compatibility rules."""
+  if type(a) is not int or type(b) is not int:
+    raise ValueError("broadcast dimensions must be integers")
+  if a == 1:
+    return b
+  if b == 1 or a == b:
+    return a
+  raise ValueError("incompatible DSL broadcast extents")
+
+
 for name in (
   "add",
   "sub",
@@ -162,7 +175,10 @@ define("frozen", "reference", T.REFERENCE | T.RUNTIME_SHAPE | T.UNSTABLE_EXTENT)
 define("raw symbol", "reference", T.RUNTIME_SHAPE)
 define("literal fill", "structural", ELEMENTWISE)
 define("arange", "index", T.ELEMENTWISE | T.CSE)
-define("packing_size checked_shape broadcast_dim", "shape", T.CSE)
+define("packing_size checked_shape", "shape", T.CSE)
+# A successful literal fold proves only that invocation valid. Runtime and
+# incompatible literal checks remain trapping, nonspeculatable operations.
+define("broadcast_dim", "shape", T.CSE, arity=2, fold=_broadcast_dim, version="2")
 define("packing_offset", "shape", T.CSE)
 define("_packing_offset", "metadata", T.NONE)
 define("lanes", "shape", T.CSE | T.POSITIVE_EXTENT)
