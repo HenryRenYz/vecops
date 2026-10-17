@@ -370,8 +370,8 @@ int main(int argc, char** argv) {
 
   vecops::compiler::KernelCompilerConfig compiler_config;
   compiler_config.sdk = {VECOPS_SOURCE_ROOT, vecops::compiler::SdkLayout::SourceTree};
-  compiler_config.toolchain.c_compiler = fs::path("/usr/bin/gcc");
-  compiler_config.toolchain.cxx_compiler = fs::path("/usr/bin/g++");
+  compiler_config.toolchain.c_compiler = fs::path(VECOPS_TEST_C_COMPILER);
+  compiler_config.toolchain.cxx_compiler = fs::path(VECOPS_TEST_CXX_COMPILER);
   compiler_config.toolchain.parallel_jobs = 2;
   compiler_config.work_directory = work_directory / "builds";
   compiler_config.target_arch = "Scalar";

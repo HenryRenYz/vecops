@@ -31,6 +31,8 @@ if(TARGET vecops::compiler)
     add_executable(VecopsRuntimeTest runtime/RuntimeTest.cpp)
     target_compile_features(VecopsRuntimeTest PRIVATE cxx_std_20)
     target_compile_definitions(VecopsRuntimeTest PRIVATE
+        "VECOPS_TEST_C_COMPILER=\"${CMAKE_C_COMPILER}\""
+        "VECOPS_TEST_CXX_COMPILER=\"${CMAKE_CXX_COMPILER}\""
         "VECOPS_TEST_KERNEL=\"${VECOPS_SOURCE_DIR}/tests/runtime/TestKernel.cpp\""
         "VECOPS_SOURCE_ROOT=\"${VECOPS_SOURCE_DIR}\""
         "VECOPS_WORKSPACE_CONTEXT_FIXTURE=\"$<TARGET_FILE:VecopsWorkspaceContextFixture>\"")
