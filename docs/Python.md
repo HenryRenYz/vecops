@@ -2727,3 +2727,19 @@ two windows of one storage must match the two distinct guard roles. Only
 immutable ABI metadata and scalar definitions with immutable dependencies can
 be equated through captures. Mutable or unknown coordinates, different origins
 and unproved spans retain conservative overlap checks and snapshot ownership.
+
+### Metadata analysis cost
+
+Integer definition expansion preserves untouched expression identities and
+shares rewritten argument DAGs within one query. Its cache includes the set
+of excluded definitions, retains its expression inputs, and expires before
+returning; definitions and branch facts never carry across queries. Shape and
+provenance payloads keep their existing substitution rules. Affine membership
+walks owned metadata only when a payload can contain IR nodes.
+
+`benchmarks/dsl_compile_latency.py` measures fixed matrix-catalog groups through
+public `T.compile` and `generated_source`, without requesting native kernel
+builds or execution. It reports wall and process CPU time, source hashes,
+compiler input hashes, and CPU frequency policy. Imports, template construction
+and compiler policy initialization are outside each sample. Repeats must emit
+identical C++; compare snapshots using the same plan, CPU and frequency epoch.

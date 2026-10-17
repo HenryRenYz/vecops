@@ -86,9 +86,29 @@ def positive_extent(value, catalog, names=frozenset()):
 
 
 def expand_definitions(value, definitions, seen=frozenset()):
+  """Expand argument-edge definitions without copying untouched metadata.
+
+  Preserve existing reader/capture identities. A query-local memo retains the
+  original and result together and distinguishes excluded definition sets;
+  shared DAG edges reuse one rewritten expression without leaking scope facts.
+  Shape/provenance data remains opaque, as in the original substitution.
+  """
+  if not definitions:
+    return value
+  return _expand_definitions(value, definitions, frozenset(seen), {})
+
+
+def _expand_definitions(value, definitions, seen, memo):
+  key = id(value), seen
+  if key in memo:
+    return memo[key][1]
   if value.op in {"local", "frozen"} and value.data in definitions and value.data not in seen:
-    return expand_definitions(definitions[value.data], definitions, seen | {value.data})
-  return replace(value, args=tuple(expand_definitions(a, definitions, seen) for a in value.args))
+    result = _expand_definitions(definitions[value.data], definitions, seen | {value.data}, memo)
+  else:
+    arguments = tuple(_expand_definitions(a, definitions, seen, memo) for a in value.args)
+    result = value if all(a is b for a, b in zip(arguments, value.args)) else replace(value, args=arguments)
+  memo[key] = value, result
+  return result
 
 
 def affine(value, variables, definitions, seen=frozenset()):
@@ -154,7 +174,8 @@ def affine_contains(value, variables, definitions, seen=frozenset()):
       pending.append(definitions[current.data])
     else:
       pending.extend(current.args)
-      pending.extend(node for node in nodes(current.data, data_seen) if isinstance(node, I.Expr))
+      if isinstance(current.data, (I.Node, tuple, list)):
+        pending.extend(node for node in nodes(current.data, data_seen) if isinstance(node, I.Expr))
   return False
 
 
