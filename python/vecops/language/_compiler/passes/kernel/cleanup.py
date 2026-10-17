@@ -63,8 +63,13 @@ def simplify_ir(ir, context):
         # dimensions originated as weak literals. Preserve that provenance;
         # never use this rule to narrow a fold or to alter floating promotion.
         limits = type_range(result.type.dtype) if isinstance(result.type, I.ScalarType) else None
-        if (limits is not None and result.type.dtype != "bool" and candidate.type.dtype == result.type.dtype
-            and type(candidate.data) is int and limits.lower <= candidate.data <= limits.upper):
+        if (
+          limits is not None
+          and result.type.dtype != "bool"
+          and candidate.type.dtype == result.type.dtype
+          and type(candidate.data) is int
+          and limits.lower <= candidate.data <= limits.upper
+        ):
           candidate = I.Expr(result.type, "literal", data=candidate.data)
         else:
           candidate = result

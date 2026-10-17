@@ -1087,7 +1087,14 @@ retagged like coordinate-independent elementwise arithmetic.
 Private dead-store elimination requires an exact adjacent overwrite, harmless
 initial evaluation/address metadata and no observation of the old private
 contents. Public stores, masks, captures, fences and unknown effects retain
-their ordering. CSE treats mutable scalar versions and induction variables as
+their ordering. `forward-private-stores` additionally removes an adjacent,
+single-consumer private store/load round trip when its complete dense tile,
+element type and pointwise evaluation are identical. The replacement retains
+the original input read objects and therefore their normal output-alias
+protection. Conversion, masks, earlier historical captures, metadata uses,
+other consumers and intervening control/effects prevent forwarding.
+`private_store_forwarding=False` disables this cleanup.
+CSE treats mutable scalar versions and induction variables as
 identity-sensitive dependencies, in addition to historical loads/tile state.
 
 Representation verifiers run at kernel, vector and prepared-CPU boundaries.

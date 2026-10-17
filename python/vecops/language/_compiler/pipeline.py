@@ -12,6 +12,7 @@ _builtins_loaded = False
 _BUILTIN_MODULES = (
   "passes.kernel.canonicalize",
   "passes.kernel.cleanup",
+  "passes.kernel.forwarding",
   "passes.kernel.facts",
   "passes.kernel.motion",
   "passes.kernel.regions",
