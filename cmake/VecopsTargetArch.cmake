@@ -160,8 +160,10 @@ function(_vecops_scalable_sink_compatibility TARGET_NAME MARCH)
         file(WRITE "${_DIRECTORY}/probe.cpp" "#include <arm_sve.h>\n#if defined(__ARM_FEATURE_SVE)\nvoid repro(bool cond, char* p) {\n if (cond) *reinterpret_cast<svint16_t*>(p) = svdup_s16(0);\n else *reinterpret_cast<svint16_t*>(p + 320) = svdup_s16(0);\n}\n#endif\n")
         separate_arguments(_FLAGS NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
         separate_arguments(_ARG1 NATIVE_COMMAND "${CMAKE_CXX_COMPILER_ARG1}")
+        # An affected compiler is expected to crash here. Retain its stderr
+        # attestation without leaving a preprocessed crash reproducer per build.
         set(_COMMAND "${CMAKE_CXX_COMPILER}" ${_ARG1} ${_FLAGS}
-            -O3 "-march=${MARCH}" -msve-vector-bits=scalable
+            -fno-crash-diagnostics -O3 "-march=${MARCH}" -msve-vector-bits=scalable
             -c "${_DIRECTORY}/probe.cpp" -o "${_DIRECTORY}/probe.o")
         execute_process(COMMAND ${_COMMAND} RESULT_VARIABLE _BASE_RESULT
             OUTPUT_VARIABLE _BASE_STDOUT ERROR_VARIABLE _BASE_STDERR TIMEOUT 15)

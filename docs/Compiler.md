@@ -321,3 +321,7 @@ Other optimization passes and `-O3` remain enabled. The probe covers both
 source C++ and generated DSL kernels; its bounded execution, compiler identity,
 result and selected flag are retained for build/cache attribution. CMake
 applies the same test for its ARM target configuration.
+Its Clang probe suppresses automatic crash-reproducer files while retaining
+the diagnostic in the attestation; this avoids accumulating preprocessed
+sources across isolated builds. Suppression applies only to the probe, not
+to kernel compilation.
