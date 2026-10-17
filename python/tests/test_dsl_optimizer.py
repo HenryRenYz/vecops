@@ -89,6 +89,48 @@ def test_groups_freeze_callbacks_and_require_matching_stage():
       P.unregister_pass("optimizer-test-snapshot")
 
 
+def test_nested_stage_groups_preserve_analyses_inside_their_scope():
+  P = T.passes
+  computed = []
+
+  @P.register_pass("optimizer-test-parent-schema", stage="optimizer-parent")
+  @P.register_pass("optimizer-test-child-schema", stage="optimizer-child")
+  def callback(value, ctx):
+    def schema(ir):
+      computed.append(ctx.stage)
+      return tuple(sorted(ir))
+
+    assert ctx.analysis("schema", schema, value) == ("body",)
+    value["body"].append(ctx.stage)
+    # Appending statements preserves the mapping's schema.
+    return P.PassResult(value, preserved=("schema",))
+
+  try:
+    manager = P.PassManager(
+      [
+        "optimizer-test-parent-schema",
+        P.PassGroup(
+          "child",
+          (
+            "optimizer-test-child-schema",
+            P.PassGroup("nested", ("optimizer-test-child-schema",)),
+            "optimizer-test-child-schema",
+          ),
+          stage="optimizer-child",
+        ),
+        "optimizer-test-parent-schema",
+      ],
+      stage="optimizer-parent",
+    )
+    assert manager.run({"body": []})["body"] == [
+      "optimizer-parent", "optimizer-child", "optimizer-child", "optimizer-child", "optimizer-parent"
+    ]
+    assert computed == ["optimizer-parent", "optimizer-child", "optimizer-parent"]
+  finally:
+    P.unregister_pass("optimizer-test-parent-schema")
+    P.unregister_pass("optimizer-test-child-schema")
+
+
 def test_cleanup_prunes_dead_arms_without_evaluating_invalid_arithmetic():
   from vecops.language._compiler.passes.kernel.cleanup import simplify_ir
 

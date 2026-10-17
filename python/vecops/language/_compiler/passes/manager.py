@@ -110,8 +110,9 @@ _lock = threading.RLock()
 def register_pass(name, *, stage="kernel", before=(), after=()):
   """Register a named pass; ordering constraints are checked by PassManager.
 
-  The built-in stages are kernel, vector and cpu-memory. A custom pass may use another
-  stage and an explicitly selected manager; duplicate names are errors.
+  Built-in stages include kernel, kernel-cleanup, kernel-loop, vector and
+  cpu-memory. A custom pass may use another stage and an explicitly selected
+  manager; duplicate names are errors.
   """
   if not isinstance(name, str) or not name:
     raise ValueError("compiler pass name must be a nonempty string")
@@ -230,15 +231,24 @@ class PassManager:
     context = PassContext(self.stage, dict(self.options))
     session = self.options.get("_debug_session")
 
-    def run_steps(steps, value, stage, path=()):
+    def run_steps(steps, value, path=()):
       changed = False
       for step in steps:
         if isinstance(step, _Group):
-          for iteration in range(step.max_iterations):
-            value, round_changed = run_steps(step.steps, value, step.stage, (*path, (step.name, iteration)))
-            changed |= round_changed
-            if not round_changed:
-              break
+          previous_stage = context.stage
+          if previous_stage != step.stage:
+            context.analyses.clear()
+          context.stage = step.stage
+          try:
+            for iteration in range(step.max_iterations):
+              value, round_changed = run_steps(step.steps, value, (*path, (step.name, iteration)))
+              changed |= round_changed
+              if not round_changed:
+                break
+          finally:
+            if previous_stage != step.stage:
+              context.analyses.clear()
+            context.stage = previous_stage
           continue
         spec = step.spec
         previous_options, previous_stage = context.options, context.stage
@@ -278,7 +288,7 @@ class PassManager:
           session.passes[-1].update(invocation=step.label, groups=path, reported_changed=pass_changed)
       return value, changed
 
-    ir, _ = run_steps(self.steps, ir, self.stage)
+    ir, _ = run_steps(self.steps, ir)
     if hasattr(ir, "pass_trace"):
       ir.pass_trace.extend(context.trace)
     return ir

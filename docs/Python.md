@@ -1072,6 +1072,9 @@ can repeat it to a bounded fixed point. Every callback must report
 `PassResult(..., changed=False)` for a round to converge; legacy callbacks are
 conservatively treated as changed. Registry implementations remain uniquely
 named and every nested callback is snapshotted before compilation begins.
+Analyses declared preserved remain cached across callbacks and nested groups
+within the same stage. Entering or leaving a different stage clears the cache;
+per-invocation option overrides also isolate their analyses.
 
 The default CPU pipeline runs reusable cleanup after normalization, source
 recipe expansion, loop optimization, serial unrolling and software-pipeline
