@@ -1,3 +1,9 @@
 {
-    "cmake.useFolderPropertyInBuildTargetDropdown": true
+    "cmake.useFolderPropertyInBuildTargetDropdown": true,
+    "files.watcherExclude": {
+        "build*/**": true,
+        "cmake-build*/**": true,
+        "benchmarks/results/**": true,
+        "**/__pycache__/**": true
+    }
 }
