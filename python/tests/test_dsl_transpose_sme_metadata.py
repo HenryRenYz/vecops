@@ -182,8 +182,15 @@ def test_dynamic_pitch_unroll_hint_is_opt_in_and_does_not_change_constant_pitche
   plain = lower(transpose_template()).source
   hinted = lower(transpose_template(), dynamic_unroll=True).source
   assert "#pragma clang loop unroll_count(2)" not in plain
-  assert hinted.count("#pragma clang loop unroll_count(2)") == 2
-  assert hinted.count("#pragma GCC unroll 2") == 2
+  # Snapshot/alias alternatives each own an input and an output slice loop.
+  owners = list(re.finditer(r"const vecops::nint_t dsl_c_transpose_extent_m_", hinted))
+  assert owners
+  for owner in owners:
+    body = sme_body(hinted[owner.start() :])
+    assert body.count("#pragma clang loop unroll_count(2)") == 2
+    assert body.count("#pragma GCC unroll 2") == 2
+  assert hinted.count("#pragma clang loop unroll_count(2)") == 2 * len(owners)
+  assert hinted.count("#pragma GCC unroll 2") == 2 * len(owners)
 
   @T.template
   def constant(A: T.Tensor((17, 19), dtype="float64"), C: T.Tensor((19, 17), dtype="float64", access="output")):
