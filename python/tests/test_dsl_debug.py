@@ -102,7 +102,15 @@ def test_memory_lifetimes_and_interpreter(tmp_path):
     cache_dir=tmp_path / "cache",
     build_dir=tmp_path / "build",
   )
-  kernel = T.compile(scratch_kernel, out_idx=-1, compiler=compiler, debug=T.DebugOptions(memory=True, timeline=True))
+  # Keep a real scratch owner: default private-store forwarding can eliminate
+  # this round trip, in which case a zero instrumented peak is correct.
+  kernel = T.compile(
+    scratch_kernel,
+    out_idx=-1,
+    compiler=compiler,
+    pass_options={"private_store_forwarding": False},
+    debug=T.DebugOptions(memory=True, timeline=True),
+  )
   a = np.arange(31, dtype=np.float32)
   np.testing.assert_array_equal(kernel(a), (a + 1) * 2)
   np.testing.assert_array_equal(kernel.interpret(a), (a + 1) * 2)
