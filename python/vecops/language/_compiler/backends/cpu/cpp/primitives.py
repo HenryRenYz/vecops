@@ -55,8 +55,8 @@ class PrimitivesEmitter:
 
   def widening_dot_vector(self, value, tag, own_coords, active):
     # The operation changes lane geometry: each output consumes a complete
-    # byte-span group, with absent source lanes contributing zero. Disable
-    # the consumer's full-vector proof while loading the final source group.
+    # byte-span group, with absent source lanes contributing zero. Retain
+    # a full-vector proof only when each output has a complete source group.
     group = value.data
     source_coords = (f"(({own_coords[0]}) * {group})",)
     previous_full = getattr(self, "full_vector", False)
@@ -64,6 +64,13 @@ class PrimitivesEmitter:
     try:
       self.full_vector = False
       for source in value.args:
+        source_extent = I.constant(source.type.shape[0])
+        # The typed operation has ceildiv(K, group) output elements.
+        # With K divisible by group, a complete output traversal cannot
+        # reach a partial source group. Do not require ceildiv to have
+        # been folded to a literal in the scalar metadata IR.
+        full_source = previous_full and type(source_extent) is int and source_extent % group == 0
+        self.full_vector = full_source
         source_tag = f"vecops::vec::ViewAs<{CPP_TYPES[source.type.dtype]}, {tag}>"
         self.tag_dtypes[source_tag] = source.type.dtype
         if tag in self.tag_geometry:
@@ -97,6 +104,10 @@ class PrimitivesEmitter:
           operand = self.vector(source, source_tag, source.type.shape, source_coords, count, 0)
         # A transformed producer can turn masked-load zeros into nonzeros.
         # Sanitize its final value, rather than just the underlying load.
+        if full_source:
+          operands.append(operand)
+          tags.append(source_tag)
+          continue
         sanitized = self.unique("dot_input")
         self.line(
           f"auto {sanitized} = vecops::vec::blend({source_tag}{{}}, vecops::vec::zeros({source_tag}{{}}), vecops::vec::mwhilelt({source_tag}{{}}, 0, {count}), {operand});"

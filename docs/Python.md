@@ -718,6 +718,10 @@ selected native widening-dot instruction's rounding semantics; it need not
 match a separately rounded FP32 multiply/reduction bit for bit. The CPU
 compiler emits the public typed `vec::widening_dot` primitive, allowing the
 C++ ISA backend to select BF16 dot/VNNI instructions or its portable fallback.
+For a complete output vector with a constant input length divisible by the
+group size, input evaluation retains the full-vector proof and omits redundant
+load masks and zero blends. Partial groups still sanitize the final transformed
+producer value before the dot instruction.
 
 K-contiguous BF16 and byte inner-product leaves use `T.widening_dot` followed
 by the ordinary DSL reduction. Automatic x86 AMX owners with unresolved

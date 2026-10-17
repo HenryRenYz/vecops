@@ -39,6 +39,47 @@ def test_grouped_dot_codegen_uses_public_typed_primitive():
     assert_no_vec_mask_arrays(artifact.source)
 
 
+@pytest.mark.parametrize(
+  "memory_dtype,k",
+  [("float32", k) for k in (0, 1, 63, 64, 65, 127, 128, 129)]
+  + [("int8", k) for k in (127, 128, 255, 256, 257)],
+)
+def test_constant_grouped_dot_transformed_full_and_partial_groups(memory_dtype, k, tmp_path):
+  """A full output vector may still end in an incomplete source group."""
+  floating = memory_dtype == "float32"
+  narrow_dtype, wide_dtype = ("bfloat16", "float32") if floating else ("int8", "int32")
+  result_dtype = wide_dtype
+  group = 2 if floating else 4
+
+  @T.template
+  def kernel(
+    A: T.Tensor((k,), dtype=memory_dtype),
+    B: T.Tensor((k,), dtype=memory_dtype),
+    C: T.Tensor(((k + group - 1) // group,), dtype=result_dtype, access="output"),
+  ):
+    a = T.cast(T.cast(T.load(A), wide_dtype) + 1, narrow_dtype)
+    b = T.cast(T.cast(T.load(B), wide_dtype) + 2, narrow_dtype)
+    T.store(C, T.widening_dot(a, b, dtype=result_dtype))
+
+  compiler = make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(kernel, compiler=compiler)
+  for poison in ((np.nan, 1e20) if floating else (-128, 127)):
+    backing_a = np.full(k + 32, poison, dtype=memory_dtype)
+    backing_b = backing_a.copy()
+    a, b = backing_a[16 : 16 + k], backing_b[16 : 16 + k]
+    a[:] = np.arange(k) % 7 / 16 if floating else np.arange(k) % 17 - 8
+    b[:] = np.arange(k) % 11 / 16 if floating else np.arange(k) % 23 - 11
+    aa, bb = a.astype(wide_dtype) + 1, b.astype(wide_dtype) + 2
+    if floating:
+      bf16 = pytest.importorskip("ml_dtypes").bfloat16
+      aa, bb = aa.astype(bf16).astype(np.float32), bb.astype(bf16).astype(np.float32)
+    expected = np.pad(aa * bb, (0, (-k) % group)).reshape(-1, group).sum(axis=1).astype(result_dtype)
+    raw = np.full((k + group - 1) // group + 2, -99, dtype=result_dtype)
+    compiled.operator.native(a, b, raw[1:-1], **compiled._core.specialization_values)
+    np.testing.assert_array_equal(raw[1:-1], expected)
+    np.testing.assert_array_equal(raw[[0, -1]], -99)
+
+
 @pytest.mark.parametrize("transformed", (False, True))
 def test_bf16_grouped_dot_odd_empty_and_strided_tails(transformed, tmp_path):
   bf16 = pytest.importorskip("ml_dtypes").bfloat16
