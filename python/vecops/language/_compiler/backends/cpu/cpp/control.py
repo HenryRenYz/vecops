@@ -12,6 +12,15 @@ from .memory import scoped_scalar_geometry
 
 
 class ControlEmitter:
+  def store_statement(self, statement):
+    """Emit the ordinary nonempty guard and its prepared store alternative."""
+    nonempty = " && ".join(f"({self.scalar(n)}) > 0" for n in statement.destination.shape)
+    if nonempty:
+      self.opening(f"if ({nonempty})")
+    self.store(statement)
+    if nonempty:
+      self.close()
+
   @scoped_scalar_geometry
   def elementwise_group(self, group, future):
     body = I.Block(list(group.stores))
@@ -202,7 +211,8 @@ class ControlEmitter:
         self.reduction_materialized.clear()
       elif isinstance(statement, I.ElementwiseGroup):
         future = self.expression_loads(I.Block(block.statements[index + 1 :]))
-        self.elementwise_group(statement, future)
+        with self.snapshot_lifetime(statement, future):
+          self.elementwise_group(statement, future)
       elif isinstance(statement, I.UnrolledFor):
         self.unrolled_for(statement, self.expression_loads(I.Block(block.statements[index + 1 :])))
       elif isinstance(statement, I.For):
@@ -273,13 +283,11 @@ class ControlEmitter:
         self.indexed_store(statement, self.expression_loads(I.Block(block.statements[index + 1 :])))
       elif isinstance(statement, I.Store):
         future = self.expression_loads(I.Block(block.statements[index + 1 :]))
-        self.protect_store(statement, future)
-        nonempty = " && ".join(f"({self.scalar(n)}) > 0" for n in statement.destination.shape)
-        if nonempty:
-          self.opening(f"if ({nonempty})")
-        self.store(statement)
-        if nonempty:
-          self.close()
+        with self.snapshot_lifetime(statement, future):
+          if self.single_snapshot_store(statement, future, lambda: self.store_statement(statement)):
+            continue
+          self.protect_store(statement, future)
+          self.store_statement(statement)
       elif isinstance(statement, I.BindTile):
         self.active_loads.update({id(load): load for load in I.loads(statement.value)})
       elif isinstance(statement, I.WorkspaceAllocate):

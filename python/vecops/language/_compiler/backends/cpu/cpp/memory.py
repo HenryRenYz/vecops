@@ -26,6 +26,99 @@ def scoped_scalar_geometry(emit):
 
 
 class MemoryEmitter:
+  @scoped_scalar_geometry
+  def single_snapshot_store(self, statement, future, emit):
+    """Keep a single fresh owner entirely off the nonalias execution path.
+
+    Compute the original guard once, at its original position. Restrict this
+    to one ordinary read and no prior capture/materialization: multiple span
+    checks may throw, and must not move across another snapshot allocation.
+    """
+    from ..storage import SnapshotScope
+
+    storage = getattr(self.prepared, "storage", None)
+    proof = getattr(storage, "snapshot_scopes", {}).get(id(statement))
+    if (
+      type(proof) is not SnapshotScope
+      or proof.subject is not statement
+      or type(statement) is not I.Store
+      or len(proof.reads) != 1
+      or self.live_loads(future)
+      or self.snapshots
+      or self.materialized
+      or self.reduction_materialized
+    ):
+      return False
+    policy = self.vector_ir.manager.options.get("store_snapshot_regions", True)
+    if type(policy) is not bool:
+      raise TypeError("store_snapshot_regions must be bool")
+    load = proof.reads[0]
+    if not policy or not self.snapshot_required(load, statement.destination):
+      return False
+    condition = self.snapshot_condition(load, statement.destination, False)
+    snapshots, materialized = self.snapshots, self.materialized
+    reductions, cache = self.reduction_materialized, self.chunk_cache
+    provenance = getattr(self, "store_snapshot_provenance", None)
+    try:
+      self.opening(f"if (!({condition})) /* fresh store snapshots absent */")
+      self.snapshots, self.materialized = dict(snapshots), dict(materialized)
+      self.reduction_materialized, self.chunk_cache = dict(reductions), {}
+      self.store_snapshot_provenance = {key: value for key, value in (provenance or {}).items() if key != id(statement)}
+      try:
+        emit()
+      finally:
+        self.close()
+      self.opening("else /* retain current and historical store snapshots */")
+      self.snapshots, self.materialized = dict(snapshots), dict(materialized)
+      self.reduction_materialized, self.chunk_cache = dict(reductions), {}
+      self.store_snapshot_provenance = {key: value for key, value in (provenance or {}).items() if key != id(statement)}
+      try:
+        self.snapshot_contents(load, condition)
+        emit()
+      finally:
+        self.close()
+    finally:
+      self.snapshots, self.materialized = snapshots, materialized
+      self.reduction_materialized, self.chunk_cache = reductions, cache
+      if provenance is None:
+        del self.store_snapshot_provenance
+      else:
+        self.store_snapshot_provenance = provenance
+    return True
+
+  @contextmanager
+  def snapshot_lifetime(self, subject, future):
+    """Keep only proved consumer-local implicit owners inside this block.
+
+    Protecting an active future read can create/rebind a buffer for a later
+    consumer. Such emission retains its existing outer scope even when this
+    consumer's own reads are local. Historical outer bindings are never erased.
+    """
+    from ..storage import SnapshotScope
+
+    storage = getattr(self.prepared, "storage", None)
+    proof = getattr(storage, "snapshot_scopes", {}).get(id(subject))
+    if type(proof) is not SnapshotScope or proof.subject is not subject or self.live_loads(future):
+      yield
+      return
+    snapshots, active = self.snapshots, self.active_loads
+    materialized, reductions, cache = self.materialized, self.reduction_materialized, self.chunk_cache
+    provenance = getattr(self, "store_snapshot_provenance", None)
+    self.snapshots, self.active_loads = dict(snapshots), dict(active)
+    self.materialized, self.reduction_materialized, self.chunk_cache = dict(materialized), dict(reductions), {}
+    self.store_snapshot_provenance = dict(provenance or {})
+    self.opening("/* consumer-local snapshot lifetime */")
+    try:
+      yield
+    finally:
+      self.close()
+      self.snapshots, self.active_loads = snapshots, active
+      self.materialized, self.reduction_materialized, self.chunk_cache = materialized, reductions, cache
+      if provenance is None:
+        del self.store_snapshot_provenance
+      else:
+        self.store_snapshot_provenance = provenance
+
   @contextmanager
   def scalar_geometry(self, subject):
     """Consume equality classes without rewriting retained Tile/View objects.
@@ -446,18 +539,24 @@ class MemoryEmitter:
     terms += [f"({self.scalar(x)}) == ({self.scalar(y)})" for x, y in zip(a.strides, b.strides)]
     return "(" + " && ".join(terms) + ")"
 
-  def snapshot(self, load, destination, must_preserve):
+  def snapshot_required(self, load, destination):
+    """The existing static exclusions, before any runtime guard is printed."""
     view = load.data
     if self.disjoint_proven(view, destination):
-      return
+      return False
     if self.verified_grid is not None and view.storage != destination.storage:
       # The enclosing runtime guard proved disjoint parameter root spans.
       # Worker-private allocations cannot alias a parameter or another slot.
       known = self.verified_grid.reads | self.verified_grid.writes | self.verified_grid.private
       if view.storage in known and destination.storage in known:
-        return
+        return False
     if not view.shape or (view.owned or destination.owned) and view.storage != destination.storage:
-      return
+      return False
+    return True
+
+  def snapshot_condition(self, load, destination, must_preserve):
+    """Print one original guard without constructing its conditional owner."""
+    view = load.data
     condition = self.unique("alias")
     overlap = self.overlap(view, destination)
     if not must_preserve:
@@ -467,6 +566,10 @@ class MemoryEmitter:
       overlap = f"({old[1]}) || ({overlap})"
     nonempty = " && ".join(f"({self.scalar(n)}) > 0" for n in view.shape + destination.shape)
     self.line(f"const bool {condition} = ({nonempty}) && ({overlap});")
+    return condition
+
+  def snapshot_contents(self, load, condition):
+    """Print the unchanged owner/copy sequence under an existing guard."""
     name = self.unique("snapshot")
     dtype = load.type.dtype
     self.line(f"vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};")
@@ -479,6 +582,11 @@ class MemoryEmitter:
     self.store(statement, plan=plan)
     self.close()
     self.snapshots[id(load)] = (saved, condition)
+
+  def snapshot(self, load, destination, must_preserve):
+    if self.snapshot_required(load, destination):
+      condition = self.snapshot_condition(load, destination, must_preserve)
+      self.snapshot_contents(load, condition)
 
   @scoped_scalar_geometry
   def protect_store(self, statement, future):

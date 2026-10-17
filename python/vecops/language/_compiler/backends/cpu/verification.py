@@ -36,6 +36,7 @@ def verify_prepared(prepared):
           "scratch slot has overlapping live intervals",
         )
       slots.setdefault(slot, []).append(interval)
+    verify_snapshot_scopes(prepared)
   verify_private_captures(prepared)
   verify_closed_fixed_states(prepared)
   confirmed = _memory_proofs(prepared)
@@ -43,6 +44,31 @@ def verify_prepared(prepared):
   verify_broadcast_proofs(prepared, confirmed.broadcasts)
   verify_scalar_geometry(prepared, confirmed.geometry)
   return prepared
+
+
+def verify_snapshot_scopes(prepared):
+  """Recompute nonescaping read uses against final IR and exact subjects."""
+  from ...operations import current
+  from .storage import SnapshotScope, snapshot_lifetime_scopes
+
+  if not prepared.storage.snapshot_scopes:
+    return
+  manager = getattr(prepared.vectors, "manager", None)
+  environment = (getattr(manager, "options", {}) or {}).get("_compiler_environment")
+  catalog = environment.operations if environment is not None else current()
+  confirmed = snapshot_lifetime_scopes(prepared.vectors.kernel, catalog)
+  for identity, proof in prepared.storage.snapshot_scopes.items():
+    require(type(proof) is SnapshotScope and identity == id(proof.subject), "stale snapshot lifetime subject")
+    actual = confirmed.get(identity)
+    require(actual is not None and actual.subject is proof.subject, "snapshot read escapes its consumer")
+    require(
+      type(proof.occurrences) is int and proof.occurrences == actual.occurrences,
+      "snapshot lifetime missed an occurrence",
+    )
+    require(
+      len(proof.reads) == len(actual.reads) and all(a is b for a, b in zip(proof.reads, actual.reads)),
+      "snapshot lifetime has detached historical reads",
+    )
 
 
 def verify_closed_fixed_states(prepared):

@@ -2388,12 +2388,31 @@ automatic optional online packing.
 CPU emission places an explicitly allocated scratch Buffer descriptor inside
 its common conditional branch when all storage references remain in that
 branch. Unselected matrix/cache paths therefore do not construct or destroy
-those descriptors. Serial-loop capacity reuse, worker isolation and implicit
-historical-read snapshots retain their existing lifetimes. The compiler
+those descriptors. Serial-loop capacity reuse and worker isolation retain
+their existing lifetimes. The compiler
 option `cpu_branch_local_buffers` defaults to `True`; setting it to `False`
 restores entry-level declarations for controlled code-generation comparisons.
 This is a compiler lifetime optimization, not a change to T.func inlining or
 the private function-call ABI.
+The existing CPU storage plan also scopes an implicit snapshot owner to its
+single pointwise Store or ElementwiseGroup when every use of its exact
+historical read belongs to that consumer. BindTile remains a read definition;
+shared reads, metadata uses, outlined captures, hardware/worker regions and
+opaque ownership retain the previous scope. The verifier recomputes this
+proof from final IR. Emission additionally refuses a local scope when it must
+protect an active read for a future consumer. Alias checks and snapshot copies
+are unchanged, and outer historical bindings are restored after local emission.
+For a single ordinary read with no existing snapshot/materialization, emission
+computes its original alias predicate once at the original point. Only the
+alias branch constructs the Buffer and executes the original guarded copy;
+the nonalias branch has no implicit owner or destructor. Multiple reads and
+existing historical owners keep their previous protection order, including
+potentially throwing span/layout checks.
+`cpu_snapshot_lifetime_scopes=False` retains the previous implicit-owner scopes
+for controlled comparisons. This optional proof tracks direct ownership edges
+and each node’s first consumer or escaped status, rather than transitive read
+sets. It has no global limit on independent reads. Cyclic or opaque ownership
+graphs use the existing path.
 Private disjoint storage skips runtime alias checks; unknown overlap retains
 sequential stores. An empty output prefix skips all input computation. Checked
 rank-one reshapes retain element counts, rounding and historical captures.
