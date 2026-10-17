@@ -6,11 +6,10 @@ import re
 
 import numpy as np
 import pytest
-import vecops
 import vecops.language as T
 from dsl_test_utils import make_compiler
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.ir.iteration import FoldLoop, AxisResult
+from vecops.language._compiler.ir.iteration import AxisResult, FoldLoop
 from vecops.language._compiler.ir.traversal import nodes
 
 
@@ -95,29 +94,31 @@ def test_fused_axis_reductions(compiler):
 
 
 @pytest.mark.parametrize("fixed", [False, True])
-def test_simd_unroll_and_loop_fusion(compiler, fixed):
+@pytest.mark.parametrize("size", [37, 4096])
+def test_simd_unroll_and_loop_fusion(compiler, fixed, size):
   vector = T.Vector("float32", N=16) if fixed else T.Vector("float32")
+  N = T.Const(size)
 
   @T.template
   def kernel(
-    A: T.Tensor((37,), dtype="float32"),
-    B: T.Tensor((37,), dtype="float32", access="inout"),
-    C: T.Tensor((37,), dtype="float32", access="output"),
+    A: T.Tensor((N,), dtype="float32"),
+    B: T.Tensor((N,), dtype="float32", access="inout"),
+    C: T.Tensor((N,), dtype="float32", access="output"),
   ):
-    for i in T.simd(37, vector=vector, unroll=3):
+    for i in T.simd(N, vector=vector, unroll=3):
       T.scatter(B, i, T.gather(A, i) * 2, unique=True)
-    for j in T.simd(37, vector=vector, unroll=3):
+    for j in T.simd(N, vector=vector, unroll=3):
       T.scatter(C, j, T.gather(B, j) + 1, unique=True)
 
   compiled = T.compile(kernel, compiler=compiler)
   assert any("loop fusion:" in s for s in compiled.kernel_ir.diagnostics)
   assert "operation-major serial unroll" in compiled.generated_source
-  a = np.arange(37, dtype=np.float32)
+  a = np.arange(size, dtype=np.float32)
   b, c = np.empty_like(a), np.empty_like(a)
   compiled(a, b, c)
   np.testing.assert_array_equal(c, a * 2 + 1)
   # Cross-iteration physical overlap must select the original two-loop order.
-  base = np.arange(38, dtype=np.float32)
+  base = np.arange(size + 1, dtype=np.float32)
   original = base.copy()
   reference = np.empty_like(c)
   unfused = T.compile(kernel, compiler=compiler, pass_options={"loop_fusion": False})

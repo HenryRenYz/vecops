@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 
 from ...expr import Const, Dynamic, IntExpr
+from ...types import TensorType
 from .. import ir as I
 from ..ir.traversal import walk_unique
 
@@ -52,6 +53,24 @@ def _integer(value):
   return value if type(value) is int else None
 
 
+def abi_metadata_constants(kernel):
+  """Exact immutable int64 metadata guaranteed by validated tensor arguments.
+
+  Observed dynamic dimensions, bounds and arbitrary raw expressions do not
+  establish these equalities. Optional descriptors may be absent, so querying
+  their metadata still requires the original presence check.
+  """
+  constants = {}
+  for name, parameter in getattr(kernel, "parameters", {}).items():
+    if type(parameter) is not TensorType or parameter.optional:
+      continue
+    for operation, dimensions in (("size", parameter.shape), ("stride", parameter.concrete_strides)):
+      for axis, dimension in enumerate(dimensions):
+        if type(dimension) is Const and type(dimension.value) is int and -(1 << 63) <= dimension.value < 1 << 63:
+          constants[f"{name}.{operation}({axis})"] = dimension.value
+  return constants
+
+
 class ValueFacts:
   """Program-point facts with DAG memoization and queried binding keys.
 
@@ -68,7 +87,8 @@ class ValueFacts:
 
   @classmethod
   def from_kernel(cls, kernel):
-    bindings = {}
+    bindings = {("raw", name): IntegerFacts(value, value, 0, value)
+                for name, value in abi_metadata_constants(kernel).items()}
 
     def collect(value, *, extent=False):
       if isinstance(value, IntExpr):

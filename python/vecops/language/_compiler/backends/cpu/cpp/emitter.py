@@ -7,6 +7,7 @@ from __future__ import annotations
 from .....expr import Dynamic
 from .....types import TensorType
 from .... import ir as I
+from ....analysis.facts import abi_metadata_constants
 from ....ir.traversal import nodes
 from ....operations import use_catalog
 from ..capabilities import CPP_TYPES
@@ -49,6 +50,7 @@ class CPUEmitter(
     self.vector_ir = vector_ir
     self.emitted_regions = []
     self.ir = vector_ir.kernel
+    self.abi_metadata_constants = abi_metadata_constants(self.ir)
     self.lines = []
     self.indent = 0
     self.counter = 0

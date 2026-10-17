@@ -9,6 +9,7 @@ from dataclasses import replace
 from functools import wraps
 
 from .... import ir as I
+from ....analysis.facts import abi_metadata_constants
 from ....dtypes import ELEMENT_BYTES
 from ....ir.traversal import walk_unique
 from ....operations import Trait
@@ -521,6 +522,9 @@ class MemoryEmitter:
 
     definitions = getattr(getattr(self, "prepared", None), "immutable_geometry", {})
     kernel = getattr(self, "ir", None)
+    constants = getattr(self, "abi_metadata_constants", None)
+    if constants is None:
+      constants = abi_metadata_constants(kernel)
     bindings = getattr(kernel, "bindings", {})
     raw = {v.data for v in bindings.values() if v.op == "raw"}
     for name, parameter in getattr(kernel, "parameters", {}).items():
@@ -535,8 +539,15 @@ class MemoryEmitter:
       if value in memo:
         return memo[value]
       memo[value] = None
-      if value.op == "literal" or value.op == "raw" and value.data in raw:
+      if value.op == "literal":
         result = value
+      elif value.op == "raw" and value.data in raw:
+        result = (
+          I.literal(constants[value.data])
+          if not value.args and type(value.type) is I.ScalarType
+          and value.type.dtype == "int64" and value.data in constants
+          else value
+        )
       elif value.op == "symbol" and value.data in bindings:
         result = stable(bindings[value.data])
       elif value.op in {"local", "frozen"} and value.data in definitions:

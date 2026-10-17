@@ -2728,6 +2728,13 @@ immutable ABI metadata and scalar definitions with immutable dependencies can
 be equated through captures. Mutable or unknown coordinates, different origins
 and unproved spans retain conservative overlap checks and snapshot ownership.
 
+Validated, nonoptional tensor parameters share their exact `T.Const` int64
+shape and stride facts with integer analysis and guarded span proofs. Thus an
+ABI descriptor's `size(axis)` or `stride(axis)` can match the same static
+logical root, avoiding redundant snapshots in fused SIMD loops. Dynamic
+observations and optional descriptor metadata do not establish these facts;
+the dominating guard still has to cover both actual physical windows.
+
 ### Metadata analysis cost
 
 Integer definition expansion preserves untouched expression identities and

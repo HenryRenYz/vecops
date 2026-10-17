@@ -162,3 +162,31 @@ def test_captures_of_mutable_coordinates_do_not_cover_guarded_spans():
   )
   assert not e.disjoint_proven(own, b)
   assert not e.disjoint_proven(a, b)
+
+
+@pytest.mark.parametrize("stride", [-1, 0, 1, 3])
+def test_guarded_static_abi_roots_match_descriptor_metadata_on_both_roles(stride):
+  def root(name):
+    return I.View(name, "float32", (I.literal(16),), (I.literal(stride),), I.literal(0))
+
+  def descriptor(name):
+    return I.View(name, "float32", (I.Expr(I.ScalarType("int64"), "raw", data=f"{name}.size(0)"),),
+                  (I.Expr(I.ScalarType("int64"), "raw", data=f"{name}.stride(0)"),), I.literal(0))
+
+  a, b = root("A"), root("B")
+  e = emitter(a, b)
+  e.ir = I.KernelIR(I.Block([]), {name: T.Tensor((16,), (stride,), "float32") for name in ("A", "B")}, {})
+  assert e.disjoint_proven(descriptor("A"), descriptor("B"))
+  assert e.disjoint_proven(descriptor("B"), descriptor("A"))
+  # Matching parameter names cannot widen a proof for a shorter guarded view.
+  e.disjoint_roots = {("A", "B"): (view("A", "float32", 1), b)}
+  assert not e.disjoint_proven(descriptor("A"), descriptor("B"))
+
+
+def test_observed_dynamic_descriptor_does_not_match_a_static_guard():
+  a, b = view("A", "float32", 16), view("B", "float32", 16)
+  e = emitter(a, b)
+  e.ir = I.KernelIR(I.Block([]), {"A": T.Tensor((T.Dynamic(observed=16),), dtype="float32")}, {})
+  own = I.View("A", "float32", (I.Expr(I.ScalarType("int64"), "raw", data="A.size(0)"),),
+               (I.literal(1),), I.literal(0))
+  assert not e.disjoint_proven(own, b)

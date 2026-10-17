@@ -7,7 +7,13 @@ from dataclasses import dataclass, replace
 import pytest
 import vecops.language as T
 from vecops.language._compiler import ir as I
-from vecops.language._compiler.analysis.facts import IntegerFacts, ScalarAliases, ValueFacts, induction_facts
+from vecops.language._compiler.analysis.facts import (
+  IntegerFacts,
+  ScalarAliases,
+  ValueFacts,
+  abi_metadata_constants,
+  induction_facts,
+)
 from vecops.language._compiler.environment import freeze
 from vecops.language._compiler.operations import OpDef, snapshot, use_catalog
 from vecops.language._compiler.operations.registry import OperationCatalog
@@ -17,6 +23,31 @@ from vecops.language._compiler.passes.manager import PassContext
 
 def local(name, dtype="int64"):
   return I.Expr(I.ScalarType(dtype), "local", data=name)
+
+
+def test_validated_static_abi_metadata_is_shared_with_integer_facts():
+  parameters = {
+    "A": T.Tensor((16, 7), (7, -1), "float32"),
+    "B": T.Tensor((0,), (0,), "float32"),
+  }
+  kernel = I.KernelIR(I.Block([]), parameters, {})
+  expected = {"A.size(0)": 16, "A.size(1)": 7, "A.stride(0)": 7,
+              "A.stride(1)": -1, "B.size(0)": 0, "B.stride(0)": 0}
+  assert abi_metadata_constants(kernel) == expected
+  facts = ValueFacts.from_kernel(kernel)
+  for name, value in expected.items():
+    assert facts.infer(I.Expr(I.ScalarType("int64"), "raw", data=name)).constant == value
+  assert facts.infer(I.Expr(I.ScalarType("int64"), "raw", data="A.size(2)")).constant is None
+
+
+def test_static_abi_constants_exclude_observed_dynamic_and_optional_descriptors():
+  dimension = T.Dynamic(lower=0, upper=128, observed=16)
+  kernel = I.KernelIR(I.Block([]), {
+    "A": T.Tensor((dimension,), (dimension,), "float32"),
+    "B": T.Tensor((16,), dtype="float32") | None,
+    "scalar": "int64",
+  }, {})
+  assert abi_metadata_constants(kernel) == {}
 
 
 def binary(op, left, right, dtype=None):
