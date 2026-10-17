@@ -1084,6 +1084,9 @@ interval proves that it cannot overflow.
 Index generators retain their coordinate maps through slicing, transpose and
 reshape; row epilogues explicitly map their axes and origins. They cannot be
 retagged like coordinate-independent elementwise arithmetic.
+Reshapes that only insert or remove unit axes normalize to squeeze/expand-dims
+projections. This preserves the original read identity, including historical
+captures and noncontiguous inputs, while allowing ordinary vector memory access.
 Private dead-store elimination requires an exact adjacent overwrite, harmless
 initial evaluation/address metadata and no observation of the old private
 contents. Public stores, masks, captures, fences and unknown effects retain
