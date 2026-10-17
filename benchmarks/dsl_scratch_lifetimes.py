@@ -6,6 +6,8 @@ Repetition lives in the timing harness, outside the DSL kernel. An enclosing
 DSL repeat loop would conservatively overlap both scratch intervals and would
 not exercise the late storage planner. Peak bytes describe instrumented DSL
 scratch lifetimes, not process RSS. Timings include native ABI dispatch.
+The default optimizer may remove these private round trips entirely, in which
+case both physical slots and instrumented peak bytes must be zero.
 """
 from __future__ import annotations
 
@@ -114,9 +116,9 @@ def main():
             np.testing.assert_array_equal(d, (a - 1) * 3)
           profile = instrumented.profile(a, c, d, warmup=0, repeat=1, mode="native", memory=True)
           peak = profile.memory_summary["instrumented_peak_bytes"]
-          if slots is not None and (slots != 1 or peak != width * 4):
-            raise ValueError("the benchmark did not exercise one physical scratch slot")
-          if peak not in (width * 4, width * 8):
+          if slots is not None and (slots, peak) not in ((0, 0), (1, width * 4)):
+            raise ValueError("unexpected physical scratch slots or instrumented peak")
+          if slots is None and peak not in (width * 4, width * 8):
             raise ValueError("unexpected scratch ownership or missing instrumentation")
           record = {
             "rows": rows, "width": width, "correct": True, "source_sha256": digest,

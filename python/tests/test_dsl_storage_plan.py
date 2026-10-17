@@ -92,7 +92,10 @@ def test_native_scratch_reuse_and_independent_historical_reads(tmp_path):
   compiler = make_compiler(jobs=2, cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   for reuse in (False, True):
     compiled = T.compile(
-      template(17), compiler=compiler, pass_options={"cpu_scratch_reuse": reuse}, debug=T.DebugOptions(memory=True)
+      # Keep real storage so this test exercises placement and slot reuse.
+      template(17), compiler=compiler,
+      pass_options={"cpu_scratch_reuse": reuse, "private_store_forwarding": False},
+      debug=T.DebugOptions(memory=True),
     )
     slots = compiled.backend_ir.storage.slots
     assert len(slots) == 2
