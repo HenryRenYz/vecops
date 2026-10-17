@@ -92,6 +92,7 @@ class Frontend(
             (1,) * len(shape),
             tuple(range(len(shape))),
             (False,) * len(shape),
+            root_offset=I.literal(0),
           ),
         )
         for axis, value in enumerate(annotation.shape):
@@ -697,6 +698,12 @@ class Frontend(
         tuple(range(len(shape))),
         (False,) * len(shape),
         affine_partition=False,
+        root_offset=view.offset,
+        span_source=(
+          view.region.span_source
+          if view.region is not None and view.region.span_source is not None
+          else replace(view, region=None)
+        ),
       )
       return I.View(view.storage, view.dtype, shape, tuple(strides), view.offset, view.writable, view.owned, region)
     if operation == "load":

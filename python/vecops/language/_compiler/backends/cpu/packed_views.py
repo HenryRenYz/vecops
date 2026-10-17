@@ -64,6 +64,13 @@ def aligned_packed_view(operand, family, acc_dtype, streaming_bytes=None):
   # A checked physical window becomes a new indexing root. Its absolute
   # offset/strides remain those of the caller's allocation; owned stays false.
   region = I.ViewRegion(
-    shape, strides, (lit(0),) * len(shape), shape, (1,) * len(shape), tuple(range(len(shape))), (False,) * len(shape)
+    shape,
+    strides,
+    (lit(0),) * len(shape),
+    shape,
+    (1,) * len(shape),
+    tuple(range(len(shape))),
+    (False,) * len(shape),
+    root_offset=offset,
   )
   return replace(packed.view, shape=shape, strides=strides, offset=offset, region=region)

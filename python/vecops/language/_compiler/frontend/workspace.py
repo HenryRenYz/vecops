@@ -40,6 +40,7 @@ class WorkspaceFrontend:
         (1,) * len(shape),
         tuple(range(len(shape))),
         (False,) * len(shape),
+        root_offset=I.literal(0),
       ),
     )
     self.block.statements.append(I.Allocate(view))
@@ -103,6 +104,7 @@ class WorkspaceFrontend:
         (1,) * len(shape),
         tuple(range(len(shape))),
         (False,) * len(shape),
+        root_offset=I.literal(0),
       ),
     )
     self.block.statements.append(I.WorkspaceAllocate(view))

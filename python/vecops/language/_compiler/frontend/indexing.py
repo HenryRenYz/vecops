@@ -51,6 +51,7 @@ class IndexingFrontend:
           (1,) * len(shape),
           tuple(range(len(shape))),
           (False,) * len(shape),
+          root_offset=I.literal(0),
         ),
       )
     if not isinstance(obj, I.View):

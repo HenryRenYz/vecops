@@ -85,7 +85,11 @@ class ControlEmitter:
     def root(view):
       if view.region is None:
         return view
-      return I.View(view.storage, view.dtype, view.region.root_shape, view.region.root_strides, I.literal(0))
+      return (
+        I.View(view.storage, view.dtype, view.region.root_shape, view.region.root_strides, view.region.root_offset)
+        if view.region.root_offset is not None
+        else view
+      )
 
     for store in self.stores(loop.body):
       output = self.storage_views.get(store.destination.storage)
@@ -284,7 +288,7 @@ class ControlEmitter:
       elif isinstance(statement, I.Store):
         future = self.expression_loads(I.Block(block.statements[index + 1 :]))
         with self.snapshot_lifetime(statement, future):
-          if self.single_snapshot_store(statement, future, lambda: self.store_statement(statement)):
+          if self.single_snapshot_store(statement, future, lambda statement=statement: self.store_statement(statement)):
             continue
           self.protect_store(statement, future)
           self.store_statement(statement)

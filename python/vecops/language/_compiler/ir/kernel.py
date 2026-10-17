@@ -33,10 +33,12 @@ class Expr(Node):
 
 @dataclass(frozen=True)
 class ViewRegion(Node):
-  """Logical root coordinates retained for grid independence proofs only.
+  """Logical coordinates and physical provenance of a bounded view.
 
   Address generation still uses offset/strides. Losing this provenance is
   legal, but requires conservative scheduling rather than assumed no-alias.
+  Physical span proofs require an explicit root origin and immutable metadata;
+  a reshape alone never establishes affine grid independence.
   """
 
   root_shape: tuple[Expr, ...]
@@ -51,6 +53,13 @@ class ViewRegion(Node):
   # from a previously clamped origin or discard all bounds provenance.
   exact_starts: tuple[Expr, ...] | None = None
   affine_partition: bool = True
+  # A checked dense, dtype-preserving reshape keeps the source byte span.
+  # Slices/transposes preserve this enclosing span; arbitrary new roots do not.
+  # The retained source has no region, avoiding recursive provenance chains.
+  span_source: View | None = None
+  # Physical origin of this logical root. None means provenance is unavailable.
+  # It is independent of offsets captured later by a tile load.
+  root_offset: Expr | None = None
 
 
 @dataclass(frozen=True)
@@ -368,9 +377,11 @@ def same_extent(a, b):
   shape compatibility, whose runtime contract compares numerical dimensions.
   """
   for value in (a, b):
-    if type(value) is not Expr or type(value.type) is not ScalarType or value.type.dtype.removeprefix("u") not in {
-      "int8", "int16", "int32", "int64"
-    }:
+    if (
+      type(value) is not Expr
+      or type(value.type) is not ScalarType
+      or value.type.dtype.removeprefix("u") not in {"int8", "int16", "int32", "int64"}
+    ):
       return False
     if value.op == "literal":
       unsigned = value.type.dtype.startswith("u")
@@ -379,10 +390,7 @@ def same_extent(a, b):
       if value.args or type(value.data) is not int or not lower <= value.data <= upper:
         return False
   return same_expr(a, b) or (
-    a.op == b.op == "literal"
-    and type(a.data) is int
-    and type(b.data) is int
-    and a.data == b.data
+    a.op == b.op == "literal" and type(a.data) is int and type(b.data) is int and a.data == b.data
   )
 
 

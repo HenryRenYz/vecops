@@ -328,7 +328,9 @@ def plan_transpose(statement, options=None):
         shape,
         strides,
         I.literal(0),
-        region=I.ViewRegion(shape, strides, (I.literal(0), I.literal(0)), shape, (1, 1), (0, 1), (False, False)),
+        region=I.ViewRegion(
+          shape, strides, (I.literal(0), I.literal(0)), shape, (1, 1), (0, 1), (False, False), root_offset=I.literal(0)
+        ),
       )
 
     # Preserve constant pitches in the source program. Dynamic geometry is

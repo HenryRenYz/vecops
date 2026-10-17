@@ -2711,3 +2711,19 @@ fixes the probe. Source C++ and generated DSL use the same selected flag,
 which participates in artifact identity. Cache-only snapshots replay the
 matching policy attestation from `cache_dir/identities`; they do not invoke
 a toolchain. Missing or ambiguous attestations are explicit cache errors.
+
+
+### Checked reshape span provenance
+
+A dense, dtype-preserving `T.reshape` retains its checked source span as well
+as a new logical coordinate system. Bounded slices and transposes preserve
+that enclosing physical span. A dominating `T.view_disjoint` can therefore
+remove redundant conditional snapshots inside a reshaped view. This does not
+establish affine grid independence or change load capture timing.
+
+The proof checks both guarded windows, their element byte widths and physical
+root origins. A guard for a short prefix does not cover an entire parameter;
+two windows of one storage must match the two distinct guard roles. Only
+immutable ABI metadata and scalar definitions with immutable dependencies can
+be equated through captures. Mutable or unknown coordinates, different origins
+and unproved spans retain conservative overlap checks and snapshot ownership.

@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import wraps
 
 from .... import ir as I
+from ....dtypes import ELEMENT_BYTES
 from ....ir.traversal import walk_unique
 from ....operations import Trait
 from ..broadcasts import BroadcastProof, ScalarGeometry, broadcast_key
@@ -503,9 +505,13 @@ class MemoryEmitter:
               continue
             difference = I.constant(I.binary("sub", start_b, start_a))
             wa, wb = I.constant(width_a), I.constant(width_b)
-            if all(type(v) is int for v in (difference, wa, wb)) and wa >= 0 and wb >= 0:
-              if difference >= wa or -difference >= wb:
-                return True
+            if (
+              all(type(v) is int for v in (difference, wa, wb))
+              and wa >= 0
+              and wb >= 0
+              and (difference >= wa or -difference >= wb)
+            ):
+              return True
     return self.disjoint_proven(a, b)
 
   def disjoint_proven(self, a, b):
@@ -513,23 +519,77 @@ class MemoryEmitter:
     if proof is None:
       return False
 
-    def covered(own):
-      root = next((p for p in proof if p.storage == own.storage), None)
-      if root is None:
-        return False
-      if own is self.storage_views.get(own.storage):
-        # This is the parameter root used by protect_region. Kernel views
-        # are bounded by its declared logical root, which the guard covers.
-        return True
-      shape = own.region.root_shape if own.region else own.shape
-      strides = own.region.root_strides if own.region else own.strides
-      return (
-        len(shape) == len(root.shape)
-        and all(I.same_expr(x, y) for x, y in zip((*shape, *strides), (*root.shape, *root.strides)))
-        and (own.region is not None or I.same_expr(own.offset, root.offset))
+    definitions = getattr(getattr(self, "prepared", None), "immutable_geometry", {})
+    kernel = getattr(self, "ir", None)
+    bindings = getattr(kernel, "bindings", {})
+    raw = {v.data for v in bindings.values() if v.op == "raw"}
+    for name, parameter in getattr(kernel, "parameters", {}).items():
+      if hasattr(parameter, "shape"):
+        raw.update(f"{name}.{kind}({axis})" for kind in ("size", "stride") for axis in range(len(parameter.shape)))
+      else:
+        raw.add(name)
+    catalog = getattr(getattr(self, "environment", None), "operations", None)
+    memo = {}
+
+    def stable(value):
+      if value in memo:
+        return memo[value]
+      memo[value] = None
+      if value.op == "literal" or value.op == "raw" and value.data in raw:
+        result = value
+      elif value.op == "symbol" and value.data in bindings:
+        result = stable(bindings[value.data])
+      elif value.op in {"local", "frozen"} and value.data in definitions:
+        result = stable(definitions[value.data])
+      elif (
+        value.args
+        and isinstance(value.type, I.ScalarType)
+        and catalog is not None
+        and catalog.get(value).effects == "none"
+        and not catalog.has(value, Trait.REFERENCE | Trait.MEMORY_READ | Trait.STATE_REFERENCE | Trait.CAPTURE_SCALAR)
+      ):
+        args = tuple(stable(v) for v in value.args)
+        result = replace(value, args=args) if all(v is not None for v in args) else None
+      else:
+        result = None
+      memo[value] = result
+      return result
+
+    def same(a, b):
+      a, b = stable(a), stable(b)
+      return a is not None and b is not None and I.same_expr(a, b)
+
+    def same_layout(shape, strides, root):
+      return len(shape) == len(root.shape) and all(
+        same(x, y) for x, y in zip((*shape, *strides), (*root.shape, *root.strides))
       )
 
-    return covered(a) and covered(b)
+    def covered(own, root):
+      width = ELEMENT_BYTES.get(own.dtype)
+      if own.storage != root.storage or width is None or width != ELEMENT_BYTES.get(root.dtype):
+        return False
+      if same_layout(own.shape, own.strides, root) and same(own.offset, root.offset):
+        return True
+      region = own.region
+      if region is None:
+        return False
+      source = region.span_source
+      if (
+        source is not None
+        and source.region is None
+        and source.storage == own.storage
+        and source.dtype == own.dtype
+        and covered(source, root)
+      ):
+        return True
+      if not same_layout(region.root_shape, region.root_strides, root):
+        return False
+      # A load may capture its offset while logical coordinates remain lazy.
+      # Reconstructing the origin by subtracting those coordinates is unsound.
+      return region.root_offset is not None and same(region.root_offset, root.offset)
+
+    # Both roles matter even when two guarded windows share one storage name.
+    return (covered(a, proof[0]) and covered(b, proof[1])) or (covered(a, proof[1]) and covered(b, proof[0]))
 
   def same_mapping(self, a, b):
     if len(a.shape) != len(b.shape) or a.dtype != b.dtype:
@@ -550,9 +610,7 @@ class MemoryEmitter:
       known = self.verified_grid.reads | self.verified_grid.writes | self.verified_grid.private
       if view.storage in known and destination.storage in known:
         return False
-    if not view.shape or (view.owned or destination.owned) and view.storage != destination.storage:
-      return False
-    return True
+    return not (not view.shape or (view.owned or destination.owned) and view.storage != destination.storage)
 
   def snapshot_condition(self, load, destination, must_preserve):
     """Print one original guard without constructing its conditional owner."""
