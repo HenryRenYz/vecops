@@ -125,6 +125,46 @@ def test_native_batch_compiles_dynamic_aliases_only_once(tmp_path):
   assert len(_targets(tmp_path)) == 1  # Warm calls perform no new compilation.
 
 
+def test_native_batch_checks_one_operator_once_per_boundary_and_fresh_batch(tmp_path):
+  checks = 0
+
+  def validate():
+    nonlocal checks
+    checks += 1
+    return True
+
+  compiler = _compiler(tmp_path)
+
+  def requests_for(operator):
+    return [
+      vecops.CompileRequest(operator, _metadata_call(rows), (rows,), "test::batch-artifact-dynamic")
+      for rows in range(1, 43)
+    ]
+
+  operator = _operator(compiler, tmp_path / "cache", validate=validate)
+  requests = requests_for(operator)
+  result = vecops.compile_batch(requests, parallelism=2, execution_parallelism=1)
+  assert result.collected == result.prepared == 42
+  assert len(_targets(tmp_path)) == 1
+  assert checks == 2  # One fresh check before building and one before publication.
+  for rows in range(1, 43):
+    _assert_executes(operator, rows)
+  assert vecops.compile_batch(requests, parallelism=2, execution_parallelism=1).prepared == 42
+  assert checks == 2  # Warm preparation and invocation do not run cold validators.
+  assert len(_targets(tmp_path)) == 1
+
+  # A separate cache forces a genuinely new batch; no previous boundary's
+  # validation result may survive, even with the same Python callback/compiler.
+  independent = _operator(compiler, tmp_path / "fresh-cache", validate=validate)
+  fresh = vecops.compile_batch(requests_for(independent), parallelism=2, execution_parallelism=1)
+  assert fresh.collected == fresh.prepared == 42
+  assert len(_targets(tmp_path)) == 2
+  assert checks == 4
+  for rows in range(1, 43):
+    _assert_executes(independent, rows)
+  assert checks == 4
+
+
 def test_native_batch_keeps_distinct_constant_specializations(tmp_path):
   operator = _operator(_compiler(tmp_path), tmp_path / "cache")
   calls = [_metadata_call(2), _metadata_call(19, 8), _metadata_call(23)]
