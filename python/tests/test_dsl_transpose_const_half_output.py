@@ -132,8 +132,24 @@ def test_explicit_output_disable_and_boolean_contract_with_original_input_schedu
   assert disabled.lowered.manager.options[OPTION] is False
   assert enabled.lowered.manager.options[OPTION] is True
   before, after = (value.source for value in (disabled, enabled))
-  # Exactly the same typed input slices; no input Z-load experiment is mixed.
-  assert re.findall(r"[^\n]*load_hor<0>[^\n]*", before) == re.findall(r"[^\n]*load_hor<0>[^\n]*", after)
+  # Compare input expressions and emitted calls modulo private temporary names:
+  # expanding the output can change the emitter's temporary numbering.
+  assert normalized_calls(disabled, "sme.load_hor") == normalized_calls(enabled, "sme.load_hor")
+
+  def input_calls(source):
+    names = {}
+
+    def rename(match):
+      name = match.group()
+      if name not in names:
+        names[name] = name.rsplit("_", 1)[0] + "_" + str(len(names))
+      return names[name]
+
+    calls = re.findall(r"[^\n]*load_hor<0>[^\n]*", source)
+    assert calls
+    return [re.sub(r"\bdsl_c_\w+_\d+\b", rename, call) for call in calls]
+
+  assert input_calls(before) == input_calls(after)
   for value in (None, 0, 1, "true"):
     with pytest.raises(TypeError, match=OPTION + " must be bool"):
       lower(kernel, enabled=value)
