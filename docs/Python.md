@@ -1254,6 +1254,9 @@ The built-in kernel passes canonicalize converting memory, perform expression
 CSE, plan computation reuse, fuse reductions/reduction-side-outputs/elementwise
 stores, and expand independent serial operations. Vector passes create
 operation-major copies, coalesce groups and legalize dtype lane domains.
+On x86, complete-vector loops compute their invariant endpoint once using
+widened arithmetic, keeping overflow checks out of the induction test. VLA
+backends retain the comparison form to avoid runtime division.
 Separate CPU passes split full chunks from masked tails, select wider automatic
 tile chunks from accumulated region cost and a conservative live-vector budget, and legalize multiword math into native-word
 calculations while preserving coalesced memory requests. Explicit Vector tags

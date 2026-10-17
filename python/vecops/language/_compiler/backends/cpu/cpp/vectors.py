@@ -509,6 +509,23 @@ class VectorsEmitter:
         self.line(f"using {tag} = vecops::vec::ScalableTag<{CPP_TYPES[region.dtype]}, {group.power}>;")
         tags.append(tag)
       state = setup(tags) if setup else None
+      full_end = None
+      if (
+        self.environment.codegen_target.architecture == "x86"
+        and region.full_chunks
+        and not (region.single_chunk and base_power == region.base_power and len(groups) == 1)
+      ):
+        # x86 has an invariant physical width. Compute the complete-vector
+        # endpoint once, instead of repeating widened arithmetic in the loop.
+        # Widen before multiplying: an oversized step executes no full body,
+        # and every executed induction update remains at most this endpoint.
+        # Keep VLA targets on the comparison form, avoiding runtime division.
+        full_end = self.unique("full_end")
+        bound = self.scalar(region.shape[-1])
+        step = f"(static_cast<__int128>({self.vector_size(base)}) * {region.unroll})"
+        self.line(
+          f"const vecops::nint_t {full_end} = ({bound}) > 0 ? static_cast<vecops::nint_t>(static_cast<__int128>({bound}) - static_cast<__int128>({bound}) % {step}) : 0; /* invariant complete-vector bound */"
+        )
       coordinates = []
       for extent in region.shape[:-1]:
         coordinate = self.unique("axis")
@@ -570,8 +587,13 @@ class VectorsEmitter:
         body(full)
       elif region.full_chunks:
         self.line(f"vecops::nint_t {coordinate} = 0;")
+        condition = (
+          f"{coordinate} < {full_end}"
+          if full_end is not None
+          else f"vecops_dsl::full_vectors({coordinate}, {stop}, {self.vector_size(base)}, {region.unroll})"
+        )
         self.opening(
-          f"for (; vecops_dsl::full_vectors({coordinate}, {stop}, {self.vector_size(base)}, {region.unroll}); {coordinate} += {region.unroll} * {self.vector_size(base)}) /* full vector groups */"
+          f"for (; {condition}; {coordinate} += {region.unroll} * {self.vector_size(base)}) /* full vector groups */"
         )
         body(True)
         self.close()
