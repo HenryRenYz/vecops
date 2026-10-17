@@ -16,6 +16,9 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "vecops/runtime/Executable.h"
@@ -24,6 +27,50 @@
 #include <functional>
 
 namespace vecops::runtime {
+
+/** Cold-build input checks owned independently of individual call bindings.
+ *
+ * Copying a validator shares its callback owners. Different constructions keep
+ * independent owners even when their callbacks have the same function type.
+ * These checks validate source/toolchain snapshots, never per-call metadata.
+ */
+class BuildInputValidator {
+public:
+  using Callback = std::function<bool()>;
+
+  /** One compiler boundary only. Create a new stage before building and a
+   * different stage before publication; never reuse it across builds. Results
+   * only coalesce shared callback owners within that boundary, not file bytes.
+   */
+  class Stage {
+    friend class BuildInputValidator;
+    // Keep owners alive until this boundary finishes, preventing pointer reuse.
+    std::unordered_map<std::shared_ptr<const Callback>, bool> results_;
+  };
+
+  BuildInputValidator() = default;
+  BuildInputValidator(Callback callback);
+  template <typename F>
+    requires(!std::is_same_v<std::remove_cvref_t<F>, BuildInputValidator> &&
+             !std::is_same_v<std::remove_cvref_t<F>, Callback> && std::is_constructible_v<Callback, F>)
+  BuildInputValidator(F&& callback)
+    : BuildInputValidator(Callback(std::forward<F>(callback))) {
+  }
+  /** Retain every independent callback owner from another validator. */
+  void append(const BuildInputValidator& other);
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return !callbacks_.empty();
+  }
+  /** Perform a fresh standalone check, sharing no prior stage results. */
+  [[nodiscard]] bool operator()() const;
+  /** Check each owner once in this stage, including all independent owners
+   * after a failure. Exceptions propagate and the compiler must abandon it.
+   */
+  [[nodiscard]] bool validate(Stage& stage) const;
+
+private:
+  std::vector<std::shared_ptr<const Callback>> callbacks_;
+};
 
 /**
  * @brief Concrete recipe identity selected for one argument specialization.
@@ -51,7 +98,7 @@ struct BoundKernelRecipe {
     nint_t parallelism = 1;
     /** Cold-build validation before compilation and before cache publication.
      * Never invoked by match/bind or a prepared executable's execution path. */
-    std::function<bool()> validate_inputs;
+    BuildInputValidator validate_inputs;
   };
   /** @brief Present only when a provider can compile this recipe from source. */
   std::shared_ptr<const SourceInstantiation> source;
@@ -105,6 +152,9 @@ public:
    * When `source_fingerprint` is empty the constructor reads `kernel_file`
    * once and fingerprints its contents. Source-free cache-only deployments
    * should pass the fingerprint recorded when artifacts were produced.
+   * The optional validator owns one source/toolchain snapshot check shared by
+   * all bindings of this recipe. A compiler batch calls it once at each of its
+   * two validation boundaries; every call's metadata is still bound separately.
    */
   SourceKernelRecipe(std::string id, std::filesystem::path kernel_file, std::shared_ptr<const KernelDef> definition,
                      std::string source_fingerprint = {}, SpecializationValues default_values = {},
@@ -133,7 +183,7 @@ private:
   std::shared_ptr<const KernelDef> definition_;
   std::string source_fingerprint_;
   SpecializationValues default_values_;
-  std::function<bool()> validate_inputs_;
+  BuildInputValidator validate_inputs_;
 };
 
 /**

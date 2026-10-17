@@ -421,7 +421,22 @@ int main(int argc, char** argv) {
   auto dynamic_compile_call = KernelCall(
     make_arguments(matrix(dynamic_input.data(), 2, 4, 4, false), matrix(dynamic_output.data(), 2, 4, 4, true)));
   const auto dynamic_kernel = fs::path(VECOPS_TEST_KERNEL).parent_path() / "NamedDynamicKernel.cpp";
-  auto dynamic_executable = compiler->compile_kernel(dynamic_kernel, dynamic_definition, dynamic_compile_call);
+  int dynamic_input_checks = 0;
+  SourceKernelRecipe dynamic_recipe("test-dynamic-batch", dynamic_kernel,
+                                    std::make_shared<const KernelDef>(dynamic_definition), {}, {}, [&] {
+                                      ++dynamic_input_checks;
+                                      return true;
+                                    });
+  auto first_dynamic = dynamic_recipe.bind(dynamic_compile_call);
+  auto second_dynamic = dynamic_recipe.bind(KernelCall(
+    make_arguments(matrix(dynamic_input.data(), 2, 6, 6, false), matrix(dynamic_output.data(), 2, 6, 6, true))));
+  require(first_dynamic.ok() && second_dynamic.ok(), "each Dynamic batch call must bind independently");
+  const std::array dynamic_recipes{std::move(first_dynamic).value(), std::move(second_dynamic).value()};
+  auto dynamic_executables = compiler->compile_kernels(dynamic_recipes, 2);
+  require(dynamic_executables.size() == 2, "independent constant specializations need two artifacts");
+  require(dynamic_executables[1].ok(), dynamic_executables[1].status().message());
+  require(dynamic_input_checks == 2, "shared source inputs must be freshly checked once at each compiler boundary");
+  auto dynamic_executable = std::move(dynamic_executables[0]);
   require(dynamic_executable.ok(), dynamic_executable.status().message());
   auto changed_batch_call = KernelCall(
     make_arguments(matrix(dynamic_input.data(), 3, 4, 4, false), matrix(dynamic_output.data(), 3, 4, 4, true)));
@@ -433,6 +448,13 @@ int main(int argc, char** argv) {
     make_arguments(matrix(dynamic_input.data(), 2, 4, 4, false), matrix(dynamic_output.data(), 3, 4, 4, true)));
   require(!dynamic_executable.value()->invoke(mismatched_batch_call.arguments()).ok(),
           "generated adapter must enforce named Dynamic relations");
+  const auto other_constant_call = KernelCall(
+    make_arguments(matrix(dynamic_input.data(), 2, 6, 6, false), matrix(dynamic_output.data(), 2, 6, 6, true)));
+  std::fill(dynamic_output.begin(), dynamic_output.end(), -99.0f);
+  require(dynamic_executables[1].value()->invoke(other_constant_call.arguments()).ok(),
+          "second constant specialization must keep its own generated adapter");
+  for (std::size_t index = 0; index < dynamic_output.size(); ++index)
+    require(dynamic_output[index] == dynamic_input[index] + 1.0f, "second constant specialization result");
 
   auto any_definition = any_metadata_kernel_definition();
   std::vector<float> any_input(21, -101.0f);

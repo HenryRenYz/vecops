@@ -597,12 +597,13 @@ Compiler::compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, s
     return fail_all(invalid("KernelCompilerConfig.work_directory is required"));
 
   std::uint64_t batch_fingerprint = UINT64_C(14695981039346656037);
+  runtime::BuildInputValidator::Stage before_build;
   for (const auto& recipe : recipes) {
     if (recipe.source == nullptr || recipe.source->definition == nullptr)
       return fail_all(invalid("bound recipe does not carry a source kernel instantiation"));
     if (!fs::is_regular_file(recipe.source->kernel_file))
       return fail_all(invalid("kernel source does not exist: " + recipe.source->kernel_file.string()));
-    if (recipe.source->validate_inputs && !recipe.source->validate_inputs())
+    if (!recipe.source->validate_inputs.validate(before_build))
       return fail_all(invalid("kernel build inputs changed after elaboration; recreate the kernel"));
     batch_fingerprint = hash_text(batch_fingerprint, recipe.artifact_key);
   }
@@ -678,8 +679,9 @@ Compiler::compile_kernels(std::span<const runtime::BoundKernelRecipe> recipes, s
 
   auto built = compile_batch(batch);
   // Validate before the provider can publish under the earlier identity.
+  runtime::BuildInputValidator::Stage before_publication;
   for (const auto& recipe : recipes)
-    if (recipe.source->validate_inputs && !recipe.source->validate_inputs())
+    if (!recipe.source->validate_inputs.validate(before_publication))
       return fail_all(invalid("kernel build inputs changed during compilation; artifact was not published"));
   results.reserve(recipes.size());
   for (std::size_t index = 0; index < recipes.size(); ++index) {

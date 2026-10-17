@@ -34,8 +34,9 @@ struct DeduplicatedKernelBatch {
  *
  * Source path, declarative interface, binding key and logical parallelism are
  * defensive identity components in addition to the provider's artifact key.
- * Each representative's validation callback checks every original alias on
- * both compiler validation boundaries, before building and before publishing.
+ * Each representative retains every independent alias validator owner. Shared
+ * owners are checked once at each compiler boundary, before building and before
+ * publishing; different owners are never merged by source/artifact identity.
  * No runtime argument/relationship validation may be replaced by this helper.
  */
 [[nodiscard]] inline runtime::Result<DeduplicatedKernelBatch>
@@ -72,13 +73,9 @@ deduplicate_kernel_batch(std::span<const runtime::BoundKernelRecipe> inputs) {
     if (aliases[index].size() == 1)
       continue;
     auto source = std::make_shared<Source>(*result.recipes[index].source);
-    source->validate_inputs = [sources = std::move(aliases[index])] {
-      bool valid = true;
-      for (const auto& alias : sources)
-        if (alias->validate_inputs && !alias->validate_inputs())
-          valid = false;
-      return valid;
-    };
+    source->validate_inputs = runtime::BuildInputValidator{};
+    for (const auto& alias : aliases[index])
+      source->validate_inputs.append(alias->validate_inputs);
     result.recipes[index].source = std::move(source);
   }
   return result;

@@ -265,6 +265,13 @@ Batch precompile distinguishes build concurrency from execution parallelism:
 `execution_parallelism` chooses `P` (defaulting to `torch.get_num_threads()`
 when Torch is loaded). They are not interchangeable tuning knobs.
 
+`SourceKernelRecipe` owns a cold-build input validator shared by its bound
+specializations. A compiler batch checks each independent validator owner once
+before building and freshly again before publication; separate recipes retain
+their own checks even if their artifacts are deduplicated. These source and
+toolchain checks never replace per-call metadata/relationship binding. Their
+results are local to one boundary, not cached across boundaries or batches.
+
 ## C ABI split
 
 `CallAbi.h` owns the shared data records (`VecopsCall`, tensor/scalar values,

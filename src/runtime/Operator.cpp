@@ -117,6 +117,42 @@ void specialize_parallelism_in_place(BoundKernelRecipe& bound, nint_t parallelis
 
 } // namespace
 
+BuildInputValidator::BuildInputValidator(Callback callback) {
+  if (callback)
+    callbacks_.push_back(std::make_shared<const Callback>(std::move(callback)));
+}
+
+void BuildInputValidator::append(const BuildInputValidator& other) {
+  if (this == &other) {
+    const auto copy = other.callbacks_;
+    callbacks_.insert(callbacks_.end(), copy.begin(), copy.end());
+  } else {
+    callbacks_.insert(callbacks_.end(), other.callbacks_.begin(), other.callbacks_.end());
+  }
+}
+
+bool BuildInputValidator::operator()() const {
+  Stage stage;
+  return validate(stage);
+}
+
+bool BuildInputValidator::validate(Stage& stage) const {
+  bool valid = true;
+  for (const auto& callback : callbacks_) {
+    const auto found = stage.results_.find(callback);
+    bool current;
+    if (found != stage.results_.end()) {
+      current = found->second;
+    } else {
+      current = (*callback)();
+      stage.results_.emplace(callback, current);
+    }
+    if (!current)
+      valid = false;
+  }
+  return valid;
+}
+
 BoundKernelRecipe specialize_parallelism(BoundKernelRecipe recipe, nint_t parallelism) {
   specialize_parallelism_in_place(recipe, parallelism);
   return recipe;

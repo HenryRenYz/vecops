@@ -107,6 +107,103 @@ TEST(KernelBatchTest, EveryAliasIsValidatedAtBothCompilerBoundaries) {
   EXPECT_EQ(counts, (std::array{3, 2, 2})); // Original callbacks were not mutated.
 }
 
+TEST(KernelBatchTest, OneRecipeSharesValidationAcross42DynamicAliases) {
+  int checks = 0;
+  SourceKernelRecipe source("batch-source", "batch.cpp", definition(), "source-fingerprint", {},
+                            [&] { return ++checks > 0; });
+  std::vector<BoundKernelRecipe> inputs;
+  for (int rows = 1; rows <= 42; ++rows) {
+    auto bound = source.bind(call(rows, 4));
+    ASSERT_TRUE(bound.ok());
+    inputs.push_back(std::move(bound).value());
+  }
+  auto result = deduplicate_kernel_batch(inputs);
+  ASSERT_TRUE(result.ok());
+  ASSERT_EQ(result.value().recipes.size(), 1);
+  const auto& validate = result.value().recipes[0].source->validate_inputs;
+  BuildInputValidator::Stage before_build;
+  EXPECT_TRUE(validate.validate(before_build));
+  for (const auto& input : inputs)
+    EXPECT_TRUE(input.source->validate_inputs.validate(before_build));
+  EXPECT_EQ(checks, 1);
+  BuildInputValidator::Stage before_publication;
+  EXPECT_TRUE(validate.validate(before_publication));
+  EXPECT_EQ(checks, 2);
+  BuildInputValidator::Stage next_batch;
+  EXPECT_TRUE(validate.validate(next_batch));
+  EXPECT_EQ(checks, 3);
+}
+
+TEST(KernelBatchTest, DistinctArtifactsOfOneRecipeShareOnlyTheStageCheck) {
+  int checks = 0;
+  SourceKernelRecipe source("batch-source", "batch.cpp", definition(), "source-fingerprint", {},
+                            [&] { return ++checks > 0; });
+  auto first = source.bind(call(2, 4));
+  auto second = source.bind(call(19, 8));
+  ASSERT_TRUE(first.ok());
+  ASSERT_TRUE(second.ok());
+  const std::array inputs{std::move(first).value(), std::move(second).value()};
+  auto result = deduplicate_kernel_batch(inputs);
+  ASSERT_TRUE(result.ok());
+  ASSERT_EQ(result.value().recipes.size(), 2);
+  for (int boundary = 1; boundary <= 2; ++boundary) {
+    BuildInputValidator::Stage stage;
+    for (const auto& recipe : result.value().recipes)
+      EXPECT_TRUE(recipe.source->validate_inputs.validate(stage));
+    EXPECT_EQ(checks, boundary);
+  }
+}
+
+TEST(KernelBatchTest, FailureIsSharedWithinOneStageButRecheckedAtTheNextBoundary) {
+  int checks = 0;
+  BuildInputValidator validator([&] { return ++checks == 1; });
+  auto alias = validator;
+  BuildInputValidator::Stage before_build;
+  EXPECT_TRUE(validator.validate(before_build));
+  EXPECT_TRUE(alias.validate(before_build));
+  EXPECT_EQ(checks, 1);
+  BuildInputValidator::Stage before_publication;
+  EXPECT_FALSE(validator.validate(before_publication));
+  EXPECT_FALSE(alias.validate(before_publication));
+  EXPECT_EQ(checks, 2);
+  EXPECT_FALSE(validator()); // Standalone calls start a new boundary too.
+  EXPECT_EQ(checks, 3);
+}
+
+TEST(KernelBatchTest, AggregateLambdaConstructionAndCallbackReplacementStayValid) {
+  int original = 0;
+  int replacement = 0;
+  BoundKernelRecipe::SourceInstantiation source{.validate_inputs = [&] { return ++original > 0; }};
+  BuildInputValidator::Stage stage;
+  EXPECT_TRUE(source.validate_inputs.validate(stage));
+  source.validate_inputs = [&] { return ++replacement > 0; };
+  EXPECT_TRUE(source.validate_inputs.validate(stage));
+  EXPECT_EQ(original, 1);
+  EXPECT_EQ(replacement, 1);
+  source.validate_inputs = std::function<bool()>{};
+  EXPECT_FALSE(source.validate_inputs);
+  EXPECT_TRUE(source.validate_inputs());
+}
+
+TEST(KernelBatchTest, AStageOwnsCallbacksUntilItsBoundaryEnds) {
+  auto lifetime = std::make_shared<int>(0);
+  const std::weak_ptr weak = lifetime;
+  {
+    BuildInputValidator::Stage stage;
+    {
+      BuildInputValidator validator([lifetime] { return ++*lifetime > 0; });
+      lifetime.reset();
+      EXPECT_TRUE(validator.validate(stage));
+    }
+    EXPECT_FALSE(weak.expired());
+    int independent = 0;
+    BuildInputValidator other([&] { return ++independent > 0; });
+    EXPECT_TRUE(other.validate(stage));
+    EXPECT_EQ(independent, 1);
+  }
+  EXPECT_TRUE(weak.expired());
+}
+
 TEST(KernelBatchTest, FailingAliasDoesNotShortCircuitOtherValidation) {
   std::array<int, 3> counts{};
   const std::array inputs{recipe(2, 4, DType::Float32,
@@ -146,14 +243,19 @@ TEST(KernelBatchTest, AliasChangeBetweenBuildAndPublicationIsDetected) {
   EXPECT_EQ(second, 2);
 }
 
-TEST(KernelBatchTest, AggregatedValidationRetainsAliasLifetimeAndAllowsMissingCallback) {
+TEST(KernelBatchTest, AggregatedValidationRetainsCallbackLifetimeAndAllowsMissingCallback) {
   int count = 0;
-  std::vector inputs{recipe(2), recipe(19, 4, DType::Float32, [&] { return ++count > 0; })};
-  const std::weak_ptr alias = inputs[1].source;
+  auto lifetime = std::make_shared<int>(0);
+  const std::weak_ptr weak = lifetime;
+  std::vector inputs{recipe(2), recipe(19, 4, DType::Float32, [&, lifetime] {
+                       ++*lifetime;
+                       return ++count > 0;
+                     })};
+  lifetime.reset();
   auto result = deduplicate_kernel_batch(inputs);
   ASSERT_TRUE(result.ok());
   inputs.clear();
-  EXPECT_FALSE(alias.expired());
+  EXPECT_FALSE(weak.expired());
   EXPECT_TRUE(result.value().recipes[0].source->validate_inputs());
   EXPECT_EQ(count, 1);
 }

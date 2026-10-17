@@ -52,9 +52,12 @@ source recipes. It generates one task per specialization and submits the whole
 set through `compile_batch()`.
 Python's native operator batch planner first matches/binds every request, then
 shares exact source-artifact identities within one compiler configuration. The
-representative recipe retains every alias's cold-build validator, checked both
-before building and before publication; the loaded result is adopted separately
-by every requesting provider. This does not replace call metadata or Dynamic
+representative recipe retains every independent cold-build validator owner.
+Bindings of the same source recipe share that owner, checked once per batch
+before building and freshly again before publication. Different source recipes
+retain independent checks, even when their artifacts share a build. No check
+result is reused across the two boundaries or between batches. The loaded
+result is adopted separately by every requesting provider. This does not replace call metadata or Dynamic
 relationship validation, and the cache-independent C++ compiler entry points
 continue to preserve their caller-supplied task list.
 
