@@ -9,11 +9,16 @@ retain ordered prefetch scheduling; data reads are never moved without proof.
 from dataclasses import fields, replace
 
 from ... import ir as I
+from ...analysis.loops import guarded_loop_lookahead, unsigned_loop_distance
 from ...ir.traversal import values, walk
 from ...operations import Trait
 
 
 def buffer_loop(ir, loop, context, identity):
+  lookahead = guarded_loop_lookahead(loop)
+  if lookahead is None:
+    return None
+  next_index, next_exists = lookahead
   allowed = (I.Assign, I.BindTile, I.Store, I.ElementwiseGroup)
   if any(not isinstance(s, allowed) or isinstance(s, I.Assign) and not s.declare for s in loop.body.statements):
     return None
@@ -51,7 +56,6 @@ def buffer_loop(ir, loop, context, identity):
   if not loads or not stores or any(s.destination.region is None or s.destination.owned for s in stores):
     return None
   index = I.Expr(I.ScalarType("int64"), "local", data=loop.target)
-  next_index = I.binary("add", index, loop.step)
   allocations, prime, lookahead, substitutes, guards = [], [], [], {}, []
 
   def root(view):
@@ -74,7 +78,11 @@ def buffer_loop(ir, loop, context, identity):
     name = f"dsl_pipeline_{identity}_{number}"
     full = I.View(name, load.type.dtype, (I.literal(2), *logical_shape), (count, *strides), I.literal(0), owned=True)
     allocations.append(I.Allocate(full))
-    phase = I.binary("mod", I.binary("floordiv", I.binary("sub", index, loop.start), loop.step), I.literal(2))
+    step = I.constant(loop.step)
+    travelled = unsigned_loop_distance(loop.start, index, step)
+    ordinal = I.binary("floordiv", travelled, I.literal(abs(step), "uint64"))
+    bank = I.binary("mod", ordinal, I.literal(2, "uint64"))
+    phase = I.Expr(I.ScalarType("int64"), "cast", (bank,))
     current = I.View(name, load.type.dtype, logical_shape, tuple(strides), I.binary("mul", phase, count), owned=True)
     following = replace(current, offset=I.binary("mul", I.binary("sub", I.literal(1), phase), count))
     prime.append(I.Store(replace(current, offset=I.literal(0)), expand(load, loop.start)))
@@ -102,7 +110,7 @@ def buffer_loop(ir, loop, context, identity):
 
   comparison = "lt" if I.constant(loop.step) > 0 else "gt"
   body = I.Block(
-    [I.If(I.binary(comparison, next_index, loop.stop), I.Block(lookahead), I.Block()), *rewrite(loop.body).statements]
+    [I.If(next_exists, I.Block(lookahead), I.Block()), *rewrite(loop.body).statements]
   )
   buffered = replace(loop, body=body, unroll=1)
   first = I.If(I.binary(comparison, loop.start, loop.stop), I.Block(prime), I.Block())

@@ -583,6 +583,10 @@ speculated; with buffering disabled, runtime data is not moved across stores.
 The hint does not change numerical iteration order. The current pipeline
 keeps an ordered loop instead of operation-major unrolling.
 
+Software-pipeline lookahead guards and double-buffer bank ordinals use
+unsigned distances between signed loop endpoints. They do not introduce
+signed overflow near int64 limits; an unrepresentable lookahead is omitted.
+
 Opt-in `buffering=True` (with distance=1) automatically primes and rotates two
 banks for eligible straight-line, invariant-extent tile loads. A root-level
 runtime no-alias guard selects this schedule; aliased inputs/outputs retain

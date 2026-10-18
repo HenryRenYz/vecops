@@ -17,6 +17,44 @@ from ..operations import Trait
 from .effects import read_accesses
 
 
+def unsigned_loop_distance(first, last, step):
+  """Represent a signed loop's nonnegative distance without signed overflow.
+
+  Callers establish the iteration direction. The distance can occupy all
+  64 bits even though both endpoints and every induction value are int64.
+  """
+  def unsigned(value):
+    if value.type.dtype != "int64":
+      value = I.Expr(I.ScalarType("int64"), "cast", (value,))
+    # Numeric casts saturate in this DSL; preserve the endpoint bits instead.
+    return I.Expr(I.ScalarType("uint64"), "bitreinterpret", (value,))
+
+  a, b = unsigned(first), unsigned(last)
+  return I.binary("sub", b, a) if step > 0 else I.binary("sub", a, b)
+
+
+def guarded_loop_lookahead(loop, distance=1):
+  """Return a future index and a range guard, or decline an unknown stride.
+
+  Guard the unsigned distance rather than first overflowing an int64 sum.
+  Form the future in the same unsigned domain and convert it only for use
+  under the guard, where it is within the original signed iteration range.
+  """
+  step = I.constant(loop.step)
+  if type(step) is not int or step == 0:
+    return None
+  magnitude = abs(step) * distance
+  if magnitude > (1 << 64) - 1:
+    return None
+  index = I.Expr(I.ScalarType("int64"), "local", data=loop.target)
+  advance = I.literal(magnitude, "uint64")
+  unsigned = I.Expr(I.ScalarType("uint64"), "bitreinterpret", (index,))
+  future = I.binary("add" if step > 0 else "sub", unsigned, advance)
+  future = I.Expr(I.ScalarType("int64"), "bitreinterpret", (future,))
+  remaining = unsigned_loop_distance(index, loop.stop, step)
+  return future, I.binary("lt", advance, remaining)
+
+
 @dataclass(frozen=True)
 class Access:
   view: I.View

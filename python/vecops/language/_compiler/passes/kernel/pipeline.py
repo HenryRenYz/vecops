@@ -10,6 +10,7 @@ otherwise retain ordered prefetch hints. No unguarded data read is speculated.
 from dataclasses import fields, replace
 
 from ... import ir as I
+from ...analysis.loops import guarded_loop_lookahead
 from ...ir.traversal import children, values, walk
 from ..manager import register_pass
 
@@ -33,11 +34,12 @@ def plan_software_pipeline(ir, context):
         ir.diagnostics.append("CPU double buffering retained ordered prefetch-only loop: eligibility proof failed")
       definitions = {s.target: s.value for s in loop.body.statements if isinstance(s, I.Assign) and s.declare}
       memo = {}
-      future = I.binary(
-        "add",
-        I.Expr(I.ScalarType("int64"), "local", data=loop.target),
-        I.binary("mul", loop.step, I.literal(statement.distance)),
-      )
+      lookahead = guarded_loop_lookahead(loop, statement.distance)
+      if lookahead is None:
+        block.statements[index] = replace(loop, unroll=1)
+        ir.diagnostics.append("pipeline prefetch omitted: lookahead stride is not representable")
+        continue
+      future, condition = lookahead
 
       def clone(value, memo=memo, loop=loop, future=future, definitions=definitions):
         if isinstance(value, I.Expr):
@@ -80,7 +82,6 @@ def plan_software_pipeline(ir, context):
             ir.diagnostics.append("pipeline prefetch omitted: lookahead address is not a pure available expression")
             continue
           hints.append(I.Prefetch(view))
-      condition = I.binary("lt" if I.constant(loop.step) > 0 else "gt", future, loop.stop)
       prefix = [I.If(condition, I.Block(hints), I.Block())] if hints else []
       block.statements[index] = replace(loop, body=I.Block(prefix + loop.body.statements), unroll=1)
       ir.diagnostics.append(
