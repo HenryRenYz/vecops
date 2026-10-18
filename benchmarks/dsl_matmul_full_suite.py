@@ -15,6 +15,9 @@ only this runner's marked temporary work directory is removed.
 --prelowered-manifest consumes a completed source-equivalence emission from
 the selected compiler snapshot. Native construction preserves the DSL ABI,
 strict flags and original source provenance; it does not repeat Python lowering.
+The native build driver may change between emission and construction; its current
+path and bytes are separately fixed in the native plan, while other runner hashes
+and the complete compiler frontend remain fixed to the emitted inputs.
 """
 
 from __future__ import annotations
@@ -181,9 +184,23 @@ def read_prelowered(plan, snapshot):
   if file_sha(source_plan) != document["plan_sha256"]:
     raise ValueError("prelowered source plan changed")
   original = read(source_plan)
-  for field in ("source_hashes", "runner_hashes", "pass_options", "target", "compiler_cflags"):
+  for field in ("source_hashes", "pass_options", "target", "compiler_cflags"):
     if original[field] != plan[field]:
       raise ValueError(f"prelowered {field} differs from selected templates or policy")
+  # This file orchestrates native construction; it does not produce the emitted
+  # DSL body. Permit a driver revision only when its actual current bytes are
+  # independently bound. Keep the entire runner inventory and all other hashes.
+  driver_name = "dsl_matmul_full_suite.py"
+  before, after = original["runner_hashes"], plan["runner_hashes"]
+  if before != after:
+    driver = plan.get("native_build_driver", {})
+    if (
+      before.keys() != after.keys()
+      or driver_name not in before
+      or any(before[name] != after[name] for name in before if name != driver_name)
+      or driver != {"path": str(Path(__file__).resolve()), "sha256": file_sha(__file__)}
+    ):
+      raise ValueError("prelowered runner_hashes differs from selected templates or policy")
   if tree_sha(snapshot / "python/vecops", {".py"}) != document["compiler_python_sha256"]:
     raise ValueError("prelowered frontend differs from selected compiler snapshot")
   current = native_environment(snapshot, plan)

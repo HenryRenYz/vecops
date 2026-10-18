@@ -108,6 +108,34 @@ def test_prelowered_group_subset_preserves_dsl_flags_and_vector_policy(prelowere
   assert proof["vector_state_token"] == "arm-vector-state:v1:sve=none:sme=none"
 
 
+@pytest.mark.parametrize("change", ("driver", "other", "missing", "unbound", "stale"))
+def test_prelowered_driver_revision_has_separate_current_identity(prelowered_case, change):
+  c = prelowered_case
+  source_plan = Path(c.document["plan"])
+  original = json.loads(source_plan.read_text())
+  original["runner_hashes"] = {"dsl_matmul_full_suite.py": "old driver", "catalog.py": "catalog"}
+  source_plan.write_text(json.dumps(original))
+  c.document["plan_sha256"] = suite.file_sha(source_plan)
+  c.manifest.write_text(json.dumps(c.document))
+  c.plan["prelowered"] = suite.prelowered_identity(c.manifest)
+  c.plan["runner_hashes"] = {**original["runner_hashes"], "dsl_matmul_full_suite.py": "new driver"}
+  c.plan["native_build_driver"] = {"path": str(MODULE.resolve()), "sha256": suite.file_sha(MODULE)}
+  if change == "other":
+    c.plan["runner_hashes"]["catalog.py"] = "changed template machinery"
+  elif change == "missing":
+    del c.plan["runner_hashes"]["catalog.py"]
+  elif change == "unbound":
+    del c.plan["native_build_driver"]
+  elif change == "stale":
+    c.plan["native_build_driver"]["sha256"] = "changed driver after planning"
+  if change == "driver":
+    document, groups = suite.read_prelowered(c.plan, c.snapshot)
+    assert document["plan_sha256"] == suite.file_sha(source_plan) and set(groups) == {"shared"}
+  else:
+    with pytest.raises(ValueError, match="runner_hashes"):
+      suite.read_prelowered(c.plan, c.snapshot)
+
+
 @pytest.mark.parametrize("change,error", (
   ("incomplete", "incomplete"), ("frontend", "frontend differs"),
   ("sdk", "native sdk_sha256"), ("duplicate", "duplicates or omissions"),
