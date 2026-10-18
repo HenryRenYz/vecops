@@ -638,19 +638,44 @@ class MemoryEmitter:
     return condition
 
   def snapshot_contents(self, load, condition):
-    """Print the unchanged owner/copy sequence under an existing guard."""
-    name = self.unique("snapshot")
+    """Preserve an existing capture before allocating another private owner.
+
+    A true historical guard already owns this read's values. With the same
+    layout, its serial consumer can retain that owner and copy only when the
+    earlier guard was false. The alias checks stay at their original sites.
+    Worker regions require their own owners, including when an enclosing
+    serial region has a currently empty snapshot buffer.
+    """
+    old = self.snapshots.get(id(load))
+    layout = self.prepared.snapshots[id(load)].effects[0].store.destination
+    reuse = self.reusable_snapshot_owner(old, layout)
+    name = old[0].storage if reuse else self.unique("snapshot")
     dtype = load.type.dtype
-    self.line(f"vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};")
+    if not reuse:
+      self.line(f"vecops_dsl::Buffer<{CPP_TYPES[dtype]}> {name};")
     shape = load.type.shape
     statement, plan = self.prepared.snapshot(load, name)
     saved = statement.destination
-    self.opening(f"if ({condition})")
+    copy_condition = f"({condition}) && !({old[1]})" if reuse else condition
+    self.opening(f"if ({copy_condition})")
     count = ", ".join(self.scalar(v) for v in shape)
     self.line(f"{name}.resize({self.checked_shape(count)});")
     self.store(statement, plan=plan)
     self.close()
     self.snapshots[id(load)] = (saved, condition)
+
+  def reusable_snapshot_owner(self, old, layout):
+    """Apply the measured x86 policy only to identical private layouts."""
+    if old is None or self.parallel_depth or self.environment.codegen_target.architecture != "x86":
+      return False
+    saved = old[0]
+    return (
+      saved.owned and layout.owned and saved.dtype == layout.dtype
+      and len(saved.shape) == len(layout.shape) and len(saved.strides) == len(layout.strides)
+      and all(I.same_expr(a, b) for a, b in zip(
+        (*saved.shape, *saved.strides, saved.offset), (*layout.shape, *layout.strides, layout.offset)
+      ))
+    )
 
   def snapshot(self, load, destination, must_preserve):
     if self.snapshot_required(load, destination):

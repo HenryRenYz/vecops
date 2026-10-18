@@ -1014,6 +1014,13 @@ register-transform and opaque-effect boundaries retain their existing lowering.
 `store_snapshot_regions=False` disables this internal versioning policy for
 diagnostics without changing capture or alias semantics.
 
+On x86, repeated serial protection of the same retained read can reuse its
+existing private snapshot owner when dtype, shape, strides and offset match.
+An already captured value is kept; a previously uncaptured value is copied
+only when the next original alias guard requires it. Alias checks keep their
+original control flow and exception behavior. Parallel workers retain separate
+owners. Other CPU backends retain their existing snapshot construction policy.
+
 Ordinary SVE can give a closed, complete F32 pointwise output region a private
 native lane permutation when all vector inputs and its output use compatible
 F16/BF16 memory conversions. The compiler applies the same permutation to

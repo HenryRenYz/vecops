@@ -27,6 +27,29 @@ def read(name="A"):
   return I.Expr(I.TileType(source.dtype, source.shape), "load", data=source)
 
 
+@pytest.mark.parametrize("change", ("same", "shape", "stride", "offset", "dtype", "borrowed", "rank", "worker", "arm"))
+def test_snapshot_owner_reuse_rejects_different_layouts_and_shared_worker_owners(change):
+  emitter = MemoryEmitter()
+  emitter.parallel_depth = int(change == "worker")
+  emitter.environment = SimpleNamespace(codegen_target=SimpleNamespace(architecture="arm" if change == "arm" else "x86"))
+  saved = replace(view("saved"), owned=True)
+  layout = replace(saved, storage="next")
+  if change == "shape":
+    layout = replace(layout, shape=(I.literal(16),))
+  elif change == "stride":
+    layout = replace(layout, strides=(I.literal(-1),))
+  elif change == "offset":
+    layout = replace(layout, offset=I.literal(1))
+  elif change == "dtype":
+    layout = replace(layout, dtype="int32")
+  elif change == "borrowed":
+    saved = replace(saved, owned=False)
+  elif change == "rank":
+    layout = replace(layout, shape=(I.literal(1), *layout.shape), strides=(I.literal(17), *layout.strides))
+  assert emitter.reusable_snapshot_owner((saved, "historical_guard"), layout) == (change == "same")
+  assert not emitter.reusable_snapshot_owner(None, layout)
+
+
 def plans(statements):
   kernel = I.KernelIR(I.Block(statements), {}, {})
   return kernel, snapshot_lifetime_scopes(kernel, freeze(target="Scalar").operations)
@@ -413,7 +436,7 @@ def native_snapshot_kernels(tmp_path_factory):
 def test_native_aliases_history_helpers_fullowners_and_two_poisons(native_snapshot_kernels, kind, enabled):
   compiled = native_snapshot_kernels[kind, enabled]
   for width in (0, 1, 17, 33):
-    for layout in ("dense", "shifted", "inplace", "negative"):
+    for layout in ("dense", "shifted", "inplace", "late_inplace", "late_shifted", "both", "negative"):
       for poison in (-90.0, 195.0):
         n = 3 * width
         owner = np.full(3 * n + 16, poison, np.float32)
@@ -425,11 +448,17 @@ def test_native_aliases_history_helpers_fullowners_and_two_poisons(native_snapsh
           c = owner[5 : 5 + n].reshape(3, width)
         elif layout == "inplace":
           c = a
+        elif layout == "late_inplace":
+          d = a
+        elif layout == "late_shifted":
+          d = owner[5 : 5 + n].reshape(3, width)
+        elif layout == "both":
+          c, d = a, a
         elif layout == "negative":
           a, c, d = a[:, ::-1], c[:, ::-1], d[:, ::-1]
         expected = owner.copy()
 
-        def equivalent(array):
+        def equivalent(array, owner=owner, expected=expected):
           offset = array.ctypes.data - owner.ctypes.data
           return np.ndarray(array.shape, dtype=array.dtype, buffer=expected, offset=offset, strides=array.strides)
 
