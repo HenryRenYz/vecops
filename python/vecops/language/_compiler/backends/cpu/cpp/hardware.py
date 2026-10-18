@@ -134,6 +134,8 @@ class HardwareEmitter(SMEInstructionEmitter):
 
   def hardware_region(self, region, future):
     kind = region.kind
+    if kind == "amx":
+      self.uses_amx_mask_policy = True
     guard = "HAS_SME_FA64" if kind == "sme" else "HAS_AMX_TILE"
     self.line(f"#if defined({guard})")
     plan = self.prepared.hardware[id(region)]

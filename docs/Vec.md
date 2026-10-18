@@ -834,6 +834,12 @@ vec/details/{scalar,sve,x86}/X.h   ISA specializations (NativeImpl /
                              NativeWordImpl) for that backend tag
 ```
 
+The x86 prefix-mask helpers saturate signed counts to the physical lane count
+before forming a mask. Generated AMX translation units request an inline scalar
+normalizer to avoid metadata calls and vector spills in large native owners.
+Ordinary SIMD translation units retain the default standard-library expression;
+the policy changes code placement, not mask semantics.
+
 **Dispatch.** Each top-level header declares its Op functor types and the
 `inline constexpr` entry variables, then includes the backend specializations,
 then defines the `operator()` bodies. `details::execute()` probes, at compile

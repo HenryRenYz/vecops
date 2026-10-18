@@ -21,6 +21,9 @@
 #include <cstring>
 #include <type_traits>
 
+#if defined(VECOPS_KERNEL_AMX_INLINE_METADATA)
+#include "vecops/util/Math.h"
+#endif
 #include "vecops/vec/details/Dispatch.h"
 #include "vecops/vec/details/Wordwise.h"
 
@@ -46,7 +49,12 @@ template <nint_t ElementBytes, typename Raw>
 
 VECOPS_ALWAYS_INLINE Raw x86_vector_mask_prefix(nint_t count) {
   constexpr nint_t lanes = static_cast<nint_t>(sizeof(Raw)) / ElementBytes;
+#if defined(VECOPS_KERNEL_AMX_INLINE_METADATA)
+  // Native matrix kernels keep tail metadata inline across vector spills.
+  count = ::vecops::clamp<nint_t>(count, 0, lanes);
+#else
   count = std::clamp<nint_t>(count, 0, lanes);
+#endif
   if constexpr (sizeof(Raw) == 16) {
     if constexpr (ElementBytes == 1) {
       const auto index = _mm_setr_epi8(
@@ -103,7 +111,12 @@ VECOPS_ALWAYS_INLINE Raw x86_mask_prefix(nint_t count) {
 #else
       static_cast<nint_t>(sizeof(Raw)) / element_bytes;
 #endif
+#if defined(VECOPS_KERNEL_AMX_INLINE_METADATA)
+  // Native matrix kernels keep tail metadata inline across vector spills.
+  count = ::vecops::clamp<nint_t>(count, 0, lanes);
+#else
   count = std::clamp<nint_t>(count, 0, lanes);
+#endif
 #if defined(CPU_CAPABILITY_AVX512)
   if (count == 0) return Raw{0};
   if (count == lanes) return static_cast<Raw>(~Raw{0});

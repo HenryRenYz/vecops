@@ -54,6 +54,9 @@ def test_only_vector_fallback_has_an_explicit_private_call(tiled, outlined):
   assert all(not any(isinstance(node, I.HardwareRegion) for node in nodes(call.body)) for call in calls)
   assert not any(isinstance(node, I.ExitRegion) and node.outlined for call in calls for node in nodes(call.body))
   assert "VECOPS_NOINLINE" in artifact.source
+  policy = "#define VECOPS_KERNEL_AMX_INLINE_METADATA 1"
+  assert artifact.source.count(policy) == 1
+  assert artifact.source.index(policy) < artifact.source.index('#include "vecops/Kernel.h"')
 
 
 @pytest.mark.parametrize("value", [1, "true", None])
@@ -156,6 +159,7 @@ def test_default_outline_policy_uses_the_measured_target_boundary(target, outlin
   assert calls
   assert all(contains_disjoint_guard(call.body) == outlined for call in calls)
   assert all(not any(isinstance(node, I.HardwareRegion) for node in nodes(call.body)) for call in calls)
+  assert ("#define VECOPS_KERNEL_AMX_INLINE_METADATA 1" in artifact.source) == (target == "AVX512")
 
 
 @pytest.mark.parametrize("target", ["AVX512", "SME"])
@@ -164,3 +168,17 @@ def test_explicit_vector_recipe_retains_inline_dispatch(target):
     template(implementation="vector").ir, (), target=target, options={"cpu_outline_vector_fallback": True}
   )
   assert not any(isinstance(node, I.ExitRegion) and node.outlined for node in nodes(artifact.kernel.body))
+  assert "VECOPS_KERNEL_AMX_INLINE_METADATA" not in artifact.source
+
+
+@pytest.mark.parametrize("target", ["AVX512", "SME"])
+def test_pointwise_kernel_keeps_default_mask_normalization(target):
+  @T.template
+  def pointwise(
+    A: T.Tensor((17,), dtype="float32"),
+    C: T.Tensor((17,), dtype="float32", access="output"),
+  ):
+    T.store(C, T.load(A) + 1)
+
+  artifact = CPUBackend().lower(pointwise.ir, (), target=target)
+  assert "VECOPS_KERNEL_AMX_INLINE_METADATA" not in artifact.source

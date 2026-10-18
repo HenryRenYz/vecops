@@ -74,6 +74,7 @@ class CPUEmitter(
     # an outlined architectural owner. Runtime metadata stays snapshotted.
     self.hardware_geometry_definitions = prepared.immutable_geometry
     self.uses_streaming_math_policy = False
+    self.uses_amx_mask_policy = False
     self.buffer_declarations = {}
     storage = prepared.storage
     self.branch_buffer_scopes = storage.scopes if storage is not None else {}
@@ -261,6 +262,8 @@ class CPUEmitter(
         for line in self.lines
       ]
     headers = (_SME_MATH_POLICY if self.uses_streaming_math_policy else "") + '#include "vecops/execution/Atomic.h"\n'
+    if self.uses_amx_mask_policy:
+      headers = "#define VECOPS_KERNEL_AMX_INLINE_METADATA 1\n" + headers
     if self.traces_memory:
       headers = "#define VECOPS_DSL_MEMORY_TRACE 1\n" + headers
     if any(isinstance(n, I.Print) for n in nodes(self.ir.body)) and self.vector_ir.manager.options.get(

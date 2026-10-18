@@ -2716,6 +2716,13 @@ remains independent of outlining. These choices do not alter the native tile
 schedule or generic FP32/FP64 reduction rules.
 An explicit boolean override remains available for target-specific experiments.
 
+Generated translation units that emit an AMX hardware owner request inline
+scalar prefix-mask normalization from the x86 backend. This avoids outlined
+metadata calls and their vector spills in large packing/matmul owners. The
+emitter selects this policy from emitted hardware regions; ordinary SIMD
+recipes and SME kernels retain their existing normalization. Empty, negative,
+full-width and oversized counts preserve the same saturation semantics.
+
 `T.sve.iota`, `join_k_groups`, `broadcast_segment`, `row_pair`, and `mmla` expose pure
 ordinary-SVE register operations. They require complete scalable `pow=0`
 registers and run outside SME owners. `iota(dtype)` returns the zero-based lane
