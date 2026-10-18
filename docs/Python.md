@@ -931,8 +931,12 @@ Oversized virtual vectors remain streamable, not forced into one native value.
 Nonadjacent reduction-axis copies retain distinct lane domains. Loop-carried
 scalar dependencies and break/continue retain ordered loops; alias-dependent
 serial iterations have a runtime ordered fallback. Tails are always guarded.
-Ordinary SVE/SME and x86 AVX traversals may split only their masked remainder into native-word
-register fragments, accounting for wider load/store dtypes. Full-loop grouping
+Ordinary SVE/SME traversals split only their masked remainder into native-word
+register fragments, accounting for wider load/store dtypes. AVX traversals retain
+grouped masked remainders by default: splitting them can duplicate setup and
+increase code size for short or fused tails. The internal `cpu_native_word_tails`
+option can explicitly enable fragment planning for AVX experiments. The default
+uses the code generation target, independently of cost-model overrides. Full-loop grouping
 and the requested unroll remain unchanged. Reduction banks are reconstructed
 before their original horizontal reduction, preserving their lane/order
 contract; explicit SIMD and loop-carried vector extents retain their existing

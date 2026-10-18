@@ -146,6 +146,30 @@ def test_native_tail_selection_uses_codegen_isa_not_cost_override(target, select
   assert ("native-word masked remainder" in artifact.source) is selected
 
 
+@pytest.mark.parametrize(
+  "target,selected",
+  (("SVE", True), ("SME", True), ("AVX", False), ("AVX2", False), ("AVX512", False), ("NEON", False), ("Scalar", False)),
+)
+def test_default_tail_policy_uses_codegen_target_with_explicit_override(target, selected):
+  # Cost-model overrides must not enable a different ISA's tail policy.
+  options = {
+    "_vector_state": VectorState(64, 32),
+    "cpu_reduction_chunk_pow": 1,
+    "cpu_math_chunk_pow": 1,
+    "cpu_cost_target": CPUTarget("x86", "avx512", vector_bits=512)
+    if target in {"SVE", "SME", "NEON"}
+    else CPUTarget("arm", "sme", vector_bits=512),
+  }
+  artifact = CPUBackend().lower(reduction_template().ir, (), target=target, options=options)
+  assert any(region.native_tails for region in artifact.lowered.regions) is selected
+  assert ("native-word masked remainder" in artifact.source) is selected
+  if target in {"AVX", "AVX2", "AVX512"}:
+    explicit = CPUBackend().lower(
+      reduction_template().ir, (), target=target, options={**options, "cpu_native_word_tails": True}
+    )
+    assert any(region.native_tails for region in explicit.lowered.regions)
+
+
 @pytest.mark.parametrize("vl,svl", ((16, 64), (32, 16), (64, 32)))
 def test_native_tail_grouping_is_independent_of_ordinary_and_streaming_lengths(vl, svl):
   artifact = lower(reduction_template("float64", "float32"), target="SME", vl=vl, svl=svl)

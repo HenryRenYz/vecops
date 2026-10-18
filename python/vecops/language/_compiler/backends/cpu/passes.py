@@ -99,8 +99,11 @@ def legalize_math(region, context):
 def plan_native_word_tails(region, context):
   """Keep full groups and split masked remainders into physical word fragments.
 
-  Grouped x86 tails also execute zero-mask operations for inactive words.
-  A word-sized remainder lets ordinary empty-fragment guards remove them.
+  SVE grouped predicates can require tuple work even for empty physical
+  words. Splitting those words lets ordinary empty-fragment guards remove
+  them. AVX masked groups already lower efficiently; fragmenting them can
+  duplicate tail setup and increase native code size. Keep their grouping
+  by default, while retaining the explicit option for target experiments.
 
   A native compute vector can still widen to multiple memory words. Account
   for every dtype domain with the already-legalized rebind headroom, instead
@@ -109,11 +112,11 @@ def plan_native_word_tails(region, context):
   """
   if context.options.get("backend") != "cpu":
     return PassResult(region, changed=False)
-  enabled = context.options.get("cpu_native_word_tails", True)
+  target = context.environment.codegen_target
+  enabled = context.options.get("cpu_native_word_tails", target.architecture == "arm")
   if not isinstance(enabled, bool):
     raise ValueError("cpu_native_word_tails must be bool")  # noqa: TRY004 - Match existing CPU pass-option validation.
   region.native_tails = {}
-  target = context.environment.codegen_target
   if (
     not enabled
     or not (
