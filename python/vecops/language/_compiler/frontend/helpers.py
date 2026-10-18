@@ -72,6 +72,9 @@ class ValueFunction:
 
 class HelperFrontend:
   def helper(self, body, node, *, arguments=None, keyword_arguments=None):
+    overrides = getattr(self, "helper_overrides", None)
+    if overrides:
+      body = overrides.get(body.identity, body)
     if body.tree.args.vararg or body.tree.args.kwarg or body.tree.args.posonlyargs:
       self.error(node, "DSL helpers currently require named positional/keyword-only parameters")
     if self.helper_depth >= 32:
@@ -277,12 +280,20 @@ class HelperFrontend:
     self.block.statements.append(I.Exit(context["name"]))
 
 
-def expand_helper(function, arguments, *, catalog, prefix, keyword_arguments=None, hardware_kind=None):
+def expand_helper(
+  function, arguments, *, catalog, prefix, keyword_arguments=None, hardware_kind=None, helper_overrides=None
+):
   """Expand a DSL helper into an executable region with a unique namespace.
 
   Unlike an expression-only adapter, this entry preserves ordinary control,
   effects and typed results. The caller must place the region at a legal
   execution site; helper source/captures are still handled by the frontend.
+
+  ``helper_overrides`` maps captured identities to replacement captured bodies
+  for this expansion and its nested calls. The mapping is copied; ordinary
+  helper binding, return checks and hardware-boundary validation still apply.
+  This lets a backend select a call boundary without changing shared library
+  functions or the policy of independent packing kernels.
   """
   import inspect
 
@@ -294,6 +305,16 @@ def expand_helper(function, arguments, *, catalog, prefix, keyword_arguments=Non
   body = capture(function.function, inline=function.inline)
   ir = TemplateIR(prefix, inspect.Signature(), {}, (), None, (), None, body.filename, body)
   frontend = Frontend(ir, catalog=catalog)
+  # Scope captured specializations to this expansion; never mutate a helper's
+  # global capture or let the policy escape into another recipe.
+  from types import MappingProxyType
+
+  from .capture import Body
+
+  overrides = dict(helper_overrides or {})
+  if any(not isinstance(key, str) or not isinstance(value, Body) for key, value in overrides.items()):
+    raise TypeError("helper overrides require captured identities and Body values")
+  frontend.helper_overrides = MappingProxyType(overrides)
   if hardware_kind is not None:
     frontend.hardware_regions.append((hardware_kind, ()))
 

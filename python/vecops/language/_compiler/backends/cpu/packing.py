@@ -32,6 +32,18 @@ def expand_packing_recipes(ir, context):
     for view in write_views if not view.owned and view.region is not None
   )
   opaque_hardware = any(isinstance(statement, I.ArchitectureCall) for statement in statements)
+  # Dot recipes have already exposed native owners. Keep online B-packing
+  # scratch out of their large compute frame, while standalone pack kernels
+  # retain inline register transforms and their original call overhead.
+  compute_helpers = None
+  if any(isinstance(statement, I.HardwareRegion) and statement.kind == "amx" for statement in statements):
+    from ...._library.amx_matmul import _pack_b_fringe, _pack_b_full, _pack_b_full_k
+    from ...frontend.capture import capture
+
+    compute_helpers = {
+      capture(helper.function, inline=helper.inline).identity: capture(helper.function, inline=False)
+      for helper in (_pack_b_full, _pack_b_full_k, _pack_b_fringe)
+    }
   unknown_writes = any(not view.owned and view.region is None for view in write_views)
 
   def visit(block):
@@ -92,6 +104,7 @@ def expand_packing_recipes(ir, context):
         keyword_arguments=keywords,
         catalog=environment.operations,
         prefix=f"dsl_pack_{serial}",
+        helper_overrides=compute_helpers if native and format_ == "amx" else None,
       )
       output.extend(generic)
     block.statements = output

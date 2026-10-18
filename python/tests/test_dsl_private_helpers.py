@@ -146,3 +146,60 @@ def test_dynamic_strided_alias_and_scratch_owner_keep_call_time_values(compiler)
       np.testing.assert_array_equal(c, before + (6 if alias else 3))
       if not alias:
         np.testing.assert_array_equal(a, before)
+
+
+def test_staged_helper_specialization_is_local_and_preserves_captured_identity():
+  from vecops.language._compiler import ir as I
+  from vecops.language._compiler.frontend.helpers import expand_helper
+  from vecops.language._compiler.ir.traversal import nodes
+  from vecops.language._compiler.operations import snapshot
+
+  @T.func
+  def inner(value):
+    return value + 1
+
+  @T.func
+  def outer(value):
+    return inner(value) * 2
+
+  original = capture(inner.function)
+  private = capture(inner.function, inline=False)
+  overrides = {original.identity: private}
+  argument = I.Expr(I.ScalarType("int64"), "raw", data="input")
+
+  def expand(policy=None):
+    return expand_helper(outer, (argument,), catalog=snapshot(), prefix="specialized", helper_overrides=policy)
+
+  _, ordinary = expand()
+  _, specialized = expand(overrides)
+  overrides.clear()
+  _, repeated = expand()
+  assert not any(isinstance(node, I.ExitRegion) and node.outlined for node in nodes(I.Block(ordinary)))
+  regions = [node for node in nodes(I.Block(specialized)) if isinstance(node, I.ExitRegion) and node.outlined]
+  assert len(regions) == 1
+  assert not any(isinstance(node, I.ExitRegion) and node.outlined for node in nodes(I.Block(repeated)))
+  assert inner.inline and capture(inner.function).identity == original.identity
+  assert capture(outer.function).environment["inner"].identity == original.identity
+  assert any(node is argument for node in nodes(I.Block(specialized)))
+
+
+def test_staged_helper_specialization_preserves_hardware_boundary_validation():
+  from vecops.language._compiler import ir as I
+  from vecops.language._compiler.frontend.helpers import expand_helper
+  from vecops.language._compiler.operations import snapshot
+
+  @T.func
+  def inner(value):
+    return value + 1
+
+  @T.func
+  def outer(value):
+    return inner(value)
+
+  overrides = {capture(inner.function).identity: capture(inner.function, inline=False)}
+  with pytest.raises(TypeError, match="private T.func calls cannot cross an active hardware"):
+    expand_helper(
+      outer, (I.literal(3),), catalog=snapshot(), prefix="hardware", hardware_kind="amx", helper_overrides=overrides
+    )
+  with pytest.raises(TypeError, match="captured identities and Body"):
+    expand_helper(outer, (I.literal(3),), catalog=snapshot(), prefix="invalid", helper_overrides={"bad": inner})

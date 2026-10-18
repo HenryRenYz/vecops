@@ -795,6 +795,12 @@ accumulator state, conversions and stores before vector optimization.
 Default `T.func` helpers inline before fusion analysis, including nested library
 calls; `inline=False` retains a call region whose body is optimized separately
 from its caller's adjacent statements.
+CPU recipe staging can specialize captured helper call boundaries within one
+expansion, preserving the original shared helper and its capture identity.
+After native AMX owners are exposed, online B-packing uses private helper
+calls to bound compute-frame scratch lifetimes; independent packing kernels
+retain their inline register transforms. Hardware regions stay in their
+original caller, and private calls cannot cross an active hardware region.
 Rank-two layernorm/softmax compute row statistics once; their final affine/exp
 tail can remain in the operand DAG. Fusion estimates the complete DAG's cost,
 not membership in an expensive-op list.
