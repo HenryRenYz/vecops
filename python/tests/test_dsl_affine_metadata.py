@@ -560,3 +560,41 @@ def test_query_canonical_cache_preserves_nonidempotent_traversals():
 
   assert I.same_expr(query(I.literal(0), {}), second)
   assert analysis._metadata_query.get() is None
+
+
+
+def test_integer_term_keys_bound_shared_nonlinear_dag_cost(monkeypatch):
+  from vecops.language._compiler.operations.registry import OperationCatalog
+
+  original, lookups = OperationCatalog.get, []
+
+  def observe(self, operation):
+    lookups.append(operation)
+    return original(self, operation)
+
+  monkeypatch.setattr(OperationCatalog, "get", observe)
+  shared = local("i")
+  for _ in range(64):
+    shared = I.Expr(shared.type, "floordiv", (shared, shared))
+  result = canonical_integer(I.Expr(shared.type, "sub", (shared, shared)))
+  assert I.constant(result) == 0
+  assert len(lookups) < 1000  # expanded structural keys require 2**64 visits
+
+
+def test_integer_term_numbering_preserves_symbol_namespaces_and_effects():
+  from vecops.language._compiler.operations import OpDef, snapshot, use_catalog
+  from vecops.language._compiler.operations.registry import OperationCatalog
+
+  kind = I.ScalarType("int64")
+  first = I.Expr(kind, "term_probe", (local("i"),))
+  second = I.Expr(kind, "term_probe", (local("i"),))
+  difference = I.Expr(kind, "sub", (first, second))
+  base = snapshot()
+  for effect in ("none", "read", "unknown", "none"):
+    definitions = dict(base.definitions)
+    definitions["term_probe"] = OpDef("term_probe", "metadata", effects=effect)
+    with use_catalog(OperationCatalog(definitions, f"term-{effect}")):
+      result = canonical_integer(difference)
+      assert (I.constant(result) == 0) == (effect == "none")
+  raw = I.Expr(kind, "raw", data="i")
+  assert I.constant(canonical_integer(I.Expr(kind, "sub", (raw, local("i"))))) is None

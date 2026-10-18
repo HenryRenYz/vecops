@@ -2835,6 +2835,11 @@ of excluded definitions, retains its expression inputs, and expires before
 returning; definitions and branch facts never carry across queries. Shape and
 provenance payloads keep their existing substitution rules. Affine membership
 walks owned metadata only when a payload can contain IR nodes.
+Canonical integer term keys intern child numbers within that same traversal,
+so shared nonlinear metadata is neither expanded into recursive tuple keys nor
+repeatedly hashed as a tree. Named affine symbols retain their namespaces;
+opaque and effectful terms retain identity, and each traversal owns its catalog
+and strong expression references.
 
 `benchmarks/dsl_compile_latency.py` measures fixed matrix-catalog groups through
 public `T.compile` and `generated_source`, without requesting native kernel

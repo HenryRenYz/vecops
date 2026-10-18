@@ -339,6 +339,43 @@ def simplify_ordered(value, bounds):
   return value
 
 
+
+_integer_term_keys = object()
+
+
+class _IntegerTermKeys:
+  """Compact structural keys within one canonical integer traversal.
+
+  Unlike lexical CSE keys, named affine symbols deliberately compare by their
+  namespace and spelling. Effectful/opaque terms retain identity. Interning
+  child numbers avoids recursively hashing a shared DAG as an expanded tree.
+  Inputs remain strongly owned, and neither keys nor the catalog escape the
+  traversal's memo; these keys carry no facts between proof environments.
+  """
+
+  def __init__(self):
+    from ..operations import current
+
+    self.catalog = current()
+    self.inputs, self.numbers = {}, {}
+
+  def key(self, expression):
+    identity = id(expression)
+    if identity in self.inputs:
+      return self.inputs[identity][1]
+    if expression.op in {"raw", "symbol", "local", "frozen"}:
+      signature = expression.op, expression.data, expression.type.dtype
+    elif expression.op in {"literal", "min", "max", "streaming_lanes"}:
+      signature = expression.op, expression.data, expression.type.dtype, tuple(self.key(a) for a in expression.args)
+    elif expression.data is None and self.catalog.get(expression).effects == "none":
+      signature = expression.op, expression.type.dtype, tuple(self.key(a) for a in expression.args)
+    else:
+      signature = identity
+    number = self.numbers.setdefault(signature, len(self.numbers))
+    self.inputs[identity] = expression, number
+    return number
+
+
 def canonical_integer(value, *, _memo=None):
   """Normalize pure integer metadata sums without touching floating DAGs."""
   shared = None
@@ -408,20 +445,9 @@ def _canonical_integer(value, memo):
     return value
   constants, terms = 0, {}
 
-  def key(expression):
-    from ..operations import current
-
-    if expression.op in {"raw", "symbol", "local", "frozen"}:
-      return expression.op, expression.data, expression.type.dtype
-    if expression.op in {"literal", "min", "max", "streaming_lanes"}:
-      return expression.op, expression.data, expression.type.dtype, tuple(key(a) for a in expression.args)
-    if expression.data is None and current().get(expression).effects == "none":
-      # Equal pure metadata products/quotients may arrive through distinct
-      # view edges. Identity-only terms lose cancellation of row*pitch and
-      # retain physical-address clamps even when logical bounds are proved.
-      # Memory/state reads and opaque operations deliberately stay distinct.
-      return expression.op, expression.type.dtype, tuple(key(a) for a in expression.args)
-    return id(expression)
+  if _integer_term_keys not in memo:
+    memo[_integer_term_keys] = _IntegerTermKeys()
+  key = memo[_integer_term_keys].key
 
   def collect(expression, factor):
     nonlocal constants
