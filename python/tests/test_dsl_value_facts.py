@@ -688,3 +688,50 @@ def test_default_recipe_cleanup_consumes_captured_full_span_equality():
   assert not any(isinstance(node, I.If) for node in owned)
   stores = [node for node in owned if isinstance(node, I.Store)]
   assert stores and all(I.constant(store.value) == 1 for store in stores)
+
+
+def test_ownership_traversal_can_stop_at_expression_roots_without_skipping_them():
+  from vecops.language._compiler.ir.traversal import nodes
+
+  extent, argument = local("extent"), local("argument")
+  expression = I.Expr(I.TileType("int64", (extent,)), "wrapper", (argument,))
+  statement = I.Assign("result", expression)
+  assert list(nodes(statement, stop=(I.Expr,))) == [statement, expression]
+  assert list(nodes(statement, skip=(I.Expr,))) == [statement]
+  visited = list(nodes(statement))
+  assert extent in visited and argument in visited
+
+
+def test_opaque_region_checks_scale_with_shared_expression_roots(monkeypatch):
+  from vecops.language._compiler.passes.kernel import facts as implementation
+
+  original = implementation.nodes
+  visits = []
+  def observed(value, *args, **kwargs):
+    for node in original(value, *args, **kwargs):
+      if isinstance(node, I.Expr):
+        visits.append(node)
+      yield node
+  monkeypatch.setattr(implementation, "nodes", observed)
+  value = local("input")
+  statements = []
+  for index in range(48):
+    value = binary("add", value, value)
+    statements.append(I.Assign("result_" + str(index), value))
+  result, _, _ = run([loop(statements, stop=1, step=1)])
+  assert result[0].body.statements[-1].value is value
+  # Count ownership visits rather than timing: shared DAG tails must not be
+  # expanded independently through every enclosing statement.
+  assert len(visits) < 48 * 12
+
+
+def test_stopped_expression_still_accounts_for_opaque_type_metadata_in_a_loop():
+  effect = I.Expr(I.ScalarType("int64"), "opaque_mutation")
+  view = I.View("A", "int64", (effect,), (I.literal(1),), I.literal(0))
+  read = I.Expr(I.TileType("int64", (effect,)), "load", data=view)
+  statements, _, _ = run([
+    I.Assign("x", I.literal(7)), loop([I.Assign("read", read)], stop=1, step=1),
+    I.Assign("after", local("x")),
+  ])
+  assert statements[1].body.statements[0].value is read
+  assert statements[2].value.op == "local"

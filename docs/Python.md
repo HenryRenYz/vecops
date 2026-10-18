@@ -1160,6 +1160,11 @@ including their original operand bindings. This preserves the existing C++
 behavior rather than introducing a new integer promotion policy. Shared effect
 proofs include expression-owned type/data dependencies; loads, traps and cycles
 in those dependencies cannot become discardable through a pure wrapper.
+Opacity checks stop the structural walk at expression roots and delegate their
+arguments and owned metadata to the memoized semantic query. Shared DAG tails
+are not expanded again for each enclosing statement. Mutable control bodies
+are still inspected after rewriting, so unknown effects continue to invalidate
+facts at the correct program point.
 Conditional operand-cache selections follow the same lexical facts as their
 allocation guards. A safely proven false selector reuses the original producer,
 including its historical read/state identities. Named allocation predicates stay
@@ -1916,6 +1921,11 @@ the grid thread budget. Results record the warmup duration and invocation rounds
 This lets an idle powersave CPU reach its working performance state without
 changing the system governor. Calibration and timed samples follow the warmup;
 source, numerical and allocation checks remain outside those samples.
+`benchmarks/dsl_compiler_lowering.py` separately measures fixed dot/matmul source
+lowering, including outlined SIMD fallbacks. It starts each sample from a fresh
+template IR, records elapsed time and generated-source hashes, and excludes
+native compilation/execution. Use the same target, fallback option and pinned
+CPU when comparing snapshots; it does not select an implementation.
 Reports include frequency/governor/affinity without changing them. Memory
 instrumentation records DSL scratch allocation/release plus existing workspace
 sites; timeline instrumentation records kernel/grid-program regions. IDs are

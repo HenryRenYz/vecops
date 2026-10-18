@@ -226,9 +226,12 @@ def propagate_value_facts(ir, context):
       return opaque_expression(value)
     if isinstance(value, I.Block):
       return any(not isinstance(statement, known) or opaque(statement) for statement in value.statements)
-    return any(isinstance(node, I.Expr) and opaque_expression(node) for node in nodes(value, skip=(I.Block,))) or any(
-      opaque(child) for child in children(value)
-    )
+    # opaque_expression already checks argument and owned-metadata DAGs.
+    # Re-expanding them at every statement makes shared graphs quadratic.
+    return any(
+      isinstance(node, I.Expr) and opaque_expression(node)
+      for node in nodes(value, skip=(I.Block,), stop=(I.Expr,))
+    ) or any(opaque(child) for child in children(value))
 
   class Scope:
     def __init__(self, bindings, aliases=None):

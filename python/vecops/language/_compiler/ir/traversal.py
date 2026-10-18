@@ -30,11 +30,14 @@ def walk_unique(expression):
     pending.extend(reversed(value.args))
 
 
-def nodes(value, seen=None, *, skip=()):
+def nodes(value, seen=None, *, skip=(), stop=()):
   """Walk each owned IR node once, including data and shape metadata.
 
   Expression/shape graphs share nodes heavily; recursive tree expansion would
   make capability detection exponential for nested helper/reduction DAGs.
+  ``skip`` omits matching nodes and their descendants. ``stop`` yields the
+  matching node without descending into its owned metadata or arguments;
+  use it when a memoized semantic query already covers those dependencies.
   """
   if seen is None:
     seen = set()
@@ -42,12 +45,14 @@ def nodes(value, seen=None, *, skip=()):
     return
   if isinstance(value, (tuple, list)):
     for item in value:
-      yield from nodes(item, seen, skip=skip)
+      yield from nodes(item, seen, skip=skip, stop=stop)
   elif isinstance(value, I.Node) and id(value) not in seen:
     seen.add(id(value))
     yield value
+    if isinstance(value, stop):
+      return
     for field in fields(value):
-      yield from nodes(getattr(value, field.name), seen, skip=skip)
+      yield from nodes(getattr(value, field.name), seen, skip=skip, stop=stop)
 
 
 def children(statement):
