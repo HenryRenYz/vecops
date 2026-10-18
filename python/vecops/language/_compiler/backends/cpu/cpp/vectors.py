@@ -494,6 +494,9 @@ class VectorsEmitter:
     if state_plan is not None:
       self.traverse_state_region(state_plan, region, callback, setup, finish)
       return
+    alignment_plans = getattr(self.prepared, "aligned_stores", None)
+    alignment = alignment_plans.get(id(region)) if alignment_plans else None
+    peel_store = alignment.proof.destination if alignment is not None and setup is None and finish is None else None
     variants = [(power, region.base_power, region.groupings[power]) for power in sorted(region.groupings, reverse=True)]
     # The least permissive CPU backend allows four native words (pow=2).
     # A grouped byte dot with an FP64 producer needs additional input lanes,
@@ -525,6 +528,7 @@ class VectorsEmitter:
       if (
         self.environment.codegen_target.architecture == "x86"
         and region.full_chunks
+        and peel_store is None
         and not (region.single_chunk and base_power == region.base_power and len(groups) == 1)
       ):
         # x86 has an invariant physical width. Compute the complete-vector
@@ -599,6 +603,24 @@ class VectorsEmitter:
         body(full)
       elif region.full_chunks:
         self.line(f"vecops::nint_t {coordinate} = 0;")
+        if peel_store is not None:
+          alignment_tag = self.unique("alignment_tag")
+          self.tag_dtypes[alignment_tag] = region.dtype
+          self.tag_geometry[alignment_tag] = True, 0
+          self.line(f"using {alignment_tag} = vecops::vec::ScalableTag<{CPP_TYPES[region.dtype]}, 0>;")
+          address = self.unique("row_address")
+          prefix = self.unique("aligned_prefix")
+          pointer = self.pointer(peel_store, tuple(coordinates) + ("0",))
+          element_bytes = f"sizeof({CPP_TYPES[region.dtype]})"
+          alignment_bytes = f"({self.vector_size(alignment_tag)} * {element_bytes})"
+          self.line(f"const auto {address} = reinterpret_cast<std::uintptr_t>({pointer});")
+          self.line(f"const vecops::nint_t {prefix} = {address} % {element_bytes} == 0 ? std::min<vecops::nint_t>(({stop}), (({alignment_bytes} - {address} % {alignment_bytes}) % {alignment_bytes}) / {element_bytes}) : 0;")
+          self.opening(f"if ({prefix} > 0) /* alignment prologue */")
+          body(False, stop=prefix)
+          self.close()
+          self.line(f"{coordinate} = {prefix};")
+          full_end = self.unique("aligned_full_end")
+          self.line(f"const vecops::nint_t {full_end} = static_cast<vecops::nint_t>(static_cast<__int128>({stop}) - (static_cast<__int128>({stop}) - {prefix}) % (static_cast<__int128>({self.vector_size(base)}) * {region.unroll}));")
         condition = (
           f"{coordinate} < {full_end}"
           if full_end is not None

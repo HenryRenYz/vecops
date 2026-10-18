@@ -60,6 +60,7 @@ def verify_prepared(prepared):
   verify_partition_proofs(prepared, confirmed.partitions)
   verify_broadcast_proofs(prepared, confirmed.broadcasts)
   verify_scalar_geometry(prepared, confirmed.geometry)
+  verify_store_alignment(prepared, confirmed.alignment)
   return prepared
 
 
@@ -150,6 +151,7 @@ def _memory_proofs(prepared):
     return collect_memory_proofs(
       prepared.vectors.kernel,
       region_shapes={identity: region.shape for identity, region in getattr(prepared.vectors, "plans", {}).items()},
+      align_stores=getattr(getattr(environment, "codegen_target", None), "architecture", None) == "x86",
     )
 
 
@@ -326,4 +328,31 @@ def verify_reshape_suffixes(prepared):
     require(actual is not None and actual.subject is proof.subject, "stale reshape suffix subject")
     require(
       type(proof.dimensions) is int and proof.dimensions == actual.dimensions, "invalid reshape suffix dimensions"
+    )
+
+
+
+def verify_store_alignment(prepared, confirmed):
+  from .alignment import AlignedStore, StoreAlignmentProof, select_aligned_stores
+
+  proofs = getattr(prepared, "store_alignment_proofs", {})
+  plans = getattr(prepared, "aligned_stores", {})
+  if not proofs and not plans:
+    return
+  for identity, proof in proofs.items():
+    actual = confirmed.get(identity)
+    require(type(proof) is StoreAlignmentProof and actual is not None, "stale store alignment proof")
+    require(
+      proof.store is actual.store and proof.destination is actual.destination and proof.value is actual.value
+      and proof.minimum_columns == actual.minimum_columns and proof.occurrences == actual.occurrences,
+      "store alignment proof crosses geometry or lexical scopes",
+    )
+  environment = prepared.vectors.manager.options["_compiler_environment"]
+  eligible = select_aligned_stores(prepared, confirmed, environment)
+  for identity, plan in plans.items():
+    actual = eligible.get(identity)
+    require(type(plan) is AlignedStore and actual is not None, "ineligible aligned store schedule")
+    require(
+      plan.region is actual.region and plan.proof == actual.proof,
+      "stale aligned store schedule",
     )

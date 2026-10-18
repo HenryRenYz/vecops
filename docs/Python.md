@@ -1429,6 +1429,20 @@ already expanded into ordinary source recipes; there is no separate opaque
 matmul schedule catalog. Transpose planning recognizes layout conversions,
 proves dense destinations, selects dtype/ISA networks, and prepares SME
 state-owning alternatives. C++ printing runs no passes.
+
+`cpu-plan-memory-proofs` also intersects total, stable store geometry over
+lexical occurrences. `cpu-plan-store-alignment` uses those certificates for
+single-owner pointwise stores on AVX-512: sufficiently wide, unit-stride rows may
+start with a masked prefix, continue at native-word-aligned addresses, and end
+with the existing masked remainder. Pointer arithmetic stays inside the
+original nonempty row and all coordinates retain their logical offsets.
+Historical reads and alias snapshots retain their original evaluation owners.
+Explicit vector contracts, reductions, register transforms, masks, converting
+stores, worker/hardware scopes and unproved geometry keep their schedules.
+The final verifier rechecks both the lexical proof and its exact vector-region
+owner; printing consumes the prepared schedule. `cpu_align_stores=False`
+disables this policy. The prime-width cases in `dsl_loop_facts.py` and
+`dsl_compiler_optimizations.py` exercise split rows with fixed buffer layouts.
 `cpu_transpose_cache_block` (multiple of 16, default 128) and
 `cpu_transpose_loop_order` (`"input"`/`"output"`, default `"input"`) are CPU
 tuning overrides. Generic streaming multi-output fusion currently yields to

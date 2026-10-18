@@ -24,7 +24,7 @@ def vector(ir, context):
 @register_pass(
   "verify-cpu-plan",
   stage="cpu-memory",
-  after=("cpu-plan-private-captures", "cpu-plan-memory-proofs"),
+  after=("cpu-plan-private-captures", "cpu-plan-memory-proofs", "cpu-plan-store-alignment"),
 )
 def prepared(ir, context):
   if context.options.get("verify_ir", True):
