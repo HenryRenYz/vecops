@@ -3,6 +3,7 @@
 """Recovery, exact coverage, and evidence retention without native builds."""
 
 import importlib.util
+import json
 import signal
 import tarfile
 from pathlib import Path
@@ -58,6 +59,113 @@ def test_subset_manifest_does_not_duplicate_full_plan():
   assert subset["executions"] == [{"execution_id": "b"}]
   assert subset["selected_execution_ids"] == ["b"]
   assert "groups" not in subset and "declaration_indexes" not in subset
+
+
+@pytest.fixture
+def prelowered_case(tmp_path, monkeypatch):
+  monkeypatch.syspath_prepend(str(MODULE.parent))
+  import dsl_matmul_artifact_ab as ab
+  import dsl_matmul_source_equivalence as emission
+
+  snapshot = tmp_path / "snapshot"
+  native = {"sdk_sha256": "sdk", "extension_sha256": ["extension"], "target": "Native",
+            "machine": "test", "compiler_cflags": []}
+  policy = {"source_hashes": {}, "runner_hashes": {}, "pass_options": {}, "target": "Native",
+            "compiler_cflags": [], "toolchain": {"cc": "gcc", "cxx": "g++"}}
+  source_plan = tmp_path / "source-plan.json"
+  source_plan.write_text(json.dumps(policy))
+  source = tmp_path / "sources" / (suite.file_sha(source_plan) + ".cpp")
+  source.parent.mkdir()
+  source.write_text("void __kernel__() {}\n")
+  digest = suite.file_sha(source)
+  source = source.rename(source.with_name(digest + ".cpp"))
+  program = {"name": "example", "source_sha256": digest, "source_bytes": source.stat().st_size,
+             "contract": ["ABI"], "captures": {"Width": 17}, "runtime_parallelism": True,
+             "effective_cflags": ["-ffp-contract=off"]}
+  group = {"id": "shared", "execution_ids": ["a", "b"], "programs": {"dsl": program},
+           "vector_state": {"sve_bytes": None, "sme_bytes": None}}
+  document = {"completed": True, "root": str(snapshot), "plan": str(source_plan),
+              "plan_sha256": suite.file_sha(source_plan), "compiler_python_sha256": "frontend",
+              "native_environment": native, "groups": [group], "group_ids": ["shared"]}
+  manifest = tmp_path / "manifest.json"
+  manifest.write_text(json.dumps(document))
+  monkeypatch.setattr(emission, "native_environment", lambda *args: native)
+  monkeypatch.setattr(emission, "tree_sha", lambda *args: "frontend")
+  monkeypatch.setattr(ab, "template_contract", lambda template: (["ABI"], {"Width": 17}))
+  plan = {**policy, "prelowered": suite.prelowered_identity(manifest)}
+  return SimpleNamespace(snapshot=snapshot, native=native, document=document, manifest=manifest,
+                         plan=plan, source=source, group=group, program=program,
+                         template=SimpleNamespace(ir=SimpleNamespace(name="example")))
+
+
+def test_prelowered_group_subset_preserves_dsl_flags_and_vector_policy(prelowered_case):
+  c = prelowered_case
+  document, groups = suite.read_prelowered(c.plan, c.snapshot)
+  document["_manifest_directory"] = str(c.manifest.parent)
+  proof = suite.prelowered_program(document, groups, {"id": "shared", "execution_ids": ["b"]}, "dsl", c.template)
+  assert Path(proof["source"]) == c.source
+  assert proof["effective_cflags"] == ["-ffp-contract=off"] and proof["runtime_parallelism"]
+  assert proof["vector_state_token"] == "arm-vector-state:v1:sve=none:sme=none"
+
+
+@pytest.mark.parametrize("change,error", (
+  ("incomplete", "incomplete"), ("frontend", "frontend differs"),
+  ("sdk", "native sdk_sha256"), ("duplicate", "duplicates or omissions"),
+  ("policy", "pass_options"),
+))
+def test_prelowered_emission_rejects_incompatible_inputs(prelowered_case, change, error):
+  c = prelowered_case
+  if change == "incomplete":
+    c.document["completed"] = False
+  elif change == "frontend":
+    c.document["compiler_python_sha256"] = "different frontend"
+  elif change == "sdk":
+    c.document["native_environment"] = {**c.native, "sdk_sha256": "different SDK"}
+  elif change == "duplicate":
+    c.document["groups"].append(c.group)
+  else:
+    c.plan["pass_options"] = {"cpu_full_chunks": False}
+  c.manifest.write_text(json.dumps(c.document))
+  c.plan["prelowered"] = suite.prelowered_identity(c.manifest)
+  with pytest.raises(ValueError, match=error):
+    suite.read_prelowered(c.plan, c.snapshot)
+
+
+@pytest.mark.parametrize("change,error", (
+  ("scope", "execution IDs"), ("captures", "specialization captures"),
+  ("runtime", "runtime policy"), ("source", "C\\+\\+ source changed"),
+))
+def test_prelowered_program_rejects_stale_or_wrong_specialization(prelowered_case, change, error):
+  c = prelowered_case
+  c.document["_manifest_directory"] = str(c.manifest.parent)
+  selected = {"id": "shared", "execution_ids": ["b"]}
+  if change == "scope":
+    selected["execution_ids"].append("unemitted")
+  elif change == "captures":
+    c.program["captures"] = {"Width": 18}
+  elif change == "runtime":
+    c.program["runtime_parallelism"] = False
+  else:
+    c.source.write_text("different source")
+  with pytest.raises(ValueError, match=error):
+    suite.prelowered_program(c.document, {"shared": c.group}, selected, "dsl", c.template)
+
+
+def test_prelowered_manifest_is_immutable_on_resume(prelowered_case):
+  c = prelowered_case
+  c.plan["native_build_driver"] = {"path": str(MODULE), "sha256": suite.file_sha(MODULE)}
+  suite.verify_plan_sources(c.snapshot, c.plan)
+  c.manifest.write_text("changed")
+  with pytest.raises(ValueError, match="manifest changed"):
+    suite.verify_plan_sources(c.snapshot, c.plan)
+
+
+def test_prelowered_scope_checks_every_requested_group_before_native_dispatch(prelowered_case):
+  c = prelowered_case
+  requested = [{"id": "shared", "execution_ids": ["b"]}, {"id": "unemitted", "execution_ids": ["c"]}]
+  with pytest.raises(ValueError, match="execution IDs"):
+    suite.validate_prelowered_scope({"shared": c.group}, requested)
+  suite.validate_prelowered_scope({"shared": c.group}, requested[:1])
 
 
 def test_failed_index_retains_orphan_binary_source_and_mapping(tmp_path):

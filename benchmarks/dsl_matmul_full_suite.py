@@ -11,6 +11,10 @@ registered execution ID retains its own oracle and timing record. Build workers
 never allocate catalog payloads or calculate reference products. Compact mode
 archives source/adapter/commands/logs and retains executable shared libraries;
 only this runner's marked temporary work directory is removed.
+
+--prelowered-manifest consumes a completed source-equivalence emission from
+the selected compiler snapshot. Native construction preserves the DSL ABI,
+strict flags and original source provenance; it does not repeat Python lowering.
 """
 
 from __future__ import annotations
@@ -108,7 +112,7 @@ def catalog(snapshot):
 
 
 def make_plan(args, source):
-  from dsl_benchmark_selection import selection_identity, select_rows
+  from dsl_benchmark_selection import select_rows, selection_identity
   from dsl_matmul_catalog import load_cases
 
   cases = load_cases(
@@ -139,7 +143,89 @@ def make_plan(args, source):
     raise TypeError("extra-options must be a JSON object")
   if document["pass_options"] and args.label == "default":
     raise ValueError("nondefault pass options require an explicit nondefault label")
+  document["prelowered"] = prelowered_identity(getattr(args, "prelowered_manifest", None))
+  if document["prelowered"] is not None:
+    document["native_build_driver"] = {"path": str(Path(__file__).resolve()), "sha256": file_sha(__file__)}
   return document
+
+
+def file_sha(path):
+  return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def prelowered_identity(path):
+  if path is None:
+    return None
+  path = Path(path).resolve()
+  return {"path": str(path), "sha256": file_sha(path)}
+
+
+def read_prelowered(plan, snapshot):
+  """Bind the emission to its actual frontend, templates and native SDK.
+
+  Backend compiler environment flags may differ: these are emitted C++ inputs
+  to a new native compilation. Their explicit DSL flags and vector geometry
+  remain part of each program's checked proof and normal artifact identity.
+  """
+  identity = plan.get("prelowered")
+  if identity is None:
+    return None
+  from dsl_matmul_source_equivalence import native_environment, tree_sha
+
+  if prelowered_identity(identity["path"]) != identity:
+    raise ValueError("prelowered manifest changed")
+  document = read(Path(identity["path"]))
+  if not document.get("completed"):
+    raise ValueError("prelowered source emission is incomplete")
+  source_plan = Path(document["plan"])
+  if file_sha(source_plan) != document["plan_sha256"]:
+    raise ValueError("prelowered source plan changed")
+  original = read(source_plan)
+  for field in ("source_hashes", "runner_hashes", "pass_options", "target", "compiler_cflags"):
+    if original[field] != plan[field]:
+      raise ValueError(f"prelowered {field} differs from selected templates or policy")
+  if tree_sha(snapshot / "python/vecops", {".py"}) != document["compiler_python_sha256"]:
+    raise ValueError("prelowered frontend differs from selected compiler snapshot")
+  current = native_environment(snapshot, plan)
+  for field in ("sdk_sha256", "extension_sha256", "target", "machine", "compiler_cflags"):
+    if current[field] != document["native_environment"][field]:
+      raise ValueError(f"prelowered native {field} differs from selected snapshot")
+  groups = {group["id"]: group for group in document["groups"]}
+  if len(groups) != len(document["groups"]) or set(groups) != set(document["group_ids"]):
+    raise ValueError("prelowered group inventory contains duplicates or omissions")
+  return document, groups
+
+
+def prelowered_program(document, groups, group, label, template):
+  from dsl_matmul_artifact_ab import template_contract
+  from dsl_matmul_repair_suite import canonical
+  from vecops._arm_vector_state import VectorState
+
+  validate_prelowered_scope(groups, [group])
+  origin = groups[group["id"]]
+  program = origin["programs"].get(label)
+  if program is None or program["name"] != template.ir.name or program["runtime_parallelism"] is not True:
+    raise ValueError("prelowered program identity or DSL runtime policy differs")
+  contract, captures = template_contract(template)
+  if canonical((contract, captures)) != canonical((program["contract"], program["captures"])):
+    raise ValueError("prelowered program ABI or specialization captures differ")
+  source = Path(document["_manifest_directory"]) / "sources" / (program["source_sha256"] + ".cpp")
+  if source.stat().st_size != program["source_bytes"] or file_sha(source) != program["source_sha256"]:
+    raise ValueError("prelowered C++ source changed")
+  state = origin["vector_state"]
+  return {
+    "source": str(source), "raw_sha256": program["source_sha256"], "contract": contract,
+    "effective_cflags": program["effective_cflags"], "runtime_parallelism": True,
+    "vector_state_token": VectorState(state["sve_bytes"], state["sme_bytes"]).env_token,
+  }
+
+
+def validate_prelowered_scope(emitted, requested):
+  """Reject an unavailable selection before spawning native workers."""
+  for group in requested:
+    origin = emitted.get(group["id"])
+    if origin is None or not set(group["execution_ids"]) <= set(origin["execution_ids"]):
+      raise ValueError("prelowered group does not cover selected execution IDs")
 
 
 def subset_manifest(plan, ids):
@@ -169,6 +255,12 @@ def verify_plan_sources(snapshot, plan):
       path = prefix / name
       if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
         raise ValueError(f"immutable plan source changed: {path}")
+  if plan.get("prelowered") is not None:
+    if prelowered_identity(plan["prelowered"]["path"]) != plan["prelowered"]:
+      raise ValueError("prelowered manifest changed since planning")
+    driver = plan["native_build_driver"]
+    if file_sha(driver["path"]) != driver["sha256"] or Path(driver["path"]).resolve() != Path(__file__).resolve():
+      raise ValueError("prelowered native build driver changed")
 
 
 def timing_deadline_base(directory, process_pid, started):
@@ -304,13 +396,32 @@ def build_worker(args, source, plan, group, directory):
   scenarios = ab.source_scenarios(document)
   pairs = source.source_templates(scenarios[0])
   compiled = []
+  prelowered = read_prelowered(plan, args.snapshot)
+  if prelowered is not None:
+    from dsl_matmul_repair_suite import compile_cpp_source, compile_prelowered, materialize_proof
+
+    emitted, emitted_groups = prelowered
+    emitted["_manifest_directory"] = str(Path(plan["prelowered"]["path"]).parent)
+    save(directory / "prelowered-inputs.json", {
+      "emission": plan["prelowered"], "origin_root": emitted["root"],
+      "origin_frontend_sha256": emitted["compiler_python_sha256"],
+      "source_plan": emitted["plan"], "source_plan_sha256": emitted["plan_sha256"],
+      "native_build_driver": plan["native_build_driver"], "fresh_python_lowering": False,
+    })
   with vecops.collect_compile_requests() as collector:
     for packing, pair in enumerate(pairs):
       if pair is None:
         continue
       for role, template in zip(("dsl", "cpp"), pair):
-        kernel = T.compile(template, compiler=compiler, pass_options=plan["pass_options"] if role == "dsl" else None)
         label = ("pack_" if packing else "") + role
+        if prelowered is None:
+          kernel = T.compile(template, compiler=compiler, pass_options=plan["pass_options"] if role == "dsl" else None)
+        elif role == "dsl":
+          proof = prelowered_program(emitted, emitted_groups, group, label, template)
+          proof = materialize_proof(proof, work)
+          kernel = compile_prelowered(template, proof, compiler)
+        else:
+          kernel = compile_cpp_source(template, compiler)
         compiled.append((label, kernel))
     for scenario in scenarios:
       for label, kernel in compiled:
@@ -333,7 +444,15 @@ def build_worker(args, source, plan, group, directory):
   save(index_path, index)
   if not args.keep_work:
     clean_work(work)
-  return {"status": "built", "index": str(index_path), "execution_ids": group["execution_ids"]}
+  verify_plan_sources(args.snapshot, plan)
+  if prelowered is not None:
+    for packing, pair in enumerate(pairs):
+      if pair is not None:
+        prelowered_program(emitted, emitted_groups, group, "pack_dsl" if packing else "dsl", pair[0])
+  return {
+    "status": "built", "index": str(index_path), "execution_ids": group["execution_ids"],
+    "prelowered_inputs": str(directory / "prelowered-inputs.json") if prelowered is not None else None,
+  }
 
 
 def row_stage_availability(plan, execution_id, paths, stage):
@@ -606,7 +725,7 @@ def timing_batch_worker(args, source, plan, request_path):
     args.resume_after_row_failure = entry.get("recovering", False)
     try:
       result = timing_worker(args, source, plan, group, directory)
-    except Exception:  # A setup exception affects only this group, not the next.
+    except Exception:  # noqa: BLE001 -- A setup exception affects only this group, not the next.
       text = traceback.format_exc()
       print(text, flush=True)
       records = read(directory / "timing.json", {})
@@ -896,6 +1015,7 @@ def main(argv=None):
   parser.add_argument("--architecture", choices=("arm", "x86"), required=True)
   parser.add_argument("--feature", action="append")
   parser.add_argument("--execution-ids-file", type=Path, help="exact architecture/execution_ids JSON selection; content-bound on resume")
+  parser.add_argument("--prelowered-manifest", type=Path, help="completed, snapshot-matching source-equivalence manifest for native-only construction")
   parser.add_argument("--complete-registration", action="store_true")
   parser.add_argument("--level", nargs="+", choices=("matmul", "dot"), default=["matmul"])
   parser.add_argument("--phase", choices=("plan", "build", "time", "all", "report"), default="all")
@@ -928,6 +1048,8 @@ def main(argv=None):
   args = parser.parse_args(argv)
   if args.plan_only and (args.worker or args.worker_group or args.worker_batch_file or args.phase not in ("all", "plan")):
     parser.error("plan-only cannot be combined with workers or execution phases")
+  if args.prelowered_manifest is not None and (not args.cc or not args.cxx):
+    parser.error("prelowered construction requires explicit --cc and --cxx")
   args.runner_arguments = list(sys.argv[1:] if argv is None else argv)
   if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count or min(args.jobs, args.build_workers, args.timing_batch_size) < 1:
     parser.error("positive workers/jobs/shard-count and valid shard-index required")
@@ -963,6 +1085,7 @@ def main(argv=None):
       plan["levels"] != args.level,
       plan["features"] != args.feature,
       plan["toolchain"] != {"cc": args.cc, "cxx": args.cxx},
+      plan.get("prelowered") != prelowered_identity(args.prelowered_manifest),
       plan["timing"]["cpu"] != args.cpu,
       plan["timing"]["rounds"] != args.rounds,
       plan["timing"].get("batch_size", 1) != args.timing_batch_size,
@@ -974,6 +1097,9 @@ def main(argv=None):
     plan["timing"]["stages"] = list(dict.fromkeys((*plan["timing"]["stages"], *args.stages)))
     save(plan_path, plan)
   verify_plan_sources(args.snapshot, plan)
+  if not args.worker and plan.get("prelowered") is not None:
+    _, emitted_groups = read_prelowered(plan, args.snapshot)
+    validate_prelowered_scope(emitted_groups, selected(plan["groups"], args))
   if args.plan_only:
     selected(plan["groups"], args)
     return 0
