@@ -9,7 +9,7 @@ from vecops import _C
 from vecops._compiler_compat import SINK_OPTION, scalable_sink_flags
 
 
-def fixture(tmp_path, monkeypatch, results):
+def fixture(tmp_path, monkeypatch, results, *, version="test clang version 19.1.7"):
   tool = tmp_path / "clang++"
   tool.write_text("test compiler identity")
   calls = []
@@ -17,7 +17,7 @@ def fixture(tmp_path, monkeypatch, results):
 
   def run(command, **kwargs):
     if "--version" in command:
-      return SimpleNamespace(stdout="test clang version 19.1.7")
+      return SimpleNamespace(stdout=version)
     calls.append((command, kwargs))
     return results[len(calls) - 1]
 
@@ -40,6 +40,7 @@ def test_failure_and_success_both_required_and_probe_reused(tmp_path, monkeypatc
   assert len(calls) == 2
   assert all(kwargs["timeout"] == 15 for _, kwargs in calls)
   assert SINK_OPTION not in calls[0][0] and SINK_OPTION in calls[1][0]
+  assert all("-fno-crash-diagnostics" in command for command, _ in calls)
   assert compiler.cflags == ("-O3",)
 
 
@@ -48,6 +49,19 @@ def test_healthy_compiler_has_no_workaround(tmp_path, monkeypatch):
   assert scalable_sink_flags(compiler) == ()
   assert scalable_sink_flags(compiler) == ()
   assert len(calls) == 1
+
+
+@pytest.mark.parametrize("version,suppressed", [
+  ("clang version 19.1.7", True),
+  ("BiSheng Enterprise 5.1.0.2 clang version 19.1.7", True),
+  ("Apple clang version 16.0.0", True),
+  ("g++ (GCC) 15.3.0", False),
+])
+def test_probe_diagnostics_respect_compiler_driver(tmp_path, monkeypatch, version, suppressed):
+  compiler, calls = fixture(tmp_path, monkeypatch, [result()], version=version)
+  assert scalable_sink_flags(compiler) == ()
+  assert ("-fno-crash-diagnostics" in calls[0][0]) is suppressed
+  assert compiler.cflags == ("-O3",)
 
 
 @pytest.mark.parametrize("failure", [result(1,"unsupported target"), result(70,"another compiler error")])

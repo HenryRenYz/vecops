@@ -27,6 +27,8 @@ def scalable_sink_flags(compiler) -> tuple[str, ...]:
   are required. Offline readers replay an attestation without finding tools.
   The selected option becomes an ordinary compiler flag before artifact keys
   are computed; it applies equally to generated DSL and source-C++ kernels.
+  Clang crash reproducer files are disabled for this deliberate failure;
+  its stderr remains in the attestation. Kernel compiler flags are unchanged.
   """
   from . import _C
   from ._cache_lock import file_lock
@@ -68,7 +70,11 @@ def scalable_sink_flags(compiler) -> tuple[str, ...]:
     with tempfile.TemporaryDirectory(prefix="scalable-sink-", dir=directory) as temporary:
       source = Path(temporary) / "probe.cpp"
       source.write_text(_PROBE)
-      command = [str(tool), *shlex.split(environment.get("CXXFLAGS", "")), *compiler.cflags, "-O3", "-march=armv8-a+sve", "-msve-vector-bits=scalable",
+      # This probe deliberately crashes affected Clang versions. Each driver's
+      # preprocessed reproducer can be several MB; stderr is sufficient here.
+      # GCC does not accept this Clang driver option.
+      diagnostics = ("-fno-crash-diagnostics",) if re.search(r"\bclang version\b", version) else ()
+      command = [str(tool), *shlex.split(environment.get("CXXFLAGS", "")), *compiler.cflags, *diagnostics, "-O3", "-march=armv8-a+sve", "-msve-vector-bits=scalable",
                  "-c", str(source), "-o", str(Path(temporary) / "probe.o")]
       base = subprocess.run(command, capture_output=True, text=True, timeout=15,
                             env=environment, cwd=compiler.definition_cwd)

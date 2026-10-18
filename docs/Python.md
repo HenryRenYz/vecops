@@ -2764,6 +2764,9 @@ fixes the probe. Source C++ and generated DSL use the same selected flag,
 which participates in artifact identity. Cache-only snapshots replay the
 matching policy attestation from `cache_dir/identities`; they do not invoke
 a toolchain. Missing or ambiguous attestations are explicit cache errors.
+For Clang, the deliberately failing probe disables crash reproducer files while
+retaining stderr in its attestation. This diagnostic option is confined to the
+probe; selected kernel flags and existing cache policy attestations are unchanged.
 
 
 ### Checked reshape span provenance
