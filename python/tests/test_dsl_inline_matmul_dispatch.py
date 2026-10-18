@@ -5,6 +5,7 @@
 import pytest
 import vecops.language as T
 from test_dsl_outline_vector_fallback import (
+  contains_disjoint_guard,
   nodes,
   numeric_template,
   template,
@@ -19,7 +20,13 @@ def test_inline_dispatch_keeps_architectural_owners_inside_the_kernel():
   )
   walked = list(nodes(artifact.kernel.body))
   assert any(isinstance(node, I.HardwareRegion) and node.kind == "amx" for node in walked)
-  assert not any(isinstance(node, I.ExitRegion) and node.outlined for node in walked)
+  calls = [node for node in walked if isinstance(node, I.ExitRegion) and node.outlined]
+  # The alias-preserving SIMD dispatcher has its own boundary. Native owners
+  # and the proven-disjoint branch remain in the caller.
+  assert calls
+  assert all(not contains_disjoint_guard(call.body) for call in calls)
+  assert all(not any(isinstance(node, I.HardwareRegion) for node in nodes(call.body)) for call in calls)
+  assert not any(isinstance(node, I.ExitRegion) and node.outlined for call in calls for node in nodes(call.body))
 
 
 @pytest.fixture(scope="module")
