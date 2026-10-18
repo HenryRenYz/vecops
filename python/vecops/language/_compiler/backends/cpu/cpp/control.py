@@ -12,6 +12,15 @@ from .memory import scoped_scalar_geometry
 
 
 class ControlEmitter:
+  def serial_block(self, block):
+    """Track serial repetition without moving any first-use evaluation."""
+    previous = getattr(self, "serial_guard_depth", 0)
+    self.serial_guard_depth += 1
+    try:
+      self.block(block)
+    finally:
+      self.serial_guard_depth = previous
+
   def store_statement(self, statement):
     """Emit the ordinary nonempty guard and its prepared store alternative."""
     nonempty = " && ".join(f"({self.scalar(n)}) > 0" for n in statement.destination.shape)
@@ -116,13 +125,13 @@ class ControlEmitter:
       else f"vecops_dsl::full_group({loop.target}, {self.scalar_inline(loop.stop)}, {rendered_step}, {loop.unroll})"
     )
     self.opening(f"for (; {condition}; {loop.target} += {increment})")
-    self.block(statement.copies)
+    self.serial_block(statement.copies)
     self.close()
     comparison = "<" if step is None or step > 0 else ">"
     self.opening(
       f"for (; {loop.target} {comparison} ({self.scalar_inline(loop.stop)}); {loop.target} += {rendered_step})"
     )
-    self.block(loop.body)
+    self.serial_block(loop.body)
     self.close()
     self.close()
     self.disjoint_roots = old_proofs
@@ -237,7 +246,7 @@ class ControlEmitter:
         self.opening(
           f"for (vecops::nint_t {statement.target} = {self.scalar(statement.start)}; {statement.target} {comparison} ({self.scalar_inline(statement.stop)}); {statement.target} += {self.scalar(statement.step)})"
         )
-        self.block(statement.body)
+        self.serial_block(statement.body)
         self.close()
       elif isinstance(statement, I.If):
         self.protect_region(I.Block([statement]), self.expression_loads(I.Block(block.statements[index + 1 :])))
@@ -281,7 +290,7 @@ class ControlEmitter:
           self.line(f"if (!({condition})) break;")
         else:
           self.opening(f"while ({self.scalar(statement.condition)})")
-        self.block(statement.body)
+        self.serial_block(statement.body)
         self.close()
       elif isinstance(statement, I.IndexedStore):
         self.indexed_store(statement, self.expression_loads(I.Block(block.statements[index + 1 :])))

@@ -54,6 +54,8 @@ class CPUEmitter(
     self.lines = []
     self.indent = 0
     self.counter = 0
+    self.invariant_alias_predicates = {}
+    self.serial_guard_depth = 0
     self.chunk_cache = {}
     self.allocated = set()
     self.tag_dtypes = {}
@@ -252,7 +254,8 @@ class CPUEmitter(
       self.line(f"vecops_dsl::Buffer<{dtype}> {cached.storage};")
     insertion = len(self.lines)
     self.block(self.ir.body)
-    self.lines[insertion:insertion] = list(self.buffer_declarations.values())
+    cached = [f"  bool {name}_ready = false; bool {name}_value = false;" for name in self.invariant_alias_predicates.values()]
+    self.lines[insertion:insertion] = cached + list(self.buffer_declarations.values())
     self.close()
     if self.traces_memory:
       import re

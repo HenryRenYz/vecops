@@ -38,6 +38,13 @@ def verify_prepared(prepared):
       slots.setdefault(slot, []).append(interval)
     verify_snapshot_scopes(prepared)
   verify_private_captures(prepared)
+  entry = getattr(prepared, "entry_geometry", None)
+  if entry is not None:
+    from .invariants import EntryGeometry
+
+    environment = prepared.vectors.manager.options["_compiler_environment"]
+    require(type(entry) is EntryGeometry, "unknown entry geometry proof")
+    require(entry.matches(prepared.vectors.kernel, environment.operations), "stale entry geometry proof")
   verify_closed_fixed_states(prepared)
   confirmed = _memory_proofs(prepared)
   verify_partition_proofs(prepared, confirmed.partitions)

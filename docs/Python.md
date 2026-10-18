@@ -1021,6 +1021,15 @@ only when the next original alias guard requires it. Alias checks keep their
 original control flow and exception behavior. Parallel workers retain separate
 owners. Other CPU backends retain their existing snapshot construction policy.
 
+The CPU memory stage's `cpu-plan-entry-geometry` analysis identifies geometry
+derived solely from immutable tensor arguments. On x86, serial loops may reuse
+such overlap predicates within one invocation. The first check remains at its
+original execution site: empty loops and untaken branches perform no new span
+evaluation, including checks that can throw. Snapshot contents are refreshed
+normally; only the predicate is reused. Mutable coordinates, scratch storage,
+parallel workers, hardware owners and conditional geometry substitutions stay
+outside this policy. At most sixteen predicates receive invocation-local state.
+
 Ordinary SVE can give a closed, complete F32 pointwise output region a private
 native lane permutation when all vector inputs and its output use compatible
 F16/BF16 memory conversions. The compiler applies the same permutation to

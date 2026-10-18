@@ -58,6 +58,7 @@ class PreparedKernel:
   storage: object = None
   private_captures: object = field(default_factory=dict)
   immutable_geometry: object = field(default_factory=dict)
+  entry_geometry: object = None
   partition_proofs: object = field(default_factory=dict)
   broadcast_proofs: object = field(default_factory=dict)
   scalar_geometry: object = field(default_factory=dict)

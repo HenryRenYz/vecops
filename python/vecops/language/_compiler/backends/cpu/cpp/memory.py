@@ -456,7 +456,33 @@ class MemoryEmitter:
       strides = ", ".join(self.scalar(v) for v in view.strides)
       return f"vecops_dsl::span({self.pointer(view)}, {{{shape}}}, {{{strides}}}, sizeof({CPP_TYPES[view.dtype]}))"
 
-    return f"vecops_dsl::overlap({span(source)}, {span(destination)})"
+    expression = f"vecops_dsl::overlap({span(source)}, {span(destination)})"
+    return self.invariant_alias_predicate(source, destination, expression)
+
+  def invariant_alias_predicate(self, source, destination, expression):
+    """Remember invariant checks lazily, retaining first-use trap ordering.
+
+    Only the predicate is reused: historical contents and scratch lifetimes
+    still follow the ordinary snapshot plan. Workers never share this mutable
+    state. Bound the number of invocation-local scalar pairs to avoid source
+    and register growth for kernels with many distinct constant subviews.
+    """
+    if (not getattr(self, "serial_guard_depth", 0) or self.parallel_depth or self.hardware_scope is not None
+        or self.hardware_scalar_bindings
+        or self.environment.codegen_target.architecture != "x86"
+        or getattr(self, "active_scalar_aliases", {})):
+      return expression
+    plan = getattr(self.prepared, "entry_geometry", None)
+    if (plan is None or not plan.matches(self.ir, self.environment.operations)
+        or not plan.view(source) or not plan.view(destination)):
+      return expression
+    name = self.invariant_alias_predicates.get(expression)
+    if name is None:
+      if len(self.invariant_alias_predicates) >= 16:
+        return expression
+      name = self.unique("invariant_alias")
+      self.invariant_alias_predicates[expression] = name
+    return f"([&]() VECOPS_INLINE_LAMBDA {{ if (!{name}_ready) {{ {name}_value = {expression}; {name}_ready = true; }} return {name}_value; }}())"
 
   def register_disjoint_proven(self, a, b, *, group=None):
     if group is not None:
