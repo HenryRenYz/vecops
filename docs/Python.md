@@ -299,6 +299,10 @@ tag. This does not change integer/integer width or signedness selection,
 integer division semantics, or the distinction between separate `mul`/`add`
 and explicitly fused `T.fma`.
 
+CPU vector scheduling emits a single-use load/cast pair as one converting
+load. Its mask, inactive values, and original read capture remain dependencies;
+the unused pre-conversion memory read is omitted, including in masked tails.
+
 Tile values retain snapshot semantics: `old = x; x = x + 1` leaves `old`
 unchanged, and `x, y = y, x` reads both old values before updating either.
 The CPU state-placement pass keeps small fixed tiles and bounded scalable

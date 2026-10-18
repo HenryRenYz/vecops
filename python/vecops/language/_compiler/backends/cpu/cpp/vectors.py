@@ -379,7 +379,29 @@ class VectorsEmitter:
     for index in region.root_indices:
       if index is not None:
         uses[index] += 1
+    # A single-use load fused into its cast has no separate vector result.
+    # Decide this before printing the schedule: emitting both operations can
+    # retain two gathers (and their mask effects) even when the first C++
+    # local is unused. Masks/inactive operands keep their own scheduled uses.
+    converting_loads = {}
     for operation in region.operations:
+      if operation.opaque or operation.expression.op != "cast":
+        continue
+      source = operation.expression.args[0]
+      source_index = operation.operands[0]
+      if (
+        source.op == "load"
+        and source.type.dtype == source.data.dtype
+        and source_index is not None
+        and uses[source_index] == 1
+        and id(source) not in self.materialized
+        and id(source) not in self.reduction_materialized
+      ):
+        converting_loads[operation.index] = source_index
+    fused_sources = frozenset(converting_loads.values())
+    for operation in region.operations:
+      if operation.index in fused_sources:
+        continue
       shared = {}
       for slot, (base, c, count) in enumerate(zip(tags, coords, active)):
         tag = self.rebound_tag(operation.expression.type.dtype, base)
@@ -415,38 +437,28 @@ class VectorsEmitter:
         if operation.opaque:
           expression = operation.expression
         else:
-          args = tuple(
-            I.Expr(region.operations[index].type, "vector_ref", data=references[(index, slot)])
-            if index is not None
-            else arg
-            for arg, index in zip(operation.expression.args, operation.operands)
-          )
-          if operation.expression.op == "cast":
+          if operation.index in converting_loads:
             source = operation.expression.args[0]
-            source_index = operation.operands[0]
-            if (
-              source.op == "load"
-              and source.type.dtype == source.data.dtype
-              and source_index is not None
-              and uses[source_index] == 1
-              and id(source) not in self.materialized
-              and id(source) not in self.reduction_materialized
-            ):
-              # Keep the lexical read's snapshot selection at the converting
-              # load boundary. A vector_ref would hide that edge and prevent
-              # load_convert fusion. Reuse already scheduled mask/inactive
-              # registers rather than evaluating their DAG a second time.
-              source_operation = region.operations[source_index]
-              source_args = tuple(
-                I.Expr(region.operations[index].type, "vector_ref", data=references[(index, slot)])
-                if index is not None
-                else arg
-                for arg, index in zip(source.args, source_operation.operands)
-              )
-              proxy = I.Expr(source.type, "load", source_args, source.data)
-              if id(source) in self.snapshots:
-                self.snapshots[id(proxy)] = self.snapshots[id(source)]
-              args = (proxy,)
+            source_operation = region.operations[converting_loads[operation.index]]
+            source_args = tuple(
+              I.Expr(region.operations[index].type, "vector_ref", data=references[(index, slot)])
+              if index is not None
+              else arg
+              for arg, index in zip(source.args, source_operation.operands)
+            )
+            # Preserve the original lexical read's snapshot selection while
+            # consuming the already scheduled mask and inactive registers.
+            proxy = I.Expr(source.type, "load", source_args, source.data)
+            if id(source) in self.snapshots:
+              self.snapshots[id(proxy)] = self.snapshots[id(source)]
+            args = (proxy,)
+          else:
+            args = tuple(
+              I.Expr(region.operations[index].type, "vector_ref", data=references[(index, slot)])
+              if index is not None
+              else arg
+              for arg, index in zip(operation.expression.args, operation.operands)
+            )
           expression = I.Expr(operation.type, operation.expression.op, args, operation.expression.data)
           if operation.native_math_words:
             expression = I.Expr(
