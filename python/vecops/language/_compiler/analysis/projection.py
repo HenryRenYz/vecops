@@ -12,6 +12,21 @@ from dataclasses import replace
 from .. import ir as I
 
 
+def complete_grouped_prefix(source_extent, group, lane_multiple):
+  """Prove every complete output chunk excludes a partial source group.
+
+  Chunk widths may vary, but must be positive multiples of ``lane_multiple``.
+  If the last output is partial and cannot end any such chunk, it belongs
+  exclusively to the masked remainder. This also holds for scalable widths.
+  The caller must establish traversal of this exact grouped-output domain.
+  """
+  if type(source_extent) is not int or source_extent < 0:
+    return False
+  if type(group) is not int or group < 1 or type(lane_multiple) is not int or lane_multiple < 1:
+    return False
+  return source_extent % group == 0 or ((source_extent + group - 1) // group) % lane_multiple != 0
+
+
 def broadcast_coordinate(extent, coordinate):
   """Project one broadcast dimension, retaining a dynamic singleton guard."""
   known = I.constant(extent)

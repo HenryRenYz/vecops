@@ -3,7 +3,7 @@
 """Register and indexed-memory terminal lowering; never arrays of Vec/Mask."""
 
 from .... import ir as I
-from ....analysis.projection import scalar_memory_projection
+from ....analysis.projection import complete_grouped_prefix, scalar_memory_projection
 from ....dtypes import ELEMENT_BYTES
 from ....ir.traversal import walk_unique
 from ..capabilities import CPP_TYPES
@@ -53,13 +53,31 @@ class PrimitivesEmitter:
     result = self.vector(source, tag, source.type.shape, coords, "1")
     return f"vecops::vec::get({tag}{{}}, {result}, 0)"
 
-  def widening_dot_vector(self, value, tag, own_coords, active):
+  def widening_dot_vector(self, value, tag, own_coords, active, traversal_extent=None):
     # The operation changes lane geometry: each output consumes a complete
     # byte-span group, with absent source lanes contributing zero. Retain
     # a full-vector proof only when each output has a complete source group.
     group = value.data
     source_coords = (f"(({own_coords[0]}) * {group})",)
     previous_full = getattr(self, "full_vector", False)
+    # Scalable SIMD widths are multiples of 16 bytes, including SVE's
+    # minimum VL. Do not derive this fact from a cost-only target override.
+    lane_multiple = self.fixed_tag_lanes.get(tag, 1)
+    geometry = self.tag_geometry.get(tag)
+    target = self.environment.codegen_target
+    if (
+      geometry
+      and geometry[0]
+      and (
+        target.architecture == "x86"
+        and target.isa in {"avx", "avx2", "avx512"}
+        or target.architecture == "arm"
+        and target.isa in {"neon", "sve", "sme"}
+      )
+    ):
+      minimum_bytes = 16
+      power = geometry[1]
+      lane_multiple = max(1, (minimum_bytes << max(0, power)) // (ELEMENT_BYTES[value.type.dtype] << max(0, -power)))
     operands, tags = [], []
     try:
       self.full_vector = False
@@ -69,7 +87,18 @@ class PrimitivesEmitter:
         # With K divisible by group, a complete output traversal cannot
         # reach a partial source group. Do not require ceildiv to have
         # been folded to a literal in the scalar metadata IR.
-        full_source = previous_full and type(source_extent) is int and source_extent % group == 0
+        exact_domain = traversal_extent is not None and (
+          I.same_expr(traversal_extent, value.type.shape[0])
+          or type(source_extent) is int
+          and I.constant(traversal_extent) == (source_extent + group - 1) // group
+        )
+        full_source = (
+          previous_full
+          and type(source_extent) is int
+          and (
+            source_extent % group == 0 or exact_domain and complete_grouped_prefix(source_extent, group, lane_multiple)
+          )
+        )
         self.full_vector = full_source
         source_tag = f"vecops::vec::ViewAs<{CPP_TYPES[source.type.dtype]}, {tag}>"
         self.tag_dtypes[source_tag] = source.type.dtype
@@ -182,9 +211,9 @@ class PrimitivesEmitter:
           tag,
           f"({self.scalar(value.type.shape[0])}) == 1",
           broadcast,
-          lambda: self.widening_dot_vector(value, tag, own_coords, active),
+          lambda: self.widening_dot_vector(value, tag, own_coords, active, shape[axis]),
         )
-      return self.widening_dot_vector(value, tag, own_coords, active)
+      return self.widening_dot_vector(value, tag, own_coords, active, shape[axis])
     if value.op == "bitreinterpret":
       if id(value) in self.prepared.register_programs:
         return self.geometry_vector(value, tag, shape, coords, active, axis)
