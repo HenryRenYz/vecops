@@ -333,7 +333,7 @@ def verify_reshape_suffixes(prepared):
 
 
 def verify_store_alignment(prepared, confirmed):
-  from .alignment import AlignedStore, StoreAlignmentProof, select_aligned_stores
+  from .alignment import AlignedStores, StoreAlignmentProof, select_aligned_stores
 
   proofs = getattr(prepared, "store_alignment_proofs", {})
   plans = getattr(prepared, "aligned_stores", {})
@@ -351,8 +351,8 @@ def verify_store_alignment(prepared, confirmed):
   eligible = select_aligned_stores(prepared, confirmed, environment)
   for identity, plan in plans.items():
     actual = eligible.get(identity)
-    require(type(plan) is AlignedStore and actual is not None, "ineligible aligned store schedule")
+    require(type(plan) is AlignedStores and actual is not None, "ineligible aligned store schedule")
     require(
-      plan.region is actual.region and plan.proof == actual.proof,
+      plan.region is actual.region and plan.proofs == actual.proofs,
       "stale aligned store schedule",
     )

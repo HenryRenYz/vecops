@@ -3,7 +3,7 @@
 """Prove stable store geometry, then plan native-word alignment peeling.
 
 The proof is intersected over lexical occurrences. Peeling only changes a
-single pointwise store's physical chunks: alias snapshots, historical readers,
+pointwise stores' physical chunks: alias snapshots, historical readers,
 logical coordinates and the public tensor's strides retain their owners.
 """
 
@@ -27,9 +27,9 @@ class StoreAlignmentProof:
 
 
 @dataclass(frozen=True)
-class AlignedStore:
+class AlignedStores:
   region: object
-  proof: StoreAlignmentProof
+  proofs: tuple[StoreAlignmentProof, ...]
 
 
 def make_alignment_collector(kernel):
@@ -93,7 +93,7 @@ def make_alignment_collector(kernel):
 
 
 def select_aligned_stores(prepared, proofs, environment):
-  """Select wide, ordinary pointwise traversals with a single store owner.
+  """Select wide, ordinary pointwise traversals with proven store owners.
 
   At least eight native words amortize a masked head and tail. Explicit
   vector contracts, reductions, register permutations, state and converting
@@ -117,24 +117,28 @@ def select_aligned_stores(prepared, proofs, environment):
       continue
     visited.add(id(region))
     if (
-      not region.shape or region.base_power != 0 or not region.full_chunks
+      not region.shape or region.base_power < 0 or not region.full_chunks
       or region.single_chunk or region.iteration_axis is not None
-      or region.initializations or region.finalizations or len(region.effects) != 1
+      or region.initializations or region.finalizations or not region.effects
     ):
       continue
-    effect = region.effects[0]
-    proof = proofs.get(id(effect.store))
-    if (
-      effect.kind != "store_convert" or proof is None
-      or effect.store is not proof.store or proof.store.destination is not proof.destination
-      or proof.store.value is not proof.value or proof.store.mask is not None
-      or region.dtype != proof.destination.dtype
-      or len(region.shape) != len(proof.destination.shape)
-      or any(a is not b for a, b in zip(region.shape, proof.destination.shape))
-    ):
+    members = []
+    for effect in region.effects:
+      proof = proofs.get(id(effect.store))
+      if (
+        effect.kind != "store_convert" or proof is None
+        or effect.store is not proof.store or proof.store.destination is not proof.destination
+        or proof.store.value is not proof.value or proof.store.mask is not None
+        or region.dtype != proof.destination.dtype
+        or len(region.shape) != len(proof.destination.shape)
+        or any(not I.same_expr(a, b) for a, b in zip(region.shape, proof.destination.shape))
+      ):
+        break
+      members.append(proof)
+    if len(members) != len(region.effects):
       continue
     size = ELEMENT_BYTES[region.dtype]
-    if proof.minimum_columns * size < 8 * (target.vector_bits // 8):
+    if min(proof.minimum_columns for proof in members) * size < 8 * (target.vector_bits // 8):
       continue
     if any(
       isinstance(op.expression.type, I.VectorType)
@@ -148,7 +152,7 @@ def select_aligned_stores(prepared, proofs, environment):
       for op in region.operations
     ):
       continue
-    result[id(region)] = AlignedStore(region, proof)
+    result[id(region)] = AlignedStores(region, tuple(members))
   return result
 
 

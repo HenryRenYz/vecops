@@ -37,9 +37,10 @@ def test_plan_and_renderer_use_the_same_exact_store_owner():
   plans = artifact.backend_ir.aligned_stores
   assert plans and "alignment prologue" in artifact.source and "aligned_full_end" in artifact.source
   for identity, plan in plans.items():
-    assert identity == id(plan.region) and plan.region.effects[0].store is plan.proof.store
-    assert plan.proof.destination is plan.proof.store.destination
-    assert plan.proof.minimum_columns == 257 and plan.proof.occurrences == 1
+    assert identity == id(plan.region)
+    for effect, proof in zip(plan.region.effects, plan.proofs):
+      assert effect.store is proof.store and proof.destination is proof.store.destination
+      assert proof.minimum_columns == 257 and proof.occurrences == 1
   identity, plan = next(iter(plans.items()))
   bad = replace(plan, region=replace(plan.region))
   with pytest.raises(ValueError, match="stale aligned store"):
@@ -126,3 +127,79 @@ def test_byte_unaligned_dtype_pointers_keep_the_original_unaligned_path(tmp_path
   output[:] = A.copy()
   compiled(A, C)
   np.testing.assert_array_equal(owner, expected)
+
+
+def multi_declaration(dtype="float32"):
+  N = T.dynamic(lower=0, upper=64)
+  AS = T.dynamic(lower=-8192, upper=8192)
+  CS = T.dynamic(lower=257, upper=274)
+  DS = T.dynamic(lower=257, upper=274)
+  Width = T.Const(257)
+  DType = dtype
+
+  @T.template
+  def kernel(
+    A: T.Tensor((N, Width), (AS, 1), DType),
+    C: T.Tensor((N, Width), (CS, 1), DType, access="output"),
+    D: T.Tensor((N, Width), (DS, 1), DType, access="output"),
+  ):
+    x = T.load(A)
+    p = x * x + 1
+    q = p * x + 2
+    T.store(C, q + p)
+    T.store(D, q - p)
+
+  return kernel
+
+
+def test_fused_alignment_covers_every_exact_store_and_grouped_word():
+  artifact = CPUBackend().lower(multi_declaration().ir, (), target="AVX512")
+  plans = {k: p for k, p in artifact.backend_ir.aligned_stores.items() if len(p.proofs) == 2}
+  assert plans and "&&" in artifact.source and "alignment prologue" in artifact.source
+  identity, plan = next(iter(plans.items()))
+  assert plan.region.base_power > 0
+  assert tuple(effect.store for effect in plan.region.effects) == tuple(proof.store for proof in plan.proofs)
+  for proofs in (plan.proofs[:1], plan.proofs[::-1]):
+    with pytest.raises(ValueError, match="stale aligned store"):
+      verify_prepared(replace(artifact.backend_ir, aligned_stores={identity: replace(plan, proofs=proofs)}))
+
+
+@pytest.mark.parametrize("dtype", ("float32", "float64"))
+def test_native_fused_alignment_phases_and_sequential_overlapping_outputs(tmp_path, dtype):
+  compiler = make_compiler(jobs=2, output="quiet", cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
+  compiled = T.compile(multi_declaration(dtype), compiler=compiler)
+  target = compiled.backend_ir.vectors.manager.options["_compiler_environment"].codegen_target
+  if target.isa == "avx512":
+    assert any(len(plan.proofs) == 2 for plan in compiled.backend_ir.aligned_stores.values())
+  element = np.dtype(dtype).itemsize
+  for rows in (0, 1, 3, 4, 17, 33):
+    pitch = 264
+    block = pitch * (rows + 1) + 128
+    for phase in range(64 // element):
+      for delta in (0, 1, 3):
+        for kind in ("disjoint", "outputs_overlap", "input_overlap"):
+          owner = (np.arange(4 * block, dtype=np.int64) % 31).astype(dtype) / 16
+          expected = owner.copy()
+          a_offset = phase + max(0, rows - 1) * pitch
+          c_offset = block + phase
+          d_offset = 2 * block + phase + delta
+          if kind == "outputs_overlap":
+            d_offset = c_offset + delta
+          elif kind == "input_overlap":
+            c_offset = phase + 1
+            d_offset = c_offset + delta
+          A = np.ndarray((rows, 257), dtype, buffer=owner, offset=a_offset * element,
+                         strides=(-pitch * element, element))
+          C = np.ndarray((rows, 257), dtype, buffer=owner, offset=c_offset * element,
+                         strides=(pitch * element, element))
+          D = np.ndarray((rows, 257), dtype, buffer=owner, offset=d_offset * element,
+                         strides=(pitch * element, element))
+          ec = np.ndarray(C.shape, dtype, buffer=expected, offset=c_offset * element, strides=C.strides)
+          ed = np.ndarray(D.shape, dtype, buffer=expected, offset=d_offset * element, strides=D.strides)
+          x = A.copy()
+          p = x * x + 1
+          q = p * x + 2
+          ec[:] = q + p
+          ed[:] = q - p
+          compiled(A, C, D)
+          np.testing.assert_array_equal(owner, expected)

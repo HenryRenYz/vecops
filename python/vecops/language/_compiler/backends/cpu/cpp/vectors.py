@@ -496,7 +496,11 @@ class VectorsEmitter:
       return
     alignment_plans = getattr(self.prepared, "aligned_stores", None)
     alignment = alignment_plans.get(id(region)) if alignment_plans else None
-    peel_store = alignment.proof.destination if alignment is not None and setup is None and finish is None else None
+    peel_stores = (
+      tuple(proof.destination for proof in alignment.proofs)
+      if alignment is not None and setup is None and finish is None else ()
+    )
+    peel_store = peel_stores[0] if peel_stores else None
     variants = [(power, region.base_power, region.groupings[power]) for power in sorted(region.groupings, reverse=True)]
     # The least permissive CPU backend allows four native words (pow=2).
     # A grouped byte dot with an FP64 producer needs additional input lanes,
@@ -614,7 +618,13 @@ class VectorsEmitter:
           element_bytes = f"sizeof({CPP_TYPES[region.dtype]})"
           alignment_bytes = f"({self.vector_size(alignment_tag)} * {element_bytes})"
           self.line(f"const auto {address} = reinterpret_cast<std::uintptr_t>({pointer});")
-          self.line(f"const vecops::nint_t {prefix} = {address} % {element_bytes} == 0 ? std::min<vecops::nint_t>(({stop}), (({alignment_bytes} - {address} % {alignment_bytes}) % {alignment_bytes}) / {element_bytes}) : 0;")
+          compatible = [f"{address} % {element_bytes} == 0"]
+          for destination in peel_stores[1:]:
+            other = self.unique("row_address")
+            pointer = self.pointer(destination, tuple(coordinates) + ("0",))
+            self.line(f"const auto {other} = reinterpret_cast<std::uintptr_t>({pointer});")
+            compatible.append(f"{other} % {alignment_bytes} == {address} % {alignment_bytes}")
+          self.line(f"const vecops::nint_t {prefix} = {' && '.join(compatible)} ? std::min<vecops::nint_t>(({stop}), (({alignment_bytes} - {address} % {alignment_bytes}) % {alignment_bytes}) / {element_bytes}) : 0;")
           self.opening(f"if ({prefix} > 0) /* alignment prologue */")
           body(False, stop=prefix)
           self.close()
