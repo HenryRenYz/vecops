@@ -105,7 +105,7 @@ class ValueEffects:
 
   @staticmethod
   def total_division(expression):
-    if expression.op not in {"floordiv", "mod"} or len(expression.args) != 2:
+    if expression.op not in {"floordiv", "ceildiv", "mod"} or len(expression.args) != 2:
       return False
     divisor = I.constant(expression.args[1])
     limits = type_range(expression.type.dtype) if isinstance(expression.type, I.ScalarType) else None

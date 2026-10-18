@@ -275,6 +275,21 @@ def test_chunk_policy_uses_whole_region_and_live_value_budget():
   assert wide.cost.live_vectors >= 10
 
 
+def test_chunk_policy_recognizes_an_unfolded_constant_grouped_extent():
+  from vecops.language._compiler.backends.cpu.passes import choose_vector_chunk
+  from vecops.language._compiler.ir.vector import VectorRegion
+  from vecops.language._compiler.passes.manager import PassContext
+
+  environment = freeze(target="AVX512")
+  context = PassContext("vector", {"backend": "cpu", "_compiler_environment": environment})
+  for length in (32, 256):
+    extent = I.Expr(I.ScalarType("int64"), "ceildiv", (I.literal(length * 2), I.literal(2)))
+    region = VectorRegion((extent,), "float32", 2, (), [], ())
+    region.initializations = (I.literal(0.0),)
+    choose_vector_chunk(region, context)
+    assert region.base_power == (0 if length == 32 else 1)
+
+
 def test_registry_changes_during_a_pass_do_not_change_its_ir_contract():
   import operator
 

@@ -1181,6 +1181,11 @@ historical load identity queries retain their existing contract.
 Shape compatibility compares representable integer literal dimensions by value,
 including equal weak and explicitly typed literals. Scalar expression identity
 and arithmetic promotion continue to distinguish their types.
+Positive constant ceiling division participates in the shared signed integer
+range analysis, including negative numerators and integer-limit endpoints.
+Scheduling uses these facts for constant-shaped grouped vectors even when
+their original type metadata retains a `ceildiv` expression. Zero, negative,
+unknown, unsigned and narrowing-sensitive division stays conservative.
 
 The late `cpu-plan-storage` pass computes branch declaration scopes and
 conservative lexical live intervals before emission. `cpu_scratch_reuse`

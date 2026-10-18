@@ -54,6 +54,36 @@ def binary(op, left, right, dtype=None):
   return I.Expr(I.ScalarType(dtype or ("bool" if op in {"eq", "lt", "ge"} else left.type.dtype)), op, (left, right))
 
 
+@pytest.mark.parametrize("divisor", [1, 2, 3, 16, (1 << 63) - 1])
+def test_ceiling_division_bounds_include_negative_values_without_add_overflow(divisor):
+  for lower, upper in [(-(1 << 63), (1 << 63) - 1), (-65, -1), (-1, 0), (0, 65), (64, 64)]:
+    value = local("x")
+    facts = ValueFacts({("local", "x"): IntegerFacts(lower, upper)})
+    result = facts.infer(binary("ceildiv", value, I.literal(divisor)))
+    assert result is not None
+    assert (result.lower, result.upper) == (-(-lower // divisor), -(-upper // divisor))
+
+
+@pytest.mark.parametrize("divisor", [0, -1, -2])
+def test_ceiling_division_retains_unknown_and_potentially_trapping_divisors(divisor):
+  expression = binary("ceildiv", I.literal(-(1 << 63)), I.literal(divisor))
+  assert ValueFacts().infer(expression) is None
+  statements, _, _ = run([I.Assign("result", expression)])
+  assert statements[0].value is expression
+
+
+def test_positive_ceiling_division_can_fold_after_a_lexical_definition():
+  expression = binary("ceildiv", local("k"), I.literal(2))
+  statements, _, _ = run([I.Assign("k", I.literal(64)), I.Assign("extent", expression)])
+  assert I.constant(statements[1].value) == 32
+  # An int64 operand narrowed by the typed helper is not mathematical int8
+  # division; retain the original conversion and operation.
+  narrow = binary("ceildiv", I.literal(256), I.literal(2), dtype="int8")
+  assert ValueFacts().infer(narrow) is None
+  statements, _, _ = run([I.Assign("narrow", narrow)])
+  assert statements[0].value is narrow
+
+
 def run(statements, *, catalog=None):
   kernel = I.KernelIR(I.Block(statements), {}, {})
   environment = freeze()

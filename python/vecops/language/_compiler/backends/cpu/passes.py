@@ -5,6 +5,7 @@
 from dataclasses import replace
 
 from ... import ir as I
+from ...analysis.facts import ValueFacts
 from ...cost import estimate
 from ...dtypes import ELEMENT_BYTES
 from ...ir import vector as V
@@ -37,7 +38,11 @@ def choose_vector_chunk(region, context):
   if isinstance(reduction_power, bool) or not isinstance(reduction_power, int) or not 0 <= reduction_power <= 2:
     raise ValueError("cpu_reduction_chunk_pow must be 0, 1, or 2")
   explicit = any(isinstance(op.expression.type, I.VectorType) for op in region.operations)
-  size = I.constant(region.shape[-1])
+  # Grouped operations retain identity-bearing type metadata. A constant
+  # extent may therefore still be written as ceildiv(K, group), rather than
+  # a literal; use the shared integer analysis for the scheduling decision.
+  extent = ValueFacts().infer(region.shape[-1])
+  size = extent.constant if extent is not None else None
   environment = context.environment
   region.cost = estimate(
     region.roots, environment.costs, boundaries=(id(op.expression) for op in region.operations if op.opaque)

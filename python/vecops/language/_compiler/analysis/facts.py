@@ -158,7 +158,7 @@ class ValueFacts:
     # expression rather than partially replacing its operands with literals.
     if isinstance(value.type, I.ScalarType) and value.type.dtype.startswith("uint"):
       return False
-    operations = {"add", "sub", "mul", "min", "max", "floordiv", "mod", "bit_and",
+    operations = {"add", "sub", "mul", "min", "max", "floordiv", "ceildiv", "mod", "bit_and",
                   "lt", "le", "gt", "ge", "eq", "ne"}
     if value.op not in operations or len(value.args) != 2:
       return True
@@ -166,7 +166,7 @@ class ValueFacts:
       return False
     if any(a.type.dtype.startswith("uint") for a in value.args):
       return False
-    if value.op in {"min", "max", "floordiv", "mod"}:
+    if value.op in {"min", "max", "floordiv", "ceildiv", "mod"}:
       limits = type_range(value.type.dtype)
       arguments = tuple(self.infer(a) for a in value.args)
       return limits is not None and all(
@@ -220,10 +220,11 @@ class ValueFacts:
       lo, hi = operation(a.lower, b.lower), operation(a.upper, b.upper)
       divisor = math.gcd(math.gcd(a.divisor, b.divisor), a.residue - b.residue)
       residue = a.residue
-    elif op in {"floordiv", "mod"} and b.constant is not None and b.constant > 0:
+    elif op in {"floordiv", "ceildiv", "mod"} and b.constant is not None and b.constant > 0:
       d = b.constant
-      if op == "floordiv":
-        lo, hi = a.lower // d, a.upper // d
+      if op in {"floordiv", "ceildiv"}:
+        lo, hi = ((a.lower // d, a.upper // d) if op == "floordiv"
+                  else (-(-a.lower // d), -(-a.upper // d)))
         if a.multiple_of(d):
           divisor, residue = a.divisor // d, a.residue // d
       elif a.multiple_of(d):
