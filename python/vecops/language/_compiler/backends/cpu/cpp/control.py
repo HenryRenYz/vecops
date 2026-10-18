@@ -315,7 +315,9 @@ class ControlEmitter:
       elif isinstance(statement, I.Allocate):
         self.storage_views[statement.view.storage] = statement.view
         # Promoted scratch sites have no Store/Load using their storage.
-        if statement.view.storage in self.used_storage(self.ir.body):
+        if self.referenced_storage is None:
+          self.referenced_storage = self.used_storage(self.ir.body)
+        if statement.view.storage in self.referenced_storage:
           count = ", ".join(self.scalar(v) for v in statement.view.shape)
           self.allocate_buffer(statement.view.dtype, statement.view.storage, self.checked_shape(count))
       elif isinstance(statement, I.Pack):

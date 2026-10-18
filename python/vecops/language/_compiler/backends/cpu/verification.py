@@ -37,6 +37,15 @@ def verify_prepared(prepared):
         )
       slots.setdefault(slot, []).append(interval)
     verify_snapshot_scopes(prepared)
+    if getattr(storage, "referenced", None) is not None:
+      from .storage import referenced_storage
+
+      environment = prepared.vectors.manager.options["_compiler_environment"]
+      require(type(storage.referenced) is frozenset, "invalid referenced storage plan")
+      require(
+        storage.referenced == referenced_storage(prepared.vectors.kernel.body, environment.operations),
+        "stale referenced storage plan",
+      )
   verify_private_captures(prepared)
   entry = getattr(prepared, "entry_geometry", None)
   if entry is not None:

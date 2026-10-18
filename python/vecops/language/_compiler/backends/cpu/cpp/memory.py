@@ -772,37 +772,7 @@ class MemoryEmitter:
           self.snapshot(self.active_loads[identity], root, True)
 
   def used_storage(self, block):
-    result = set()
-    for statement in block.statements:
-      if isinstance(statement, I.Pack):
-        result.add(statement.destination.view.storage)
-        result.update(load.data.storage for load in I.loads_unique(statement.source))
-      if isinstance(statement, I.ReductionGroup):
-        result.update(self.used_storage(I.Block([*statement.assignments, *statement.stores])))
-      if isinstance(statement, I.ElementwiseGroup):
-        result.update(self.used_storage(I.Block(list(statement.stores))))
-      if isinstance(statement, I.UnrolledFor):
-        result.update(self.used_storage(statement.copies))
-        result.update(self.used_storage(statement.loop.body))
-      for value in (
-        getattr(statement, "value", None),
-        getattr(statement, "condition", None),
-        getattr(statement, "mask", None),
-        getattr(statement, "indices", None),
-      ):
-        if isinstance(value, I.Expr):
-          result.update(load.data.storage for load in I.loads_unique(value))
-          # Physical packed operands and memory-proof metadata carry views
-          # in their payload, not in an ordinary logical load edge.
-          from ....ir.traversal import nodes
+    """Compatibility query for externally prepared plans without storage data."""
+    from ..storage import referenced_storage
 
-          result.update(node.storage for node in nodes(value) if isinstance(node, I.View))
-      if isinstance(statement, (I.Store, I.IndexedStore)):
-        result.add(statement.destination.storage)
-      if isinstance(statement, I.ArchitectureCall) and statement.view is not None:
-        result.add(statement.view.storage)
-      for name in ("body", "otherwise"):
-        child = getattr(statement, name, None)
-        if isinstance(child, I.Block):
-          result.update(self.used_storage(child))
-    return result
+    return referenced_storage(block, self.environment.operations)

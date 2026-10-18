@@ -274,12 +274,69 @@ def snapshot_lifetime_scopes(kernel, catalog):
   return result
 
 
+def referenced_storage(block, catalog):
+  """Collect allocation liveness once over the final owned value DAG.
+
+  Declaration-only views do not execute a storage use. Historical BindTile
+  descriptors retain their read provenance. Match the emitter surface, including
+  packed/architecture payloads, while sharing argument and metadata visits
+  across every statement and nested region in this query.
+  """
+  result, arguments, metadata, statements = set(), set(), set(), {}
+
+  def reads(value, *, owned=True):
+    pending = [value]
+    while pending:
+      expression = pending.pop()
+      if expression in arguments:
+        continue
+      arguments.add(expression)
+      if catalog.has(expression, Trait.MEMORY_READ):
+        result.add(expression.data.storage)
+      pending.extend(expression.args)
+    if owned:
+      result.update(node.storage for node in nodes(value, metadata) if isinstance(node, I.View))
+
+  def visit(body):
+    for statement in body:
+      identity = id(statement)
+      if identity in statements:
+        continue
+      statements[identity] = statement
+      if isinstance(statement, I.Pack):
+        result.add(statement.destination.view.storage)
+        reads(statement.source, owned=False)
+      if isinstance(statement, I.ReductionGroup):
+        visit((*statement.assignments, *statement.stores))
+      if isinstance(statement, I.ElementwiseGroup):
+        visit(statement.stores)
+      if isinstance(statement, I.UnrolledFor):
+        visit(statement.copies.statements)
+        visit(statement.loop.body.statements)
+      for name in ("value", "condition", "mask", "indices"):
+        value = getattr(statement, name, None)
+        if isinstance(value, I.Expr):
+          reads(value)
+      if isinstance(statement, (I.Store, I.IndexedStore)):
+        result.add(statement.destination.storage)
+      if isinstance(statement, I.ArchitectureCall) and statement.view is not None:
+        result.add(statement.view.storage)
+      for name in ("body", "otherwise"):
+        child = getattr(statement, name, None)
+        if isinstance(child, I.Block):
+          visit(child.statements)
+
+  visit(block.statements)
+  return frozenset(result)
+
+
 @dataclass(frozen=True)
 class StoragePlan:
   scopes: object
   slots: object
   intervals: tuple[ScratchInterval, ...]
   snapshot_scopes: object = field(default_factory=lambda: MappingProxyType({}))
+  referenced: frozenset | None = None
 
 
 @register_pass("cpu-plan-storage", stage="cpu-memory", after="cpu-plan-hardware")
@@ -358,6 +415,10 @@ def plan_storage(prepared, context):
     )
   snapshot_scopes = snapshot_lifetime_scopes(kernel, context.environment.operations) if snapshots else {}
   plan = StoragePlan(
-    MappingProxyType(scopes), MappingProxyType(slots), tuple(intervals), MappingProxyType(snapshot_scopes)
+    MappingProxyType(scopes),
+    MappingProxyType(slots),
+    tuple(intervals),
+    MappingProxyType(snapshot_scopes),
+    referenced_storage(kernel.body, context.environment.operations),
   )
   return replace(prepared, storage=plan)

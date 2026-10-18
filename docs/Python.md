@@ -1030,6 +1030,11 @@ normally; only the predicate is reused. Mutable coordinates, scratch storage,
 parallel workers, hardware owners and conditional geometry substitutions stay
 outside this policy. At most sixteen predicates receive invocation-local state.
 
+Allocation liveness is collected once in the CPU storage plan over the final
+executable value DAG, including view metadata and historical read provenance.
+Unused declarations alone do not keep a scratch allocation alive. Source emission consumes
+this verified set instead of rewalking the entire kernel at every allocation.
+
 The CPU memory stage's `cpu-plan-value-projections` analysis recognizes reshape
 suffixes that preserve immutable entry-derived dimensions, including dimensions
 whose spelling changes through scalar captures. On x86, a vector wholly inside

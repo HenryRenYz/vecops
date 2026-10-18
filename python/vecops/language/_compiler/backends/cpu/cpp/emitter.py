@@ -79,6 +79,7 @@ class CPUEmitter(
     self.uses_amx_mask_policy = False
     self.buffer_declarations = {}
     storage = prepared.storage
+    self.referenced_storage = getattr(storage, "referenced", None)
     self.branch_buffer_scopes = storage.scopes if storage is not None else {}
     self.scratch_slots = storage.slots if storage is not None else {}
     self.active_buffer_branches = {}
