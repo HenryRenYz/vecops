@@ -24,6 +24,7 @@ def vector_dot_into(
   pipeline="off",
   distance=1,
   widening=True,
+  alias_dispatch=None,
 ):
   a, b = inputs
   a, b = T.as_value(a), T.as_value(b)
@@ -39,6 +40,7 @@ def vector_dot_into(
       pipeline=pipeline,
       distance=distance,
       widening=widening,
+      alias_dispatch=alias_dispatch,
     )
 
 
@@ -60,6 +62,7 @@ def blocked_dot_into(
   prefer_k=False,
   widening=True,
   packed_pair=False,
+  alias_dispatch=None,
 ):
   a, b = inputs
   a, b = T.as_value(a), T.as_value(b)
@@ -78,6 +81,7 @@ def blocked_dot_into(
         pipeline=pipeline,
         distance=distance,
         widening=widening,
+        alias_dispatch=alias_dispatch,
       )
     elif (
       BM is None
@@ -101,6 +105,7 @@ def blocked_dot_into(
         pipeline=pipeline,
         distance=distance,
         widening=widening,
+        alias_dispatch=alias_dispatch,
       )
     else:
       _blocked_dot_core(
@@ -117,6 +122,7 @@ def blocked_dot_into(
         pipeline=pipeline,
         distance=distance,
         widening=widening,
+        alias_dispatch=alias_dispatch,
       )
 
 
@@ -430,12 +436,15 @@ def _vector_dot_disjoint(
   pipeline="off",
   distance=1,
   widening=True,
+  alias_dispatch=None,
 ):
   """Version the streaming leaf under whole-producer disjointness proofs.
 
   A proven disjoint branch avoids repeated loop-level alias preservation.
   The general branch retains ordinary historical snapshots; no unchecked
   noalias promise or operator-specific compiler exemption is introduced.
+  A source-level alias dispatcher may provide a private call boundary while
+  the proven-disjoint branch retains its ordinary inline implementation.
   """
   a, b = inputs
   if acc is None:
@@ -452,7 +461,8 @@ def _vector_dot_disjoint(
         widening=widening,
       )
     else:
-      _vector_dispatch(
+      dispatcher = _vector_dispatch if alias_dispatch is None else alias_dispatch
+      dispatcher(
         (a, b),
         output,
         acc_dtype=acc_dtype,
@@ -478,7 +488,8 @@ def _vector_dot_disjoint(
         widening=widening,
       )
     else:
-      _vector_dispatch(
+      dispatcher = _vector_dispatch if alias_dispatch is None else alias_dispatch
+      dispatcher(
         (a, b),
         output,
         acc=acc,
@@ -523,6 +534,7 @@ def _blocked_dot_core(
   pipeline="off",
   distance=1,
   widening=True,
+  alias_dispatch=None,
 ):
   """Source-level cache traversal and K-phase accumulation.
 
@@ -570,5 +582,6 @@ def _blocked_dot_core(
           pipeline=pipeline,
           distance=distance,
           widening=widening,
+          alias_dispatch=alias_dispatch,
         )
       _panel_store(work, destination, row, column, epilogue)

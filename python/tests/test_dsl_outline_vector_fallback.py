@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
-"""Ordinary native-dispatch fallbacks retain an explicit private-call boundary."""
+"""Native-dispatch private boundaries isolate alias and whole-fallback owners."""
 
 import pytest
 import vecops.language as T
 from vecops.language._compiler import ir as I
 from vecops.language._compiler.backends.cpu.backend import CPUBackend
-from vecops.language._compiler.ir.traversal import children
+from vecops.language._compiler.ir.traversal import children, walk_unique
 
 
-def template(tiled=False):
+def template(tiled=False, implementation="auto"):
   m, n, k = T.Dynamic(name="m"), T.Dynamic(name="n"), T.Dynamic(name="k")
 
   @T.template
@@ -19,9 +19,9 @@ def template(tiled=False):
     C: T.Tensor((m, n), (T.dynamic(), T.dynamic()), "float32", access="output"),
   ):
     if tiled:
-      value = T.matmul((A, B), C)
+      value = T.matmul((A, B), C, implementation=implementation)
     else:
-      value = T.dot((A, B), C)
+      value = T.dot((A, B), C, implementation=implementation)
     T.store(C, value)
 
   return kernel
@@ -34,6 +34,13 @@ def nodes(block):
       yield from nodes(child)
 
 
+def contains_disjoint_guard(block):
+  return any(
+    isinstance(node, I.If) and any(value.op == "view_disjoint" for value in walk_unique(node.condition))
+    for node in nodes(block)
+  )
+
+
 @pytest.mark.parametrize("tiled", [False, True])
 @pytest.mark.parametrize("outlined", [False, True])
 def test_only_vector_fallback_has_an_explicit_private_call(tiled, outlined):
@@ -41,11 +48,12 @@ def test_only_vector_fallback_has_an_explicit_private_call(tiled, outlined):
     template(tiled).ir, (), target="AVX512", options={"cpu_outline_vector_fallback": outlined}
   )
   calls = [node for node in nodes(artifact.kernel.body) if isinstance(node, I.ExitRegion) and node.outlined]
-  assert bool(calls) == outlined
+  assert calls
+  assert all(contains_disjoint_guard(call.body) == outlined for call in calls)
   assert any(isinstance(node, I.HardwareRegion) and node.kind == "amx" for node in nodes(artifact.kernel.body))
-  if outlined:
-    assert all(not any(isinstance(node, I.HardwareRegion) for node in nodes(call.body)) for call in calls)
-    assert "VECOPS_NOINLINE" in artifact.source
+  assert all(not any(isinstance(node, I.HardwareRegion) for node in nodes(call.body)) for call in calls)
+  assert not any(isinstance(node, I.ExitRegion) and node.outlined for call in calls for node in nodes(call.body))
+  assert "VECOPS_NOINLINE" in artifact.source
 
 
 @pytest.mark.parametrize("value", [1, "true", None])
@@ -70,20 +78,20 @@ def numeric_template():
   return kernel
 
 
-@pytest.fixture(scope="module")
-def native(tmp_path_factory):
+@pytest.fixture(scope="module", params=[False, True], ids=["alias-only", "whole-fallback"])
+def native(tmp_path_factory, request):
   import platform
 
   import vecops
   from dsl_test_utils import make_compiler
 
-  if platform.machine().lower() not in {"x86_64", "amd64"}:
-    pytest.skip("local AMX dispatch fallback validation")
+  if platform.machine().lower() not in {"x86_64", "amd64", "aarch64", "arm64"}:
+    pytest.skip("native AMX/SME dispatch fallback validation")
   root = tmp_path_factory.mktemp("outlined-vector-fallback")
   compiled = T.compile(
     numeric_template(),
     compiler=make_compiler(jobs=2, cache_dir=root / "cache", build_dir=root / "build"),
-    pass_options={"cpu_outline_vector_fallback": True},
+    pass_options={"cpu_outline_vector_fallback": request.param},
   )
   args = (
     vecops.TensorMeta((1, 65), dtype="bfloat16"),
@@ -145,5 +153,14 @@ def test_native_outlined_fallback_preserves_tail_seed_epilogue_and_alias(native,
 def test_default_outline_policy_uses_the_measured_target_boundary(target, outlined):
   artifact = CPUBackend().lower(template().ir, (), target=target)
   calls = [node for node in nodes(artifact.kernel.body) if isinstance(node, I.ExitRegion) and node.outlined]
-  assert bool(calls) is outlined
+  assert calls
+  assert all(contains_disjoint_guard(call.body) == outlined for call in calls)
   assert all(not any(isinstance(node, I.HardwareRegion) for node in nodes(call.body)) for call in calls)
+
+
+@pytest.mark.parametrize("target", ["AVX512", "SME"])
+def test_explicit_vector_recipe_retains_inline_dispatch(target):
+  artifact = CPUBackend().lower(
+    template(implementation="vector").ir, (), target=target, options={"cpu_outline_vector_fallback": True}
+  )
+  assert not any(isinstance(node, I.ExitRegion) and node.outlined for node in nodes(artifact.kernel.body))

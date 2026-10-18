@@ -53,8 +53,9 @@ def expand_dot_recipes(ir, context):
 
   native_schedule = context.options.get("cpu_matmul_native_schedule", "default")
   # SME keeps its large SIMD alternative separate from architectural owners.
-  # AMX uses an inline fallback: measured private boundaries regress common
-  # SIMD selections, including raw and physically packed operands.
+  # AMX keeps proven-disjoint SIMD inline: whole-fallback private boundaries
+  # regress common raw and packed selections. Its alias arm has a separate
+  # frame so snapshot lifetimes do not inflate the common native owner.
   outline_vector_fallback = context.options.get("cpu_outline_vector_fallback", target.isa == "sme")
   if type(outline_vector_fallback) is not bool:
     raise TypeError("cpu_outline_vector_fallback must be bool")
@@ -767,6 +768,15 @@ def expand_dot_recipes(ir, context):
                     from ....dsl import DSLFunction
 
                     fallback_recipe = DSLFunction(fallback_recipe.function, inline=False)
+                  else:
+                    from ...._library.matmul import _vector_dispatch
+                    from ...frontend.capture import capture
+
+                    # Keep the common disjoint SIMD path inline, while its
+                    # general alias-preserving body owns a separate frame.
+                    # Whole-fallback private calls already provide that
+                    # boundary and do not need another nested dispatcher.
+                    fallback_kwargs["alias_dispatch"] = capture(_vector_dispatch.function, inline=False)
                   _, fallback = expand_helper(
                     fallback_recipe,
                     (tuple(fallback_inputs), destination),

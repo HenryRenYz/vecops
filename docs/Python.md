@@ -2698,7 +2698,10 @@ enables a multi-tile body on nonaligned problems.
 `cpu_outline_vector_fallback` is a boolean option, defaulting to `False` on
 AMX targets and `True` on SME targets.
 It outlines only the ordinary vector fallback in automatic native dispatch;
-native resident and cache drivers retain their existing inlining. This can
+native resident and cache drivers retain their existing inlining. When disabled,
+the proven-disjoint SIMD branch stays inline and only the general alias-preserving
+branch uses a private dispatcher. Explicit vector recipes retain inline dispatch.
+Whole-fallback outlining keeps its single boundary without a nested alias call. This can
 change native code size and adds a private call when the vector fallback is
 selected. Isolating a large recipe can reduce compiler work and register pressure
 in packing/matmul owners. The fallback is not inherently cold: runtime shape
