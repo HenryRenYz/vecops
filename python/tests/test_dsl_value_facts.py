@@ -735,3 +735,93 @@ def test_stopped_expression_still_accounts_for_opaque_type_metadata_in_a_loop():
   ])
   assert statements[1].body.statements[0].value is read
   assert statements[2].value.op == "local"
+
+
+@pytest.mark.parametrize("a,b", [(0, 1), (64, 2), (-9, 2), (9, -2), (-9, -2), (-(1 << 63), 2), ((1 << 63) - 1, 2)])
+@pytest.mark.parametrize("strong", [False, True])
+def test_integer_ceiling_division_constructor_folds_exact_metadata(a, b, strong):
+  left, right = (I.literal(v, dtype="int64" if strong else None) for v in (a, b))
+  expression = I.binary("ceildiv", left, right)
+  assert expression.op == "literal"
+  assert expression.type == I.ScalarType("int64", weak=not strong)
+  assert expression.data == a // b + (a % b != 0)
+
+
+@pytest.mark.parametrize("dtype,a,b", [
+  ("int64", -(1 << 63), -1), ("int64", 9, 0),
+  ("int8", -128, -1), ("uint64", (1 << 63) + 1, 2), ("float32", 1.5, 2.0),
+])
+def test_cleanup_retains_traps_and_unmodeled_ceildiv_conversions(dtype, a, b):
+  from vecops.language._compiler.passes.kernel.cleanup import simplify_ir
+
+  expression = I.Expr(I.ScalarType(dtype), "ceildiv", tuple(I.literal(v, dtype=dtype) for v in (a, b)))
+  kernel = I.KernelIR(I.Block([I.Assign("result", expression)]), {}, {})
+  simplify_ir(kernel, PassContext("kernel-cleanup"))
+  assert kernel.body.statements[0].value is expression
+
+
+def test_cleanup_does_not_evaluate_unselected_ceildiv_trap():
+  from vecops.language._compiler.passes.kernel.cleanup import simplify_ir
+
+  bad = I.Expr(I.ScalarType("int64"), "ceildiv", (I.literal(-(1 << 63)), I.literal(-1)))
+  selected = I.literal(7, dtype="int64")
+  expression = I.Expr(selected.type, "where", (I.literal(False), bad, selected))
+  kernel = I.KernelIR(I.Block([I.Assign("result", expression)]), {}, {})
+  simplify_ir(kernel, PassContext("kernel-cleanup"))
+  assert kernel.body.statements[0].value is selected
+
+
+@pytest.mark.parametrize("dtype,a,b", [
+  ("int8", 9, 2), ("int32", 64, 2), ("uint64", 9, 2),
+  ("uint64", (1 << 63) + 1, 2), ("float32", 1.5, 2.0),
+  ("int64", -(1 << 63), -1), ("int64", 9, 0),
+])
+def test_ceildiv_constructor_retains_unmodeled_types_and_traps(dtype, a, b):
+  left, right = (I.literal(v, dtype=dtype) for v in (a, b))
+  expression = I.binary("ceildiv", left, right)
+  assert expression.op == "ceildiv"
+  assert expression.type == I.ScalarType(dtype)
+  assert expression.args == (left, right)
+
+
+def test_operation_fold_guard_is_frozen_and_prevents_host_evaluation():
+  from vecops.language._compiler.operations import register_operation, unregister_operation
+
+  calls = []
+
+  def fold(a, b):
+    calls.append((a, b))
+    return a // b
+
+  def positive(arguments):
+    return arguments[1].data > 0
+
+  def negative(arguments):
+    return arguments[1].data < 0
+
+  name = "facts-test-guarded-fold"
+  register_operation(OpDef(name, "arithmetic", arity=2, fold=fold, fold_guard=positive))
+  try:
+    first = snapshot()
+    with use_catalog(first):
+      assert I.binary(name, I.literal(6), I.literal(2)).data == 3
+      retained = I.binary(name, I.literal(6), I.literal(0))
+      assert retained.op == name and calls == [(6, 2)]
+    unregister_operation(name)
+    register_operation(OpDef(name, "arithmetic", arity=2, fold=fold, fold_guard=negative))
+    second = snapshot()
+    assert first.fingerprint != second.fingerprint
+    assert first.get(name).fold_guard is positive and second.get(name).fold_guard is negative
+    with use_catalog(first):
+      assert I.binary(name, I.literal(6), I.literal(2)).data == 3
+  finally:
+    unregister_operation(name)
+
+
+def test_operation_fold_guard_requires_both_callable_contracts():
+  from vecops.language._compiler.operations import register_operation
+
+  with pytest.raises(ValueError, match="fold_guard requires callable"):
+    register_operation(OpDef("facts-test-invalid-guard", "arithmetic", fold_guard=lambda _: True))
+  with pytest.raises(ValueError, match="fold_guard requires callable"):
+    register_operation(OpDef("facts-test-invalid-guard", "arithmetic", fold=lambda a, b: a + b, fold_guard=True))

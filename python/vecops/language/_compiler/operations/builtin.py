@@ -111,6 +111,32 @@ _BINARY_FOLDS = {
 }
 
 
+def _fold_ceildiv(a, b):
+  # The generated signed helper executes in int64, with division traps.
+  # Decline noninteger or unmodeled widths instead of changing conversions.
+  if type(a) is not int or type(b) is not int:
+    raise ValueError("ceildiv folding requires integers")
+  lower, upper = -(1 << 63), (1 << 63) - 1
+  if not lower <= a <= upper or not lower <= b <= upper or a == lower and b == -1:
+    raise OverflowError("ceildiv folding requires representable signed division")
+  return a // b + (a % b != 0)
+
+
+def _signed_ceildiv_literals(arguments):
+  # Host arithmetic models this signed64 helper, not narrowing or unsigned
+  # conversions. Reject traps before invoking the host folding callback.
+  from ..ir import ScalarType
+
+  if not all(type(arg.type) is ScalarType and arg.type.dtype == "int64" and type(arg.data) is int for arg in arguments):
+    return False
+  a, b = (arg.data for arg in arguments)
+  lower, upper = -(1 << 63), (1 << 63) - 1
+  return lower <= a <= upper and lower <= b <= upper and b != 0 and not (a == lower and b == -1)
+
+
+_BINARY_FOLDS["ceildiv"] = _fold_ceildiv
+
+
 def _broadcast_dim(a, b):
   """Fold integer dimensions with the runtime helper's compatibility rules."""
   if type(a) is not int or type(b) is not int:
@@ -138,7 +164,13 @@ for name in (
   "shl",
   "shr",
 ):
-  define(name, "arithmetic", arity=2, fold=_BINARY_FOLDS.get(name))
+  define(
+    name,
+    "arithmetic",
+    arity=2,
+    fold=_BINARY_FOLDS.get(name),
+    fold_guard=_signed_ceildiv_literals if name == "ceildiv" else None,
+  )
 for name in ("lt", "le", "gt", "ge", "eq", "ne", "mask_xor"):
   define(name, "comparison", ELEMENTWISE | T.COMPARISON, arity=2, fold=_BINARY_FOLDS.get(name))
 for name in ("and", "or"):

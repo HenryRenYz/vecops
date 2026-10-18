@@ -1146,6 +1146,14 @@ folded only when their evaluation is independently safe to discard; an actual
 load or shape check cannot disappear merely because its numerical result is
 known. Positive constant integer division/remainder has a separately checked
 nontrapping contract. No floating reassociation is introduced.
+Operation definitions can supply a pure `fold_guard` over typed literal IR
+operands. The constructor invokes the host folding callback only when that
+guard approves, and frozen catalogs include the guard in their identity.
+Constant signed-int64 `ceildiv` uses this contract to expose exact grouped-dot
+extents without an overflowing numerator-plus-divisor calculation. Unsigned,
+narrow, floating-point, zero-divisor and signed-overflow cases retain their
+original operation; no integer promotion or trapping behavior is inferred
+from host Python arithmetic.
 Sequential scalar assignments and proven native-loop induction ranges refine
 these facts within their lexical scope. Loop-carried writes, mutable bounds,
 unknown effects and control transfers invalidate affected facts; loop and

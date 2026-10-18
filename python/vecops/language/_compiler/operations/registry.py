@@ -43,6 +43,14 @@ class Trait(IntFlag):
 
 @dataclass(frozen=True)
 class OpDef:
+  """One immutable operation contract, including optional literal folding.
+
+  ``fold`` consumes host literal values. A pure ``fold_guard`` can inspect
+  the tuple of typed literal Expr operands before permitting that evaluation.
+  Rejected operands retain their operation, conversions and runtime traps.
+  Callback semantic changes require a version bump.
+  """
+
   name: str
   family: str
   traits: Trait = Trait.NONE
@@ -54,6 +62,8 @@ class OpDef:
   version: str = "1"
   may_trap: bool = True
   speculatable: bool = False
+  # Optional pure predicate over typed literal Expr operands.
+  fold_guard: object = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +115,8 @@ def register_operation(definition):
     raise ValueError("effectful operations cannot promise unconditional CSE")
   if definition.speculatable and (definition.may_trap or definition.effects != "none"):
     raise ValueError("speculatable operations must be effect-free and nontrapping")
+  if definition.fold_guard is not None and (not callable(definition.fold_guard) or not callable(definition.fold)):
+    raise ValueError("fold_guard requires callable guard and fold callbacks")
   global _snapshot
   with _lock:
     if definition.name in _definitions:
@@ -140,6 +152,11 @@ def snapshot():
         definition.may_trap,
         definition.speculatable,
         getattr(definition.fold, "__qualname__", None),
+      )
+      + (
+        ()
+        if definition.fold_guard is None
+        else ("fold_guard", getattr(definition.fold_guard, "__qualname__", type(definition.fold_guard).__qualname__))
       )
       for name, definition in sorted(definitions.items())
     )

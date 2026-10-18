@@ -298,7 +298,10 @@ def binary(op, left, right):
     if op == "mul" and constant(left) == 1:
       return right
   if left.op == right.op == "literal":
-    fold = operation_snapshot().get(op).fold
+    definition = operation_snapshot().get(op)
+    fold = definition.fold
+    if fold is not None and definition.fold_guard is not None and not definition.fold_guard((left, right)):
+      fold = None
     if fold is not None:
       if weak_literal(left) and weak_literal(right):
         return literal(fold(left.data, right.data))
