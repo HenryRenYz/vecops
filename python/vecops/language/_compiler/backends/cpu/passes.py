@@ -102,8 +102,10 @@ def plan_native_word_tails(region, context):
   SVE grouped predicates can require tuple work even for empty physical
   words. Splitting those words lets ordinary empty-fragment guards remove
   them. AVX masked groups already lower efficiently; fragmenting them can
-  duplicate tail setup and increase native code size. Keep their grouping
-  by default, while retaining the explicit option for target experiments.
+  duplicate tail setup and increase native code size. Split AVX tails by
+  default only when a constant remainder contains a complete physical word,
+  exposing a full mask to native optimization. Keep other AVX tails grouped.
+  An explicit option still overrides this target policy.
 
   A native compute vector can still widen to multiple memory words. Account
   for every dtype domain with the already-legalized rebind headroom, instead
@@ -113,7 +115,7 @@ def plan_native_word_tails(region, context):
   if context.options.get("backend") != "cpu":
     return PassResult(region, changed=False)
   target = context.environment.codegen_target
-  enabled = context.options.get("cpu_native_word_tails", target.architecture == "arm")
+  enabled = context.options.get("cpu_native_word_tails", True)
   if not isinstance(enabled, bool):
     raise ValueError("cpu_native_word_tails must be bool")  # noqa: TRY004 - Match existing CPU pass-option validation.
   region.native_tails = {}
@@ -145,6 +147,19 @@ def plan_native_word_tails(region, context):
   if region.base_power > fallback_power:
     variants += ((None, fallback_power, V.group_vectors(region.unroll, fallback_power, fallback_power)),)
   for variant, base_power, groups in variants:
+    if target.architecture == "x86" and "cpu_native_word_tails" not in context.options:
+      extent = I.constant(region.shape[-1])
+      if type(extent) is not int or not target.vector_bits:
+        continue
+      lanes = target.vector_bits // (8 * ELEMENT_BYTES[region.dtype])
+      base_lanes = lanes << base_power if base_power >= 0 else lanes >> -base_power
+      fragment_lanes = lanes << tail_power if tail_power >= 0 else lanes >> -tail_power
+      # A partial first word provides no complete mask to fold. In that
+      # case AVX grouping avoids duplicating per-fragment setup. Use the
+      # actual ISA geometry; cost-model and SVE length overrides are unrelated.
+      step = base_lanes * region.unroll
+      if step <= 0 or fragment_lanes <= 0 or extent % step < fragment_lanes:
+        continue
     fragments = []
     for parent, group in enumerate(groups):
       depth = group.power - tail_power

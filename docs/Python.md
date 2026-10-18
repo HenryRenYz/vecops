@@ -933,9 +933,11 @@ scalar dependencies and break/continue retain ordered loops; alias-dependent
 serial iterations have a runtime ordered fallback. Tails are always guarded.
 Ordinary SVE/SME traversals split only their masked remainder into native-word
 register fragments, accounting for wider load/store dtypes. AVX traversals retain
-grouped masked remainders by default: splitting them can duplicate setup and
-increase code size for short or fused tails. The internal `cpu_native_word_tails`
-option can explicitly enable fragment planning for AVX experiments. The default
+grouped masked remainders unless a constant remainder contains a complete physical
+word, whose full predicate can then fold away. Splitting a partial first word can
+duplicate setup and increase code size for short or fused tails. Dynamic AVX
+remainders retain grouping. The internal `cpu_native_word_tails` option can
+explicitly enable or disable fragment planning for target experiments. The default
 uses the code generation target, independently of cost-model overrides. Full-loop grouping
 and the requested unroll remain unchanged. Reduction banks are reconstructed
 before their original horizontal reduction, preserving their lane/order

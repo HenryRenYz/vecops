@@ -170,6 +170,17 @@ def test_default_tail_policy_uses_codegen_target_with_explicit_override(target, 
     assert any(region.native_tails for region in explicit.lowered.regions)
 
 
+@pytest.mark.parametrize("target,word", (("AVX", 8), ("AVX2", 8), ("AVX512", 16)))
+@pytest.mark.parametrize("kind", ("partial", "complete", "multiple"))
+def test_default_avx_fragments_require_a_statically_complete_word(target, word, kind):
+  extent = {"partial": 1, "complete": word + 1, "multiple": 256}[kind]
+  template = reduction_template(extent=extent)
+  options = {"cpu_reduction_chunk_pow": 1, "cpu_math_chunk_pow": 1}
+  artifact = CPUBackend().lower(template.ir, (), target=target, options=options)
+  assert any(region.native_tails for region in artifact.lowered.regions) is (kind == "complete")
+  assert ("native-word masked remainder" in artifact.source) is (kind == "complete")
+
+
 @pytest.mark.parametrize("vl,svl", ((16, 64), (32, 16), (64, 32)))
 def test_native_tail_grouping_is_independent_of_ordinary_and_streaming_lengths(vl, svl):
   artifact = lower(reduction_template("float64", "float32"), target="SME", vl=vl, svl=svl)
