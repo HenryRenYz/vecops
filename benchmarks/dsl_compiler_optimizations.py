@@ -26,7 +26,14 @@ import vecops.language as T
 from dsl_timing import isolate_compilation, reserve_cpu, warmup_native
 from vecops._identity import implementation_identity
 
-CASES = ("invariant-metadata", "invariant-branch", "scratch-lifetimes", "fusion-pressure", "dead-store")
+CASES = (
+  "invariant-metadata",
+  "invariant-branch",
+  "scratch-lifetimes",
+  "fusion-pressure",
+  "dead-store",
+  "reshape-suffix",
+)
 BUFFER_PROTOCOL = {
   "version": "compileropt-fixed-buffers-v1",
   "address_window_bytes": 4096,
@@ -50,8 +57,7 @@ def fixed_buffers(rows, width):
   owner = np.empty(3 * block_bytes + window - 1, dtype=np.uint8)
   base_offset = (-int(owner.ctypes.data)) % window
   arrays = {
-    name: np.ndarray((rows, width), dtype=np.float32, buffer=owner,
-                     offset=base_offset + index * block_bytes + offset)
+    name: np.ndarray((rows, width), dtype=np.float32, buffer=owner, offset=base_offset + index * block_bytes + offset)
     for index, (name, offset) in enumerate(BUFFER_PROTOCOL["tensor_offsets"].items())
   }
   owner.fill(0)
@@ -82,12 +88,14 @@ def declaration(case, width):
   N = T.dynamic(lower=0, upper=1_048_576)
   Width = T.Const(width)
   Kind = case
+  InputShape = (2, N, Width) if case == "reshape-suffix" else (N, Width)
+  OutputShape = (2 * N, Width) if case == "reshape-suffix" else (N, Width)
 
   @T.template
   def program(
-    A: T.Tensor((N, Width), dtype=T.float32),
-    C: T.Tensor((N, Width), dtype=T.float32, access="output"),
-    D: T.Tensor((N, Width), dtype=T.float32, access="output"),
+    A: T.Tensor(InputShape, dtype=T.float32),
+    C: T.Tensor(OutputShape, dtype=T.float32, access="output"),
+    D: T.Tensor(OutputShape, dtype=T.float32, access="output"),
     mode: int,
     repeat: int,
   ):
@@ -114,6 +122,12 @@ def declaration(case, width):
           second = T.alloc((Width,), dtype="float32")
           T.store(second, T.load(A[row, :]) - 1)
           T.store(D[row, :], T.load(second) * 3)
+      elif Kind == "reshape-suffix":
+        original = T.load(A) * 2 + 1
+        # The output may alias A: preserve this capture across the write.
+        T.store(D, 0)
+        T.store(C, T.reshape(original, (2 * N, Width)))
+        T.store(D, T.reshape(T.load(A) * 3, (2 * N, Width)))
       elif Kind == "dead-store":
         for row in T.serial(N, unroll=1):
           original = T.load(A[row, :])
@@ -135,6 +149,9 @@ def declaration(case, width):
 
 
 def expected(case, a, mode):
+  if case == "reshape-suffix":
+    flat = a.reshape(-1, a.shape[-1])
+    return flat * 2 + 1, flat * 3
   if case == "invariant-metadata":
     return a + np.float32(a.shape[0] * 3 + a.shape[1]), a * 2
   if case == "invariant-branch":
@@ -196,7 +213,11 @@ def main(argv=None):
       os.sched_setaffinity(0, {args.cpu})
       # Allocate and first-touch the whole selected suite before any factory
       # or compiler work can change the allocator's history. Retain owners.
-      buffer_sets = [fixed_buffers(args.rows, width) for _case in args.cases for width in args.widths]
+      buffer_sets = [
+        fixed_buffers(args.rows * (2 if case == "reshape-suffix" else 1), width)
+        for case in args.cases
+        for width in args.widths
+      ]
     finally:
       os.sched_setaffinity(0, compilation_affinity)
       lease.close()
@@ -213,6 +234,9 @@ def main(argv=None):
     for case in args.cases:
       for width in args.widths:
         _owner, a, c, d, buffer_layout = next(buffer_inputs)
+        if case == "reshape-suffix":
+          a = a.reshape(2, args.rows, width)
+          buffer_layout["tensors"]["A"].update(shape=list(a.shape), strides=list(a.strides))
         template = declaration(case, width)
         start = time.perf_counter()
         compiled = T.compile(template, compiler=compiler)
@@ -278,15 +302,20 @@ def main(argv=None):
         lease.close()
       document = {"configuration": identity, "results": rows, "build": built}
     args.output.write_text(json.dumps(document, indent=2) + "\n")
-    print(json.dumps({
-      "phase": args.phase,
-      "cases": len(rows),
-      "output": str(args.output),
-      "buffer_protocol": BUFFER_PROTOCOL,
-      "primary_metric": "wall_ns_per_repeat",
-      "layout_scope": "fixed 64-byte alignment and 4096-byte offsets; absolute/physical addresses and cache placement can differ",
-      "comparison_scope": "requires the same buffer protocol; historical layouts are separate results",
-    }), flush=True)
+    print(
+      json.dumps(
+        {
+          "phase": args.phase,
+          "cases": len(rows),
+          "output": str(args.output),
+          "buffer_protocol": BUFFER_PROTOCOL,
+          "primary_metric": "wall_ns_per_repeat",
+          "layout_scope": "fixed 64-byte alignment and 4096-byte offsets; absolute/physical addresses and cache placement can differ",
+          "comparison_scope": "requires the same buffer protocol; historical layouts are separate results",
+        }
+      ),
+      flush=True,
+    )
   finally:
     os.sched_setaffinity(0, allowed)
 

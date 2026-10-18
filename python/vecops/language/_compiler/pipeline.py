@@ -42,6 +42,7 @@ _BUILTIN_MODULES = (
   "backends.cpu.storage",
   "backends.cpu.captures",
   "backends.cpu.invariants",
+  "backends.cpu.value_projections",
   "backends.cpu.memory_proofs",
   "passes.verification",
 )

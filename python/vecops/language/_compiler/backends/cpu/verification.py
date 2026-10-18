@@ -45,6 +45,7 @@ def verify_prepared(prepared):
     environment = prepared.vectors.manager.options["_compiler_environment"]
     require(type(entry) is EntryGeometry, "unknown entry geometry proof")
     require(entry.matches(prepared.vectors.kernel, environment.operations), "stale entry geometry proof")
+  verify_reshape_suffixes(prepared)
   verify_closed_fixed_states(prepared)
   confirmed = _memory_proofs(prepared)
   verify_partition_proofs(prepared, confirmed.partitions)
@@ -299,3 +300,21 @@ def verify_private_captures(prepared):
   block(kernel.body, parameters)
   require(set(prepared.private_captures) == seen, "private capture plan contains a detached region")
   return prepared
+
+
+def verify_reshape_suffixes(prepared):
+  """Recompute positive projection certificates against final owned IR."""
+  from .value_projections import ReshapeSuffix, collect_reshape_suffixes
+
+  plans = getattr(prepared, "reshape_suffixes", {})
+  if not plans:
+    return
+  environment = prepared.vectors.manager.options["_compiler_environment"]
+  confirmed = collect_reshape_suffixes(prepared.vectors.kernel, environment.operations)
+  for identity, proof in plans.items():
+    require(type(proof) is ReshapeSuffix and identity == id(proof.subject), "invalid reshape suffix subject")
+    actual = confirmed.get(identity)
+    require(actual is not None and actual.subject is proof.subject, "stale reshape suffix subject")
+    require(
+      type(proof.dimensions) is int and proof.dimensions == actual.dimensions, "invalid reshape suffix dimensions"
+    )

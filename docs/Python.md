@@ -1030,6 +1030,15 @@ normally; only the predicate is reused. Mutable coordinates, scratch storage,
 parallel workers, hardware owners and conditional geometry substitutions stay
 outside this policy. At most sixteen predicates receive invocation-local state.
 
+The CPU memory stage's `cpu-plan-value-projections` analysis recognizes reshape
+suffixes that preserve immutable entry-derived dimensions, including dimensions
+whose spelling changes through scalar captures. On x86, a vector wholly inside
+such a suffix keeps its original producer and historical snapshots, and maps
+only the changed prefix coordinates. Empty or inactive traversals perform no
+new prefix division; inactive lanes remain zero. Changed suffixes, opaque or
+mutable shape metadata and explicit physical vectors retain ordinary lowering.
+The verifier recomputes positive projection certificates against the final IR.
+
 Ordinary SVE can give a closed, complete F32 pointwise output region a private
 native lane permutation when all vector inputs and its output use compatible
 F16/BF16 memory conversions. The compiler applies the same permutation to

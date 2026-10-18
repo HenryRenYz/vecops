@@ -323,6 +323,48 @@ class PrimitivesEmitter:
         # and set, even when a full word was obtained from a clipped slice.
         # Keep the original producer/capture and its conversion boundaries.
         return transformed(own, own_axis)
+      projection = getattr(self.prepared, "reshape_suffixes", {}).get(id(value))
+      if (
+        kind == "reshape"
+        and self.environment.codegen_target.architecture == "x86"
+        and projection is not None
+        and projection.subject is value
+      ):
+        common = projection.dimensions
+        output_prefix = len(value.type.shape) - common
+        source_prefix = len(source.type.shape) - common
+        if own_axis >= output_prefix:
+          prefix = "0"
+          for coordinate, extent in zip(own[:output_prefix], value.type.shape[:output_prefix]):
+            prefix = f"(({prefix}) * ({self.scalar(extent)}) + ({coordinate}))"
+          mapped = []
+          for index, extent in enumerate(source.type.shape[:source_prefix]):
+            divisor = " * ".join(f"({self.scalar(n)})" for n in source.type.shape[index + 1 : source_prefix]) or "1"
+            mapped.append(f"(({prefix}) / ({divisor})) % ({self.scalar(extent)})")
+          mapped.extend(own[output_prefix:])
+          result = self.unique("reshape_suffix")
+          zero = f"vecops::vec::mfill({tag}{{}}, false)" if value.type.mask else f"vecops::vec::zeros({tag}{{}})"
+          self.line(f"auto {result} = {zero}; /* preserved reshape suffix */")
+          condition = " && ".join(
+            [f"({active}) > 0", *(f"({self.scalar(n)}) > 0" for n in source.type.shape[:source_prefix])]
+          )
+          previous = self.chunk_cache
+          self.chunk_cache = dict(previous)
+          self.opening(f"if ({condition})")
+          try:
+            produced = transformed(tuple(mapped), own_axis + len(source.type.shape) - len(value.type.shape))
+            if not self.full_vector:
+              mask = f"vecops::vec::mwhilelt({tag}{{}}, 0, {active})"
+              produced = (
+                f"vecops::vec::mask_and({tag}{{}}, {mask}, {produced})"
+                if value.type.mask
+                else f"vecops::vec::blend({tag}{{}}, {zero}, {mask}, {produced})"
+              )
+            self.line(f"{result} = {produced};")
+          finally:
+            self.close()
+            self.chunk_cache = previous
+          return result
       # General reshape can cross row boundaries within one physical vector.
       # Lane-wise fallback remains register-only; contiguous reads are folded
       # into a view by a separate pass rather than a hidden emitter optimizer.
@@ -601,7 +643,9 @@ class PrimitivesEmitter:
             f"vecops::vec::get({tag}{{}}, {roots[1][slot]}, {lane})",
             statement.value.type.dtype,
           )
-          self.line(f"{self.pointer(statement.destination)}[vecops::vec::get({itag}{{}}, {indices}, {lane})] = {converted};")
+          self.line(
+            f"{self.pointer(statement.destination)}[vecops::vec::get({itag}{{}}, {indices}, {lane})] = {converted};"
+          )
           self.close()
           self.close()
 
