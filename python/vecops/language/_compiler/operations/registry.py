@@ -66,6 +66,9 @@ class OpDef:
   fold_guard: object = None
 
 
+_missing_definition = object()
+
+
 @dataclass(frozen=True)
 class OperationCatalog:
   definitions: object
@@ -73,7 +76,10 @@ class OperationCatalog:
 
   def get(self, operation):
     name = operation if isinstance(operation, str) else operation.op
-    return self.definitions.get(name, OpDef(name, "unknown", effects="unknown"))
+    # Known operations dominate analysis queries. Constructing dict.get's
+    # default eagerly allocated an opaque OpDef for every successful lookup.
+    definition = self.definitions.get(name, _missing_definition)
+    return OpDef(name, "unknown", effects="unknown") if definition is _missing_definition else definition
 
   def has(self, operation, trait):
     return bool(self.get(operation).traits & trait)
