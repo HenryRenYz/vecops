@@ -106,6 +106,8 @@ def plan_native_word_tails(region, context):
   default only when a constant remainder contains a complete physical word,
   exposing a full mask to native optimization. Large AVX-512 private-helper owners and
   hardware regions also split dynamic tails to limit fallback register pressure.
+  Large register-layout owners with narrow floating arithmetic split as well;
+  copying and converting alone retain the ordinary default.
   Keep other AVX tails grouped.
   An explicit option still overrides this target policy.
 

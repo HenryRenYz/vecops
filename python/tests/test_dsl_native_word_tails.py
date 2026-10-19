@@ -387,21 +387,27 @@ def test_compound_avx512_owner_fragments_dynamic_tails_and_preserves_override():
   assert not any(region.native_tails for region in disabled.lowered.regions)
 
 
-def test_ordinary_dynamic_packer_retains_grouped_tails():
+@pytest.mark.parametrize("memory,arithmetic", (("bfloat16", False), ("float32", False), ("bfloat16", True)))
+def test_dynamic_register_layout_tails_distinguish_narrow_arithmetic_from_copy_and_conversion(memory, arithmetic):
   k, n, p = (T.dynamic(lower=0) for _ in range(3))
 
   @T.template
   def kernel(
-    A: T.Tensor((k, n), (1, k), dtype="bfloat16"),
+    A: T.Tensor((k, n), (1, k), dtype=memory),
     O: T.Tensor((p,), dtype="bfloat16", access="output"),
   ):
-    T.pack(T.load(A) + T.cast(1, "bfloat16"), O, side="B", format="amx", dtype="bfloat16")
+    value = T.load(A)
+    if arithmetic:
+      value = value + T.cast(1, memory)
+    T.pack(value, O, side="B", format="amx", dtype="bfloat16")
 
   default = CPUBackend().lower(kernel.ir, (), target="AVX512")
   fragmented = CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cpu_native_word_tails": True})
-  # The ordinary packer has no private early-exit/hardware boundary. Its dynamic
-  # tails retain grouping even though expansion produces a large IR owner.
-  assert default.source != fragmented.source
-  assert sum(len(r.native_tails) for r in default.lowered.regions) < sum(
-    len(r.native_tails) for r in fragmented.lowered.regions
-  )
+  if arithmetic:
+    assert default.source == fragmented.source
+  else:
+    # Copy/conversion-only owners retain grouping despite their large expansion.
+    assert default.source != fragmented.source
+    assert sum(len(r.native_tails) for r in default.lowered.regions) < sum(
+      len(r.native_tails) for r in fragmented.lowered.regions
+    )

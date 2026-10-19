@@ -936,8 +936,10 @@ register fragments, accounting for wider load/store dtypes. AVX traversals retai
 grouped masked remainders unless a constant remainder contains a complete physical
 word, whose full predicate can then fold away. Large AVX-512 private-helper owners
 (more than 64 control/storage IR nodes) and owners with hardware regions also split dynamic
-tails to reduce register pressure across fallback paths. Small maps and standalone
-packers retain grouped dynamic tails, avoiding duplicated fragment setup.
+tails to reduce register pressure across fallback paths. Large register-layout
+owners with narrow floating arithmetic also split; their arithmetic widens inside
+a physical word. Small maps and copy/conversion-only packers retain grouped
+dynamic tails, avoiding duplicated fragment setup.
 The internal `cpu_native_word_tails` option can
 explicitly enable or disable fragment planning for target experiments. The default
 uses the code generation target, independently of cost-model overrides. Full-loop grouping
