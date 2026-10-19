@@ -139,6 +139,35 @@ class ControlEmitter:
     self.block(I.Block([loop]))
     self.close()
 
+  def versioned_loop(self, plan):
+    """Consume prepared root facts; both branches retain the ordinary loop."""
+    from ..capabilities import CPP_TYPES
+
+    roots = {view.storage: view for view in plan.roots}
+    def descriptor(view):
+      shape = ", ".join(self.scalar(x) for x in view.shape)
+      strides = ", ".join(self.scalar(x) for x in view.strides)
+      return f"{view.storage}.data(), {{{shape}}}, {{{strides}}}, sizeof({CPP_TYPES[view.dtype]})"
+    guards = [f"vecops_dsl::try_disjoint_roots({descriptor(roots[a])}, {descriptor(roots[b])}, {self.scalar(roots[a].offset)}, {self.scalar(roots[b].offset)})" for a, b in plan.pairs]
+    guards.insert(0, f"vecops_dsl::full_group({self.scalar(plan.loop.start)}, {self.scalar_inline(plan.loop.stop)}, {self.scalar(plan.loop.step)}, {plan.minimum_iterations})")
+    previous = getattr(self, "disjoint_roots", {})
+    proofs = dict(previous)
+    proofs.update({tuple(sorted((a, b))): (roots[a], roots[b]) for a, b in plan.pairs})
+    subject = id(plan.loop)
+    self.active_loop_versions.add(subject)
+    try:
+      self.opening("if (" + " && ".join(guards) + ") /* loop-invariant root alias version */")
+      self.disjoint_roots = proofs
+      self.branch_block(I.Block([plan.loop]))
+      self.disjoint_roots = previous
+      self.close()
+      self.opening("else /* retain original loop and first-use checks */")
+      self.branch_block(I.Block([plan.loop]))
+      self.close()
+    finally:
+      self.disjoint_roots = previous
+      self.active_loop_versions.remove(subject)
+
   def block(self, block):
     before_active, before_snapshots = dict(self.active_loads), dict(self.snapshots)
     before_materialized = dict(self.materialized)
@@ -229,7 +258,13 @@ class ControlEmitter:
       elif isinstance(statement, I.UnrolledFor):
         self.unrolled_for(statement, self.expression_loads(I.Block(block.statements[index + 1 :])))
       elif isinstance(statement, I.For):
+        # Protect readers after the entire loop before introducing the version
+        # branch. Its branch-local single-statement block has no outer future.
         self.protect_region(statement.body, self.expression_loads(I.Block(block.statements[index + 1 :])))
+        version = self.prepared.loop_versions.get(id(statement))
+        if version is not None and not self.active_loop_versions:
+          self.versioned_loop(version)
+          continue
         ordered_unroll = self.vector_ir.manager.options.get("cpu_ordered_loop_unroll", False)
         if type(ordered_unroll) is not bool:
           raise TypeError("cpu_ordered_loop_unroll must be bool")

@@ -346,3 +346,47 @@ inline vecops::nint_t grid_count(std::initializer_list<std::int64_t> shape) {
 }
 }
 """
+
+# A versioning predicate must not move a metadata exception before the loop.
+# Invalid or unrepresentable root geometry simply selects ordinary emission.
+_LOOP_VERSION_SUPPORT = """
+namespace vecops_dsl {
+VECOPS_ALWAYS_INLINE bool try_root_span(const void* pointer,
+    std::initializer_list<std::int64_t> shape,
+    std::initializer_list<std::int64_t> strides, std::size_t element,
+    Span& result, std::int64_t offset = 0) noexcept {
+  if (shape.size() != strides.size()) return false;
+  std::int64_t lo = offset, hi = offset;
+  auto stride = strides.begin();
+  for (auto extent : shape) {
+    if (extent < 0) return false;
+    if (!extent) { result = {0, 0}; return true; }
+    std::int64_t delta;
+    if (__builtin_mul_overflow(extent - 1, *stride++, &delta)
+        || __builtin_add_overflow(lo, min_value<std::int64_t>(0, delta), &lo)
+        || __builtin_add_overflow(hi, max_value<std::int64_t>(0, delta), &hi)) return false;
+  }
+  std::int64_t low_bytes, high_bytes;
+  if (!pointer || __builtin_mul_overflow(lo, static_cast<std::int64_t>(element), &low_bytes)
+      || __builtin_add_overflow(hi, std::int64_t{1}, &hi)
+      || __builtin_mul_overflow(hi, static_cast<std::int64_t>(element), &high_bytes)) return false;
+  const auto base = static_cast<__int128>(reinterpret_cast<std::uintptr_t>(pointer));
+  const auto first = base + low_bytes, last = base + high_bytes;
+  const auto limit = static_cast<__int128>(std::numeric_limits<std::uintptr_t>::max());
+  if (first < 0 || last < first || last > limit) return false;
+  result = {static_cast<std::uintptr_t>(first), static_cast<std::uintptr_t>(last)};
+  return true;
+}
+VECOPS_ALWAYS_INLINE bool try_disjoint_roots(const void* a,
+    std::initializer_list<std::int64_t> a_shape,
+    std::initializer_list<std::int64_t> a_strides, std::size_t a_element,
+    const void* b, std::initializer_list<std::int64_t> b_shape,
+    std::initializer_list<std::int64_t> b_strides, std::size_t b_element,
+    std::int64_t a_offset = 0, std::int64_t b_offset = 0) noexcept {
+  Span first, second;
+  return try_root_span(a, a_shape, a_strides, a_element, first, a_offset)
+      && try_root_span(b, b_shape, b_strides, b_element, second, b_offset)
+      && !overlap(first, second);
+}
+}
+"""

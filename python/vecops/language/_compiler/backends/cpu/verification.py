@@ -61,6 +61,7 @@ def verify_prepared(prepared):
   verify_broadcast_proofs(prepared, confirmed.broadcasts)
   verify_scalar_geometry(prepared, confirmed.geometry)
   verify_store_alignment(prepared, confirmed.alignment)
+  verify_loop_versions(prepared, confirmed.loop_versions)
   return prepared
 
 
@@ -152,6 +153,7 @@ def _memory_proofs(prepared):
       prepared.vectors.kernel,
       region_shapes={identity: region.shape for identity, region in getattr(prepared.vectors, "plans", {}).items()},
       align_stores=getattr(getattr(environment, "codegen_target", None), "architecture", None) == "x86",
+      loop_target=getattr(environment, "codegen_target", None) if getattr(prepared, "loop_versions", {}) else None,
     )
 
 
@@ -356,3 +358,23 @@ def verify_store_alignment(prepared, confirmed):
       plan.region is actual.region and plan.proofs == actual.proofs,
       "stale aligned store schedule",
     )
+
+
+def verify_loop_versions(prepared, eligible):
+  """Recompute exact loop, owner and occurrence eligibility after extensions."""
+  from .loop_versioning import LoopVersionPlan, same_roots
+
+  plans = getattr(prepared, "loop_versions", {})
+  if not plans:
+    return
+  for identity, plan in plans.items():
+    actual = eligible.get(identity)
+    require(type(plan) is LoopVersionPlan and actual is not None, "ineligible loop version plan")
+    require(plan.loop is actual.loop and identity == id(plan.loop), "stale loop version subject")
+    require(len(plan.stores) == len(actual.stores) and all(a is b for a, b in zip(plan.stores, actual.stores)), "stale loop version stores")
+    require(type(plan.pairs) is tuple and plan.pairs == actual.pairs
+            and type(plan.occurrences) is int and plan.occurrences == actual.occurrences,
+            "loop version crosses lexical scopes")
+    require(type(plan.minimum_iterations) is int and plan.minimum_iterations == actual.minimum_iterations,
+            "invalid loop version trip policy")
+    require(same_roots(plan.roots, actual.roots), "stale loop version root geometry")

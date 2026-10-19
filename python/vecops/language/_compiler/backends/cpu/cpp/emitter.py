@@ -23,7 +23,7 @@ from .primitives import PrimitivesEmitter
 from .printing import PrintEmitter
 from .registers import RegistersEmitter
 from .state import StateEmitter
-from .support import _PREAMBLE, _SME_MATH_POLICY
+from .support import _LOOP_VERSION_SUPPORT, _PREAMBLE, _SME_MATH_POLICY
 from .transpose import TransposeEmitter
 from .vectors import VectorsEmitter
 
@@ -56,6 +56,7 @@ class CPUEmitter(
     self.counter = 0
     self.invariant_alias_predicates = {}
     self.serial_guard_depth = 0
+    self.active_loop_versions = set()
     self.chunk_cache = {}
     self.allocated = set()
     self.tag_dtypes = {}
@@ -281,7 +282,7 @@ class CPUEmitter(
       "// SPDX-License-Identifier: MIT\n"
       "// Generated support code is project-owned; user kernel logic retains its original terms.\n"
     )
-    return notices + headers + _PREAMBLE + _PACKING_PREAMBLE + "\n".join(self.lines) + "\n"
+    return notices + headers + _PREAMBLE + _PACKING_PREAMBLE + (_LOOP_VERSION_SUPPORT if self.prepared.loop_versions else "") + "\n".join(self.lines) + "\n"
 
 
 def generate(prepared):

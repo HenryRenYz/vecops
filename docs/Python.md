@@ -1447,6 +1447,27 @@ Grouped native words retain their original register geometry.
 `cpu_align_stores=False`
 disables this policy. The prime-width cases in `dsl_loop_facts.py` and
 `dsl_compiler_optimizations.py` exercise split rows with fixed buffer layouts.
+The same `cpu-plan-memory-proofs` lexical traversal prepares root-alias checks for bounded, ordinary
+serial loops with short constant pointwise tiles on AVX-512. At least two
+iterations are required before checking roots. A successful
+input/output root check supplies scoped disjoint facts to the original loop;
+its fallback preserves the original snapshots, checks and iteration order.
+Output/output aliases are not assumed independent. Root-span predicates are
+nonthrowing: invalid or overflowing descriptor arithmetic selects fallback,
+so a zero-trip loop does not acquire an earlier metadata exception. The
+planner admits ordinary serial loop nests with bounded headers and excludes
+worker/hardware, software-pipeline and operation-major unroll scopes,
+allocations, state, explicit vectors and unproved body geometry. An enclosing
+version supplies facts to its entire nest; nested versions are suppressed to
+bound code size. Captured integer-to-float metadata stays in its original
+loop body. Guards and facts use the same logical view-root
+shape, strides and offset; shared loops with different normalized origins
+retain the original schedule. The final verifier rechecks the
+exact loop, stores, required external root origins and every lexical occurrence. Other targets and
+wide streaming tiles retain their existing schedules; `cpu_loop_versioning=False`
+disables this policy. The short reverse-range and invariant-branch cases in
+`dsl_loop_facts.py` and `dsl_compiler_optimizations.py` exercise these checks.
+
 `cpu_transpose_cache_block` (multiple of 16, default 128) and
 `cpu_transpose_loop_order` (`"input"`/`"output"`, default `"input"`) are CPU
 tuning overrides. Generic streaming multi-output fusion currently yields to

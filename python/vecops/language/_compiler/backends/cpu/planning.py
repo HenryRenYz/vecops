@@ -65,6 +65,7 @@ class PreparedKernel:
   scalar_geometry: object = field(default_factory=dict)
   store_alignment_proofs: object = field(default_factory=dict)
   aligned_stores: object = field(default_factory=dict)
+  loop_versions: object = field(default_factory=dict)
   pass_trace: list = field(default_factory=list)
 
   def store(self, statement):
