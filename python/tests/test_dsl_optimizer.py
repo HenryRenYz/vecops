@@ -726,3 +726,52 @@ def test_native_cleanup_preserves_index_coordinate_maps(tmp_path, mode, shape):
   full = np.broadcast_to(np.arange(5, dtype=np.int64), (3, 5))
   expected = full[1, :] if mode == "row" else full[:, 2] if mode == "column" else full.T
   np.testing.assert_array_equal(output, expected)
+
+
+@pytest.mark.parametrize("nested", (False, True))
+def test_dce_removes_dead_pure_updates_with_their_declaration(nested):
+  from vecops.language._compiler.passes.kernel.cleanup import dead_code_elimination
+
+  update = I.Assign("temporary", I.literal(64), declare=False)
+  body = I.Block([update])
+  statement = I.If(I.Expr(I.ScalarType("bool"), "raw", data="mode"), body, I.Block([])) if nested else update
+  ir = kernel([I.Assign("temporary", I.literal(0)), statement])
+  result = dead_code_elimination(ir, context())
+  assert result.changed
+  assert ir.body.statements == ([statement] if nested else [])
+  if nested:
+    assert not body.statements
+
+
+def test_dce_keeps_declaration_required_by_unread_trapping_update():
+  from vecops.language._compiler.passes.kernel.cleanup import dead_code_elimination
+
+  denominator = I.Expr(I.ScalarType("int64"), "raw", data="denominator")
+  update = I.Assign("temporary", I.binary("floordiv", I.literal(1), denominator), declare=False)
+  declaration = I.Assign("temporary", I.literal(0))
+  ir = kernel([declaration, I.If(I.Expr(I.ScalarType("bool"), "raw", data="mode"), I.Block([update]), I.Block([]))])
+  result = dead_code_elimination(ir, context())
+  assert not result.changed and ir.body.statements[0] is declaration
+  assert ir.body.statements[1].body.statements == [update]
+
+
+def test_native_dead_mutable_slot_does_not_leave_undeclared_write(tmp_path):
+  import numpy as np
+  from dsl_test_utils import make_compiler
+
+  @T.template
+  def declaration(C: T.Tensor((1,), dtype=T.int64, access="output"), mode: int):
+    temporary = mode
+    for iteration in T.serial(2, unroll=1):
+      if mode > 0:
+        temporary = 64  # noqa: F841 -- exercise a dead mutable DSL update
+    C[0] = mode
+
+  compiled = T.compile(declaration, compiler=make_compiler(
+    jobs=2, output="quiet", cache_dir=tmp_path / "cache", build_dir=tmp_path / "build"
+  ))
+  assert "temporary_" not in compiled.generated_source
+  out = np.empty(1, dtype=np.int64)
+  for mode in (-1, 0, 2):
+    compiled(out, mode)
+    np.testing.assert_array_equal(out, [mode])

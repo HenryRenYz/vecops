@@ -2886,3 +2886,9 @@ builds or execution. It reports wall and process CPU time, source hashes,
 compiler input hashes, and CPU frequency policy. Imports, template construction
 and compiler policy initialization are outside each sample. Repeats must emit
 identical C++; compare snapshots using the same plan, CPU and frequency epoch.
+
+Dead scalar cleanup removes an unused pure reassignment together with its
+scalar declaration, including updates inside structured control flow. A
+trapping or effectful reassignment retains the declaration it requires even
+when its resulting value is unread; cleanup preserves its original execution
+path and exception timing.

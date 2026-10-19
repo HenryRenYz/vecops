@@ -190,6 +190,10 @@ def dead_code_elimination(ir, context):
         referenced_names.add(node.data)
     elif isinstance(node, I.View):
       storage_uses.add(node.storage)
+    elif isinstance(node, I.Assign) and not node.declare and not effects.discardable(node.value):
+      # An observable/trapping update still needs its lexical declaration,
+      # even when no later expression reads the scalar's resulting value.
+      referenced_names.add(node.target)
   capture_memo = {}
 
   def live_capture(value):
@@ -213,7 +217,9 @@ def dead_code_elimination(ir, context):
     output = []
     for statement in body.statements:
       remove = False
-      if isinstance(statement, I.Assign) and statement.declare:
+      if isinstance(statement, I.Assign):
+        # Drop dead pure updates together with their declaration. Keeping an
+        # unused assignment after removing its declaration emits invalid C++.
         remove = statement.target not in referenced_names and effects.discardable(statement.value)
       elif isinstance(statement, I.BindTile):
         remove = id(statement.value) not in live_nodes and not live_capture(statement.value)
