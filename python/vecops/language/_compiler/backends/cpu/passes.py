@@ -104,7 +104,9 @@ def plan_native_word_tails(region, context):
   them. AVX masked groups already lower efficiently; fragmenting them can
   duplicate tail setup and increase native code size. Split AVX tails by
   default only when a constant remainder contains a complete physical word,
-  exposing a full mask to native optimization. Keep other AVX tails grouped.
+  exposing a full mask to native optimization. Large AVX-512 private-helper owners and
+  hardware regions also split dynamic tails to limit fallback register pressure.
+  Keep other AVX tails grouped.
   An explicit option still overrides this target policy.
 
   A native compute vector can still widen to multiple memory words. Account
@@ -147,7 +149,11 @@ def plan_native_word_tails(region, context):
   if region.base_power > fallback_power:
     variants += ((None, fallback_power, V.group_vectors(region.unroll, fallback_power, fallback_power)),)
   for variant, base_power, groups in variants:
-    if target.architecture == "x86" and "cpu_native_word_tails" not in context.options:
+    if (
+      target.architecture == "x86"
+      and "cpu_native_word_tails" not in context.options
+      and not context.options.get("_cpu_compound_owner", False)
+    ):
       extent = I.constant(region.shape[-1])
       if type(extent) is not int or not target.vector_bits:
         continue

@@ -934,9 +934,11 @@ serial iterations have a runtime ordered fallback. Tails are always guarded.
 Ordinary SVE/SME traversals split only their masked remainder into native-word
 register fragments, accounting for wider load/store dtypes. AVX traversals retain
 grouped masked remainders unless a constant remainder contains a complete physical
-word, whose full predicate can then fold away. Splitting a partial first word can
-duplicate setup and increase code size for short or fused tails. Dynamic AVX
-remainders retain grouping. The internal `cpu_native_word_tails` option can
+word, whose full predicate can then fold away. Large AVX-512 private-helper owners
+(more than 64 control/storage IR nodes) and owners with hardware regions also split dynamic
+tails to reduce register pressure across fallback paths. Small maps and standalone
+packers retain grouped dynamic tails, avoiding duplicated fragment setup.
+The internal `cpu_native_word_tails` option can
 explicitly enable or disable fragment planning for target experiments. The default
 uses the code generation target, independently of cost-model overrides. Full-loop grouping
 and the requested unroll remain unchanged. Reduction banks are reconstructed
@@ -1448,7 +1450,7 @@ Grouped native words retain their original register geometry.
 disables this policy. The prime-width cases in `dsl_loop_facts.py` and
 `dsl_compiler_optimizations.py` exercise split rows with fixed buffer layouts.
 The same `cpu-plan-memory-proofs` lexical traversal prepares root-alias checks for bounded, ordinary
-serial loops with short constant pointwise tiles on AVX-512. At least two
+serial loops with short constant pointwise tiles on AVX-512 and SVE/SME. At least two
 iterations are required before checking roots. A successful
 input/output root check supplies scoped disjoint facts to the original loop;
 its fallback preserves the original snapshots, checks and iteration order.
@@ -1463,7 +1465,10 @@ bound code size. Captured integer-to-float metadata stays in its original
 loop body. Guards and facts use the same logical view-root
 shape, strides and offset; shared loops with different normalized origins
 retain the original schedule. The final verifier rechecks the
-exact loop, stores, required external root origins and every lexical occurrence. Other targets and
+exact loop, stores, required external root origins and every lexical occurrence.
+SVE/SME profitability uses the architectural minimum of 16 bytes, independently
+of captured ordinary or streaming vector lengths. Hardware and private early-exit
+owners retain their original schedules on these targets. Other targets and
 wide streaming tiles retain their existing schedules; `cpu_loop_versioning=False`
 disables this policy. The short reverse-range and invariant-branch cases in
 `dsl_loop_facts.py` and `dsl_compiler_optimizations.py` exercise these checks.

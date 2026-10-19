@@ -303,7 +303,20 @@ def _candidate(loop, abi, catalog, native_bytes):
 
 
 def make_loop_version_collector(kernel, catalog, target):
-  if target is None or target.architecture != "x86" or target.isa != "avx512" or not target.vector_bits:
+  if target is None:
+    return None, lambda: MappingProxyType({})
+  if target.architecture == "x86" and target.isa == "avx512" and target.vector_bits:
+    native_bytes = target.vector_bits // 8
+  elif target.architecture == "arm" and target.isa in {"sve", "sme"}:
+    # Profitability uses the architectural minimum, never a captured runtime
+    # VL. Root-span legality itself is independent of vector length.
+    native_bytes = 16
+    # Hardware/private helper owners retain their existing emission. In
+    # particular, do not introduce an ordinary root helper across an SME
+    # streaming boundary or an inlined helper's early-exit scope.
+    if any(isinstance(node, (I.HardwareRegion, I.ExitRegion)) for node in nodes(kernel.body, skip=(I.Expr, I.View))):
+      return None, lambda: MappingProxyType({})
+  else:
     return None, lambda: MappingProxyType({})
   blocked, active, candidates = set(), set(), set()
   abi = {
@@ -320,7 +333,7 @@ def make_loop_version_collector(kernel, catalog, target):
       if type(statement) is I.For:
         if forbidden:
           blocked.add(id(statement))
-        elif _candidate(statement, abi, catalog, target.vector_bits // 8):
+        elif _candidate(statement, abi, catalog, native_bytes):
           candidates.add(id(statement))
       for child in children(statement):
         contexts(
@@ -341,7 +354,7 @@ def make_loop_version_collector(kernel, catalog, target):
       return
     identity = id(statement)
     counts[identity] = counts.get(identity, 0) + 1
-    eligible = None if identity in blocked else _eligible(statement, scope, catalog, target.vector_bits // 8)
+    eligible = None if identity in blocked else _eligible(statement, scope, catalog, native_bytes)
     if eligible is None:
       failed.add(identity)
       return

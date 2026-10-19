@@ -366,3 +366,42 @@ def test_native_fragments_preserve_bits_specials_masks_branch_and_alias(
   if resolve_target(os.environ.get("VECOPS_TEST_TARGET", "Native")).isa in {"sve", "sme", "avx", "avx2", "avx512"}:
     assert "native-word masked remainder" in pair[1].generated_source
     assert "native-word masked remainder" not in pair[0].generated_source
+
+
+def test_compound_avx512_owner_fragments_dynamic_tails_and_preserves_override():
+  m, n, k = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.template
+  def kernel(
+    A: T.Tensor((m, k), dtype="bfloat16"),
+    B: T.Tensor((k, n), dtype="bfloat16"),
+    C: T.Tensor((m, n), dtype="float32", access="output"),
+  ):
+    T.store(C, T.max(T.dot((T.load(A), T.load(B)), C), 0))
+
+  default = CPUBackend().lower(kernel.ir, (), target="AVX512")
+  explicit = CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cpu_native_word_tails": True})
+  disabled = CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cpu_native_word_tails": False})
+  assert default.source == explicit.source
+  assert any(region.native_tails for region in default.lowered.regions)
+  assert not any(region.native_tails for region in disabled.lowered.regions)
+
+
+def test_ordinary_dynamic_packer_retains_grouped_tails():
+  k, n, p = (T.dynamic(lower=0) for _ in range(3))
+
+  @T.template
+  def kernel(
+    A: T.Tensor((k, n), (1, k), dtype="bfloat16"),
+    O: T.Tensor((p,), dtype="bfloat16", access="output"),
+  ):
+    T.pack(T.load(A) + T.cast(1, "bfloat16"), O, side="B", format="amx", dtype="bfloat16")
+
+  default = CPUBackend().lower(kernel.ir, (), target="AVX512")
+  fragmented = CPUBackend().lower(kernel.ir, (), target="AVX512", options={"cpu_native_word_tails": True})
+  # The ordinary packer has no private early-exit/hardware boundary. Its dynamic
+  # tails retain grouping even though expansion produces a large IR owner.
+  assert default.source != fragmented.source
+  assert sum(len(r.native_tails) for r in default.lowered.regions) < sum(
+    len(r.native_tails) for r in fragmented.lowered.regions
+  )

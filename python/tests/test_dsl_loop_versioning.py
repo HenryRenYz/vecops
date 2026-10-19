@@ -72,7 +72,7 @@ def test_plan_binds_loop_owners_and_serial_effects(reverse):
       verify_prepared(replace(artifact.backend_ir, loop_versions={identity: bad}))
 
 
-@pytest.mark.parametrize("target", ("Scalar", "SVE", "SME"))
+@pytest.mark.parametrize("target", ("Scalar", "AVX2", "NEON"))
 def test_other_targets_are_byte_identical(target):
   a = CPUBackend().lower(declaration().ir, (), target=target)
   b = CPUBackend().lower(declaration().ir, (), target=target, options={"cpu_loop_versioning": False})
@@ -111,7 +111,7 @@ def test_native_cross_row_overlap_repeat_and_empty_loops(tmp_path, reverse):
   compiler = make_compiler(jobs=2, output="quiet", cache_dir=tmp_path / "cache", build_dir=tmp_path / "build")
   compiled = T.compile(declaration(reverse), compiler=compiler)
   target = compiled.backend_ir.vectors.manager.options["_compiler_environment"].codegen_target
-  if target.isa == "avx512":
+  if target.isa in {"avx512", "sve", "sme"}:
     assert compiled.backend_ir.loop_versions
   for rows in (0, 1, 3, 5, 33):
     block = rows * 17 + 64
@@ -504,3 +504,32 @@ def test_native_nonunit_steps_preserve_unvisited_rows(tmp_path, step):
         reference_c[row] = reference_a[row].copy() + np.float32(1)
       compiled(a, c)
       np.testing.assert_array_equal(owner, expected)
+
+
+@pytest.mark.parametrize("target", ("SVE", "SME"))
+@pytest.mark.parametrize("vl,svl", ((16, 64), (64, 16)))
+def test_scalable_loop_versions_use_architectural_minimum(target, vl, svl):
+  from vecops._arm_vector_state import VectorState
+
+  options = {"_vector_state": VectorState(vl, svl)}
+  artifact = CPUBackend().lower(declaration(False).ir, (), target=target, options=options)
+  assert len(artifact.backend_ir.loop_versions) == 1
+  assert "loop-invariant root alias version" in artifact.source
+  wide = CPUBackend().lower(declaration(False, width=33).ir, (), target=target, options=options)
+  assert not wide.backend_ir.loop_versions
+  disabled = CPUBackend().lower(
+    declaration(False).ir, (), target=target, options={**options, "cpu_loop_versioning": False}
+  )
+  assert not disabled.backend_ir.loop_versions
+
+
+@pytest.mark.parametrize("target", ("SVE", "SME"))
+def test_scalable_hardware_and_private_owners_retain_original_loops(target):
+  artifact = CPUBackend().lower(declaration(False).ir, (), target=target)
+  kernel = artifact.kernel
+  environment = artifact.backend_ir.vectors.manager.options["_compiler_environment"]
+  for boundary in (I.HardwareRegion("sme", I.Block([])), I.ExitRegion("helper", I.Block([]))):
+    # Even an ordinary sibling loop retains its schedule in a hardware/private
+    # owner; checking only the loop's lexical ancestors would miss this case.
+    body = I.Block([*kernel.body.statements, boundary])
+    assert not collect_loop_versions(replace(kernel, body=body), environment.operations, environment.codegen_target)

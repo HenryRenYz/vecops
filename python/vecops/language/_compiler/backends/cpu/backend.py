@@ -3,16 +3,34 @@
 """CPU compilation driver: frontend -> kernel passes -> vector lowering -> C++."""
 
 from dataclasses import replace
+from itertools import islice
 
 from ....types import TensorType
+from ... import ir as I
 from ...environment import freeze
 from ...frontend.parser import lower
+from ...ir.traversal import nodes
 from ...lowering.tile_to_vector import lower_kernel
 from ...passes.manager import registered_passes
 from ...pipeline import cpu_memory_pipeline, cpu_vector_pipeline, kernel_pipeline, load_builtin_passes
 from ..base import LoweredArtifact
 from .cpp.emitter import generate
 from .planning import prepare
+
+
+def _compound_vector_owner(kernel):
+  """Bound the control/storage scan used for AVX-512 tail profitability.
+
+  Large private-helper owners and hardware regions benefit from independently
+  masked words: grouped dynamic tails otherwise keep several words live across
+  fallback paths. Ordinary maps and standalone packers retain grouped tails.
+  This changes only the default; explicit tail options retain precedence.
+  """
+  structure = tuple(islice(nodes(kernel.body, skip=(I.Expr, I.View)), 65))
+  return any(isinstance(node, I.HardwareRegion) for node in structure) or (
+    len(structure) > 64
+    and any(isinstance(node, (I.HardwareRegion, I.ExitRegion)) for node in nodes(kernel.body, skip=(I.Expr, I.View)))
+  )
 
 
 class CPUBackend:
@@ -54,6 +72,9 @@ class CPUBackend:
     kernel = kernel_manager.run(frontend)
     if session is not None:
       session.stage("kernel", kernel)
+    target_info = environment.codegen_target
+    if target_info.architecture == "x86" and target_info.isa == "avx512":
+      vector_manager = vector_manager.with_options({"_cpu_compound_owner": _compound_vector_owner(kernel)})
     vectors = lower_kernel(kernel, manager=vector_manager)
     prepared = prepare(vectors, memory_manager=memory_manager)
     source, emitted_regions = generate(prepared)
