@@ -2137,7 +2137,10 @@ identity is deliberately non-cacheable. Directory inventories also detect new
 shadowing headers. Python identities read file contents and sorted directory
 inventories on every check. Filesystem notifications and size/mtime do not
 authorize content reuse: shared mappings, external hard links and ancestor
-rebinding can escape directory notifications. Cold compilation validates its
+rebinding can escape directory notifications. A tree scan validates each
+directory before scanning its entries, without repeating the same ancestor
+resolution for every header; each leaf is still checked and read afresh.
+Cold compilation validates its
 inputs before and after the build. These reads do not provide an atomic
 snapshot of a concurrently changing filesystem. Toolchain attestations are
 atomically published under writer locks.

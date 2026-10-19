@@ -14,15 +14,20 @@ from pathlib import Path
 
 
 def content_hash(path):
+  return _content_hash(path, check_parent=True)
+
+
+def _content_hash(path, *, check_parent):
   import hashlib
 
   path = Path(path)
-  try:
-    path.parent.resolve()
-  except FileNotFoundError:
-    return "missing"
-  except OSError as error:
-    return f"unreadable:resolve_parent:{error.errno}"
+  if check_parent:
+    try:
+      path.parent.resolve()
+    except FileNotFoundError:
+      return "missing"
+    except OSError as error:
+      return f"unreadable:resolve_parent:{error.errno}"
   try:
     path.is_symlink()
   except FileNotFoundError:
@@ -75,7 +80,10 @@ def tree_hash(root, suffixes=None):
         if entry.is_dir(follow_symlinks=False):
           pending.append(path)
         elif entry.is_file() and (suffixes is None or path.suffix in suffixes):
-          records.append((str(path.absolute()), content_hash(path)))
+          # This directory was resolved before scandir. Repeating that full
+          # ancestor walk for every header dominates large toolchain trees.
+          # Still lstat and read every leaf afresh; no timestamp/hash cache.
+          records.append((str(path.absolute()), _content_hash(path, check_parent=False)))
       except OSError as error:
         records.append((str(path.absolute()), f"unreadable:stat:{error.errno}"))
   return tuple(sorted(records))
