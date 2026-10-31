@@ -104,4 +104,6 @@ def load():
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   module.build_id = key
+  from . import _resident
+  _resident.install(module)
   return module

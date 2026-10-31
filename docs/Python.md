@@ -3273,6 +3273,28 @@ Python/c10d Work construction or layout planning. Preserve the owner mapping
 returned by `vd.native_operators()` when compiling an explicit graph. A plain
 unadapted c10d call is not a graph-capture interface.
 
+For a native execution provider, graph lowering prepares `run` and eligible
+`consume` effects as `VecopsPreparedKernelV1` plans. Their static TensorLists
+are flattened cold; each graph node retains its own pointer bindings even when
+several nodes reuse the same communication descriptor. Consecutive compute,
+communication and compute plans with the **same physical pool** share one
+resident team. Copy tasks execute directly on its lanes; one lane publishes and
+polls cross-process epochs while the remaining lanes wait at a local cancellable
+barrier. No nested pool submission or Python/c10d dispatch is needed inside the
+island. This removes launch/join overhead, not collective dependencies or reader
+lifetime constraints. All participating readers finish before publishing `done`.
+
+A borrowed consumer joins this team only when it exposes a compatible recorded
+prepared kernel. Its internal grids execute on the existing lanes, with an
+owned pointer table that is valid only until all readers join. Opaque consumers,
+complex-wire collectives and nonresident providers retain the ordinary native
+operation. ATen work still ends a resident island. Set
+`VECOPS_GRAPH_RESIDENT_COMM=0` **before graph preparation** to compare the opaque
+path; changing this variable does not rewrite an already prepared graph.
+Profilers expose `vecops_comm::resident_run`, `resident_consume` and
+`resident_consumer_kernel` scopes on the protocol lane. These overlap the parent
+native island and must not be added to it as independent wall time.
+
 After all plans have been exercised to provision windows, `vd.seal()` freezes
 both window growth and new plan registration. Do this only when no further model
 shapes or collectives need preparation. `vd.statistics()` reports calls, plans,

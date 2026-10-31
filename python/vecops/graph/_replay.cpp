@@ -439,6 +439,27 @@ class Executor : public torch::CustomClassHolder {
           precision == "high" ? at::Float32MatmulPrecision::HIGH : at::Float32MatmulPrecision::MEDIUM);
       const auto plan_symbol = c10::Symbol::attr("vecops_plan_address");
       const auto plan_address = node->hasAttribute(plan_symbol) ? node->i(plan_symbol) : 0;
+      std::vector<torch::jit::Value*> binding_inputs(node->inputs().begin(),node->inputs().end());
+      const auto paths_symbol=c10::Symbol::attr("vecops_plan_argument_paths");
+      const bool flattened=plan_address && node->hasAttribute(paths_symbol);
+      if(flattened) {
+        binding_inputs.clear();const auto text=node->s(paths_symbol);size_t begin=0;
+        while(begin<text.size()) {
+          const auto end=text.find(',',begin);
+          const auto token=text.substr(begin,end==std::string::npos?end:end-begin);
+          const auto split=token.find(':');const auto argument=std::stoull(token.substr(0,split));
+          TORCH_CHECK(argument<node->inputs().size(),"prepared effect argument path out of range");
+          auto* value=node->input(argument);
+          if(split!=std::string::npos) {
+            TORCH_CHECK(value->node()->kind()==torch::jit::prim::ListConstruct,"prepared effect requires a static TensorList");
+            const auto element=std::stoull(token.substr(split+1));
+            TORCH_CHECK(element<value->node()->inputs().size(),"prepared effect list path out of range");
+            value=value->node()->input(element);
+          }
+          TORCH_CHECK(value->type()->isSubtypeOf(c10::TensorType::get()),"prepared effect binding is not a Tensor");
+          binding_inputs.push_back(value);if(end==std::string::npos)break;begin=end+1;
+        }
+      }
       const auto key = signature + "|precision=" + precision + "|plan=" + std::to_string(plan_address);
       auto found = bound_names.find(key);
       std::string bound_name;
@@ -453,15 +474,20 @@ class Executor : public torch::CustomClassHolder {
                         debug.find(".cxx:") != std::string::npos,
                     "CPU kernel has no native C++ registration evidence: ", debug);
         auto bound = original.cloneWithName(bound_name, original.overload_name());
+        if(flattened) {
+          std::vector<c10::Argument> flat_arguments;
+          for(size_t i=0;i<binding_inputs.size();++i)flat_arguments.emplace_back("arg"+std::to_string(i),binding_inputs[i]->type());
+          bound=c10::FunctionSchema(bound_name,"",std::move(flat_arguments),original.returns());
+        }
         const auto profile_name = original.name() +
             (original.overload_name().empty() ? "" : "." + original.overload_name());
-        const auto arity = original.arguments().size();
+        const auto arity = binding_inputs.size();
         std::shared_ptr<PlanBinding> plan;
         if (plan_address) {
           auto outputs = plan_indices(node->s(c10::Symbol::attr("vecops_plan_outputs")));
           TORCH_CHECK(outputs.size() == original.returns().size(), "native plan return count differs from its schema");
           plan = std::make_shared<PlanBinding>(plan_address, plan_indices(node->s(c10::Symbol::attr("vecops_plan_flags"))),
-              plan_indices(node->s(c10::Symbol::attr("vecops_plan_dtypes"))), std::move(outputs), original.arguments().size());
+              plan_indices(node->s(c10::Symbol::attr("vecops_plan_dtypes"))), std::move(outputs), arity);
           bound_plans.emplace(bound_name, plan);
         }
         torch::jit::registerOperator(torch::jit::Operator(
@@ -480,14 +506,14 @@ class Executor : public torch::CustomClassHolder {
                 error.add_context("vecops replay operator: " + signature);
                 throw;
               }
-            }, c10::AliasAnalysisKind::FROM_SCHEMA));
+            }, flattened?c10::AliasAnalysisKind::CONSERVATIVE:c10::AliasAnalysisKind::FROM_SCHEMA));
         bindings_.schemas.push_back(std::move(bound));
         bound_names.emplace(key, bound_name);
       } else {
         bound_name = found->second;
       }
       auto* replacement = graph_->create(c10::Symbol::fromQualString(bound_name),
-                                         node->inputs(), node->outputs().size());
+                                         binding_inputs, node->outputs().size());
       replacement->insertBefore(node);
       if (auto plan = bound_plans.find(bound_name); plan != bound_plans.end()) recorded_nodes.emplace(replacement, plan->second);
       for (size_t i = 0; i < node->outputs().size(); ++i) {
@@ -496,6 +522,11 @@ class Executor : public torch::CustomClassHolder {
       }
       node->destroy();
     }
+    // Flattening only removes list packaging, never a mutable/void effect.
+    // Eliminate now-unused list constructors before finding resident islands.
+    nodes.assign(graph_->nodes().begin(),graph_->nodes().end());
+    for(auto it=nodes.rbegin();it!=nodes.rend();++it)
+      if((*it)->kind()==torch::jit::prim::ListConstruct && !(*it)->hasUses())(*it)->destroy();
     // Pure Constant nodes may separate source calls. They can be evaluated
     // before the island; every other interpreter operation ends the island.
     std::vector<torch::jit::Node*> island;

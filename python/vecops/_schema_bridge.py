@@ -62,6 +62,19 @@ _verified_gomp_handles: dict[str, tuple[Any, dict[str, int]]] = {}
 # c_void_p to the active VecopsAllocationObserverV1, or NULL.
 _workspace_observer_factory: Any = lambda: ctypes.c_void_p(None)
 _native_thread_pool: Any = None
+_replay_plan_providers: dict[str, Any] = {}
+
+
+def register_replay_plan_provider(name, provider):
+  """Register a cold prepared-effect adapter; it never runs during replay.
+
+  Return the ordinary (lease, flags, dtypes, outputs) tuple, or None to keep
+  the native opaque call. A lease may expose argument_paths for statically
+  flattening TensorList inputs before resident-island formation.
+  """
+  if name in _replay_plan_providers and _replay_plan_providers[name] is not provider:
+    raise ValueError('replay plan provider already registered: '+name)
+  _replay_plan_providers[name] = provider
 
 
 def _workspace_observer_pointer() -> Any:
@@ -74,6 +87,8 @@ def prepare_replay_plan(function, arguments, describe_tensor):
   Produced intermediates need no capture-time storage owner: the graph supplies
   metadata and replay binds their actual addresses before entering any grid.
   """
+  if provider := _replay_plan_providers.get(function._schema.name):
+    return provider(function, arguments, describe_tensor)
   from ._dtype import normalize_dtype
   key = tuple(function._schema.name.split('::', 1))
   registration = _registrations.get(key)

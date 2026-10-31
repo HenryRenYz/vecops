@@ -3,6 +3,7 @@
 // Optional c10d adapter. Shared-memory protocol and copy execution live in the
 // framework-neutral core. Prepared graph nodes bypass c10d Work construction.
 #include <ATen/ATen.h>
+#include <ATen/record_function.h>
 #include <torch/library.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
@@ -10,11 +11,13 @@
 #include <torch/csrc/utils/pybind.h>
 #include <pybind11/stl.h>
 #include "vecops/comm/Communication.h"
+#include "vecops/runtime/KernelPlanAbi.h"
 #include <atomic>
 #include <deque>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <cstring>
 
 namespace vc=vecops::comm;
 namespace py=pybind11;
@@ -225,6 +228,144 @@ void drain_queue(const std::weak_ptr<Queue>& weak) {
 void abort_queue(const std::weak_ptr<Queue>& weak) noexcept {
   if(auto q=weak.lock())q->communicator->abort();
 }
+// Per-graph-node bindings, not per-shape backend cache state. Several identical
+// collectives in one resident island are bound before any of them executes.
+struct ResidentKernel {
+  std::atomic<uint32_t> references{1};
+  std::shared_ptr<Prepared> publication;
+  std::shared_ptr<PreparedConsumer> borrowed;
+  std::shared_ptr<Queue> queue;
+  std::vector<void*> data,out;
+  std::vector<const void*> in;
+  std::vector<vc::Layout> metadata;
+  std::vector<uint32_t> types;
+  std::vector<int64_t> addresses;
+  std::vector<VecopsValue> consumer_values;
+  VecopsPreparedKernelV1 consumer{},abi{};
+  struct ConsumerOwner {
+    VecopsPreparedKernelV1 abi{};
+    ~ConsumerOwner(){if(abi.destroy)abi.destroy(abi.context);}
+  } consumer_owner;
+  VecopsExecutionContext execution{};
+  vc::Plan::TeamConsumer team_consumer;
+  std::mutex mutex;
+  bool consumer_entered=false;
+  size_t outputs=0;
+
+  template<class Fn> static int guard(VecopsError* error,Fn&& fn) noexcept {
+    try{fn();return VECOPS_STATUS_OK;}catch(const std::exception& e){
+      if(error){error->code=VECOPS_STATUS_EXECUTION_ERROR;error->message_required=std::strlen(e.what())+1;
+        if(error->message && error->message_capacity){auto n=std::min<size_t>(std::strlen(e.what()),error->message_capacity-1);std::memcpy(error->message,e.what(),n);error->message[n]=0;}}
+      return VECOPS_STATUS_EXECUTION_ERROR;
+    }catch(...){return VECOPS_STATUS_EXECUTION_ERROR;}
+  }
+  ResidentKernel(std::shared_ptr<Prepared> p,std::shared_ptr<PreparedConsumer> b,
+      const VecopsPreparedKernelV1* source,std::vector<uint32_t> wire_types)
+      :publication(std::move(p)),borrowed(std::move(b)),types(std::move(wire_types)) {
+    queue=publication->queue.lock();TORCH_CHECK(queue,"expired resident communication queue");
+    const auto* pool=publication->plan->thread_pool();
+    TORCH_CHECK(pool && pool->struct_size>=sizeof(VecopsThreadPoolV1) && pool->team_executor &&
+        pool->team_executor->abi_major==1 && pool->team_executor->run && pool->max_parallelism,"resident communication requires a physical team");
+    if(borrowed){metadata={borrowed->destination_layout,borrowed->source_layout};outputs=1;}
+    else{metadata=publication->output_metadata;outputs=metadata.size();metadata.insert(metadata.end(),publication->input_metadata.begin(),publication->input_metadata.end());}
+    TORCH_CHECK(types.size()==metadata.size(),"resident wire metadata arity changed");
+    data.resize(metadata.size());in.resize(publication->in_refs.size());out.resize(publication->out_refs.size());
+    execution.struct_size=sizeof(execution);execution.requested_threads=publication->plan->workers();execution.thread_pool=pool;
+    if(borrowed) {
+      TORCH_CHECK(source && source->struct_size>=sizeof(VecopsPreparedKernelV1) && source->abi_major==1 &&
+          source->thread_pool==pool && source->bind_prevalidated && source->enter && source->run_lane && source->leave && source->retain && source->destroy,
+          "borrowed resident consumer must expose the same physical provider");
+      consumer=*source;consumer.retain(consumer.context);consumer_owner.abi=consumer;
+      addresses.resize(borrowed->addresses.numel());consumer_values.resize(2);
+      for(auto& value:consumer_values){value.struct_size=sizeof(VecopsValue);value.kind=VECOPS_VALUE_TENSOR;value.value.tensor.struct_size=sizeof(VecopsTensorView);}
+      team_consumer=[this](const void* const* pointers,size_t count,const VecopsTeamContextV1& team) {
+        TORCH_CHECK(count==addresses.size(),"borrowed pointer count changed");
+        if(team.worker_id==0)for(size_t i=0;i<count;++i)addresses[i]=static_cast<int64_t>(reinterpret_cast<uintptr_t>(pointers[i]));
+        char message[512]{};VecopsError error{sizeof(VecopsError),0,message,sizeof(message),0};
+        if(team.worker_count>1)TORCH_CHECK(team.barrier(team.context,&error)==VECOPS_STATUS_OK,"borrowed address publication cancelled: ",message);
+        if(team.worker_id==0) {
+          RECORD_FUNCTION("vecops_comm::resident_consumer_kernel",c10::ArrayRef<c10::IValue>());
+          TORCH_CHECK(consumer.run_lane(consumer.context,&team,&error)==VECOPS_STATUS_OK,"resident consumer failed: ",message);
+        } else TORCH_CHECK(consumer.run_lane(consumer.context,&team,&error)==VECOPS_STATUS_OK,"resident consumer failed: ",message);
+      };
+    }
+    abi.struct_size=sizeof(abi);abi.abi_major=1;abi.context=this;
+    abi.workers=std::max(std::min(publication->plan->workers(),pool->max_parallelism(pool->context)),consumer.workers);abi.grids=1;
+    abi.thread_pool=pool;abi.execution_context=&execution;
+    abi.retain=[](void* c){static_cast<ResidentKernel*>(c)->references.fetch_add(1,std::memory_order_relaxed);};
+    abi.destroy=[](void* c){auto* self=static_cast<ResidentKernel*>(c);if(self->references.fetch_sub(1,std::memory_order_acq_rel)==1)delete self;};
+    abi.bind_prevalidated=[](void* c,const VecopsCall* call,VecopsError* error){return guard(error,[&]{static_cast<ResidentKernel*>(c)->bind(call,false);});};
+    abi.bind=[](void* c,const VecopsCall* call,VecopsError* error){return guard(error,[&]{static_cast<ResidentKernel*>(c)->bind(call,true);});};
+    abi.enter=[](void* c,VecopsError* error){return guard(error,[&]{
+      auto& self=*static_cast<ResidentKernel*>(c);
+      TORCH_CHECK(self.mutex.try_lock(),"concurrent resident communication instance use");
+      try{self.queue->drain();if(self.borrowed){TORCH_CHECK(self.consumer.enter(self.consumer.context,error)==VECOPS_STATUS_OK,"consumer enter failed");self.consumer_entered=true;}}
+      catch(...){self.queue->communicator->abort();self.mutex.unlock();throw;}
+    });};
+    abi.run_lane=[](void* c,const VecopsTeamContextV1* team,VecopsError* error){return guard(error,[&]{
+      auto& self=*static_cast<ResidentKernel*>(c);
+      if(team->worker_id==0) {
+        RECORD_FUNCTION(self.borrowed?"vecops_comm::resident_consume":"vecops_comm::resident_run",c10::ArrayRef<c10::IValue>());
+        self.publication->plan->execute_on_team(self.out.data(),self.in.data(),*team,self.borrowed?&self.team_consumer:nullptr);
+      } else self.publication->plan->execute_on_team(self.out.data(),self.in.data(),*team,self.borrowed?&self.team_consumer:nullptr);
+    });};
+    abi.leave=[](void* c,uint32_t success){auto& self=*static_cast<ResidentKernel*>(c);if(!success)self.queue->communicator->abort();if(self.consumer_entered){self.consumer.leave(self.consumer.context,success);self.consumer_entered=false;}self.mutex.unlock();};
+    abi.replay=[](void* c,VecopsError* error){auto& self=*static_cast<ResidentKernel*>(c);
+      auto status=self.abi.enter(c,error);if(status)return status;
+      status=self.abi.thread_pool->team_executor->run(self.abi.thread_pool->context,self.abi.workers,c,
+        [](void* c,const VecopsTeamContextV1* team){auto& self=*static_cast<ResidentKernel*>(c);char message[512]{};VecopsError e{sizeof(VecopsError),0,message,sizeof(message),0};TORCH_CHECK(self.abi.run_lane(c,team,&e)==VECOPS_STATUS_OK,"resident collective failed: ",message);},error);
+      self.abi.leave(c,status==VECOPS_STATUS_OK);return status;
+    };
+  }
+  void bind(const VecopsCall* call,bool validate) {
+    TORCH_CHECK(call && call->num_values==data.size(),"resident communication argument count changed");
+    for(size_t i=0;i<data.size();++i) {
+      const auto& value=call->values[i];TORCH_CHECK(value.kind==VECOPS_VALUE_TENSOR,"resident communication requires tensors");
+      const auto& t=value.value.tensor;const auto& m=metadata[i];
+      if(validate){TORCH_CHECK(t.dtype==types[i] && t.rank==m.sizes.size(),"resident communication dtype/rank changed");
+        for(size_t d=0;d<m.sizes.size();++d)TORCH_CHECK(t.sizes[d]==m.sizes[d] && t.strides[d]==m.strides[d],"resident communication layout changed");}
+      data[i]=t.data?static_cast<char*>(t.data)+t.byte_offset:nullptr;
+    }
+    for(size_t i=0;i<in.size();++i){auto r=publication->in_refs[i];auto* p=static_cast<const char*>(data[outputs+r.argument]);in[i]=p?p+r.offset:nullptr;}
+    if(!borrowed)for(size_t i=0;i<out.size();++i){auto r=publication->out_refs[i];auto* p=static_cast<char*>(data[r.argument]);out[i]=p?p+r.offset:nullptr;}
+    if(borrowed) {
+      consumer_values[0].value.tensor.data=addresses.data();consumer_values[1].value.tensor.data=data[0];
+      VecopsCall frame{sizeof(VecopsCall),2,consumer_values.data(),nullptr,0,consumer.execution_context};
+      char message[512]{};VecopsError error{sizeof(VecopsError),0,message,sizeof(message),0};
+      TORCH_CHECK(consumer.bind_prevalidated(consumer.context,&frame,&error)==VECOPS_STATUS_OK,"resident consumer binding failed: ",message);
+    }
+  }
+};
+struct ResidentLease {
+  ResidentKernel* kernel;
+  explicit ResidentLease(ResidentKernel* p):kernel(p){}
+  ~ResidentLease(){kernel->abi.destroy(kernel);}
+  uint64_t address()const{return reinterpret_cast<uintptr_t>(&kernel->abi);}
+};
+void check_metadata(at::TensorList actual,const std::vector<vc::Layout>& expected,const std::vector<at::ScalarType>& types) {
+  TORCH_CHECK(actual.size()==expected.size(),"resident graph communication arity changed");
+  for(size_t i=0;i<actual.size();++i){auto m=layout(actual[i]);TORCH_CHECK(actual[i].scalar_type()==types[i] && m.sizes==expected[i].sizes && m.strides==expected[i].strides,"resident graph communication metadata changed");}
+}
+std::shared_ptr<ResidentLease> resident_plan(int64_t id,const std::vector<at::Tensor>& out,const std::vector<at::Tensor>& in,std::vector<uint32_t> types,uint64_t consumer_address) {
+  std::shared_ptr<Prepared> p;std::shared_ptr<PreparedConsumer> b;
+  {std::lock_guard lock(registry_mutex);
+    if(consumer_address){auto it=consumers.find(id);if(it!=consumers.end())b=it->second.lock();if(b)p=b->publication;}
+    else{auto it=registry.find(id);if(it!=registry.end())p=it->second.lock();}}
+  TORCH_CHECK(p,"expired resident communication plan");
+  const auto* pool=p->plan->thread_pool();
+  if(!pool || pool->struct_size<sizeof(VecopsThreadPoolV1) || !pool->max_parallelism || !pool->team_executor ||
+      pool->team_executor->struct_size<sizeof(VecopsTeamExecutorV1) || pool->team_executor->abi_major!=1 || !pool->team_executor->run)return {};
+  if(consumer_address && reinterpret_cast<const VecopsPreparedKernelV1*>(consumer_address)->thread_pool!=pool)return {};
+  if(b){check_metadata(out,{b->destination_layout},{b->destination_type});check_metadata(in,{b->source_layout},{b->source_type});}
+  else{check_metadata(out,p->output_metadata,p->output_types);check_metadata(in,p->input_metadata,p->input_types);}
+  return std::make_shared<ResidentLease>(new ResidentKernel(std::move(p),std::move(b),
+      reinterpret_cast<const VecopsPreparedKernelV1*>(consumer_address),std::move(types)));
+}
+py::tuple resident_consumer_info(int64_t id) {
+  std::shared_ptr<PreparedConsumer> p;
+  {std::lock_guard lock(registry_mutex);auto it=consumers.find(id);if(it!=consumers.end())p=it->second.lock();}
+  TORCH_CHECK(p,"expired resident consumer");return py::make_tuple(p->operation.schema().name(),p->addresses,p->specs);
+}
 class Backend final:public c10d::Backend {
   std::shared_ptr<vc::Communicator> communicator_;
   std::shared_ptr<Queue> queue_=std::make_shared<Queue>();
@@ -422,6 +563,10 @@ TORCH_LIBRARY_IMPL(vecops_comm,Meta,m){m.impl("run",meta_run);m.impl("consume",m
 TORCH_LIBRARY_IMPL(vecops_comm,CatchAll,m){m.impl("run",run);m.impl("consume",consume);m.impl("exchange",exchange_phase);}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
   m.def("abort_exchange",abort_exchange);
+  m.def("resident_plan",resident_plan);
+  m.def("resident_consumer_info",resident_consumer_info);
+  py::class_<ResidentLease,std::shared_ptr<ResidentLease>>(m,"ResidentLease")
+    .def_property_readonly("abi_address",&ResidentLease::address);
   py::class_<Backend,c10d::Backend,c10::intrusive_ptr<Backend>>(m,"Backend")
     .def(py::init<c10::intrusive_ptr<c10d::Store>,int,int,uint64_t,uint32_t,uint64_t,int,std::vector<int>,size_t,size_t,size_t,bool,bool,std::vector<std::vector<int>>,std::vector<int>>(),py::call_guard<py::gil_scoped_release>())
     .def(py::init<c10::intrusive_ptr<c10d::Store>,int,int,uint64_t,uint32_t,uint64_t,int,std::vector<int>,size_t,size_t,size_t,bool,bool,std::vector<std::vector<int>>,std::vector<int>,bool>(),py::call_guard<py::gil_scoped_release>())

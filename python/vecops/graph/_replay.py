@@ -803,6 +803,8 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
       node.s_('vecops_plan_flags', ','.join(map(str, flags)))
       node.s_('vecops_plan_dtypes', ','.join(map(str, dtypes)))
       node.s_('vecops_plan_outputs', ','.join(map(str, outputs)))
+      if (paths := getattr(lease, 'argument_paths', None)) is not None:
+        node.s_('vecops_plan_argument_paths', ','.join(paths))
       prepared_nodes += 1
     if len(schema.returns) == 1:
       assign(instruction.result, node.output())
