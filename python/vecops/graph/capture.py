@@ -107,6 +107,56 @@ class GraphCapture:
   def scope(self) -> tuple[str, ...]:
     return tuple(self._scope)
 
+  def capture_torch(self, function, *args, preserve_rng_state: bool = True, **kwargs):
+    """Execute once and capture a static CPU program for native replay.
+
+    Unlike precompile's metadata-only capture, this runs real kernels and may
+    mutate inputs/module state. The default CPU RNG state is restored by default
+    on success and failure. Python side effects/control flow are not replayed;
+    only the observed static tensor program is compiled. Use fresh captures for
+    different shapes, layouts or non-Tensor arguments. Existing manual and
+    precompile captures remain metadata-only and do not retain activations.
+    """
+    from ._replay import capture_torch
+    return capture_torch(self, function, args, kwargs,
+                         preserve_rng_state=preserve_rng_state)
+
+  def compile_torch(self, *, memory_plan=None, system=None, domain=None,
+                    large_pages: bool = True, native_operators=None,
+                    borrow_readonly_state: bool = False, native_pointwise: bool = False,
+                    scratch_allocator=None, borrow_outputs: bool = False):
+    """Lower this capture to a guarded, synchronous C++ CPU interpreter.
+
+    Call after ``capture_torch``. Unsupported operators/registrations fail
+    explicitly, never falling back to a Python loop. ``native_operators`` maps
+    qualified custom operator names to strong C++ registration/module owners;
+    materialized vecops Torch registrations are discovered automatically.
+    Optional memory plans must describe this exact graph and select internal
+    nonescaping factory allocations. Other fast placements are rejected;
+    ordinary functional ATen results keep using the native allocator and their
+    unapplied slow placements are reported on the executable. By default,
+    borrowed planner arenas are isolated. ``borrow_readonly_state=True`` may
+    retain verified, dedicated, already-bound immutable module-state ranges;
+    their contents must remain unchanged for this executable's lifetime.
+    ``native_pointwise=True`` lowers supported floating ATen intermediates to
+    recordable SIMD grids and owns their nonescaping scratch buffers. Escaping
+    functional outputs retain their ordinary allocation/alias semantics.
+    ``scratch_allocator(bytes)`` may provide a preallocated CPU uint8 arena.
+    It runs only at compile time and must return enough contiguous storage.
+    Sharing an arena across executables requires externally serialized calls;
+    only nonescaping temporaries are placed there, never outputs or state.
+    ``borrow_outputs=True`` also preallocates supported escaping factories and
+    pointwise outputs in a separate private arena. Those returned tensors may
+    be overwritten on the next call; clone values that must outlive a replay.
+    Unsupported functional ATen results still use their native allocator.
+    """
+    from ._replay import compile_torch
+    return compile_torch(self, memory_plan=memory_plan, system=system, domain=domain,
+                         large_pages=large_pages, native_operators=native_operators,
+                         borrow_readonly_state=borrow_readonly_state,
+                         native_pointwise=native_pointwise, scratch_allocator=scratch_allocator,
+                         borrow_outputs=borrow_outputs)
+
   def _next_event_id(self) -> tuple[str, int]:
     self._event_counter += 1
     return f"e{self._event_counter}", self._event_counter
@@ -154,13 +204,17 @@ class GraphCapture:
       ):
         return
     storage_id = self.tensors[tensor_id].storage_id
+    owner = weakref.ref(self)
 
     def release(reference: weakref.ReferenceType[Any]) -> None:
-      current = self._objects.get(identity)
+      capture = owner()
+      if capture is None:
+        return
+      current = capture._objects.get(identity)
       if current is None or current[0] is not reference:
         return
-      self._objects.pop(identity, None)
-      self._storage_live_objects[storage_id] -= 1
+      capture._objects.pop(identity, None)
+      capture._storage_live_objects[storage_id] -= 1
 
     try:
       reference = weakref.ref(value, release)
@@ -418,6 +472,12 @@ class GraphCapture:
         event.uses.append(TensorUse(tensor_id, access, "return", version, version))
     return event
 
+  def _replay_session(self):
+    # Metadata/precompile capture never changes a runtime session. Executable
+    # capture observes a real invocation inside the existing planner context.
+    tape = getattr(self, "_torch_replay_tape", None)
+    return None if tape is None else tape.session_owner
+
   @contextlib.contextmanager
   def region(
     self,
@@ -427,6 +487,9 @@ class GraphCapture:
     attributes: dict[str, Any] | None = None,
   ):
     input_ids = [self.tensor_id(value) for value in inputs if self._object_entry(value) is not None]
+    session = self._replay_session()
+    if session is not None:
+      session.enter_scope(name)
     enter = self._append_event(
       "region_enter",
       name,
@@ -439,6 +502,8 @@ class GraphCapture:
       yield state
     finally:
       self._scope.pop()
+      if session is not None:
+        session.leave_scope()
       output_ids = [
         self.tensor_id(value)
         for value in state.get("outputs", ())
@@ -475,7 +540,9 @@ class GraphCapture:
       attributes=dict(attributes or {}),
     )
     self.loops.append(loop)
-    return LoopHandle(self, loop)
+    session = self._replay_session()
+    runtime = None if session is None else session.declare_loop(name, trip_count)
+    return LoopHandle(self, loop, runtime)
 
   def record_marker(
     self, kind: str, name: str, *, attributes: dict[str, Any] | None = None
@@ -483,6 +550,9 @@ class GraphCapture:
     return self._append_event(kind, name, attributes=attributes)
 
   def enter_scope(self, name: str, *, kind: str = "scope") -> None:
+    session = self._replay_session()
+    if session is not None:
+      session.enter_scope(name)
     self._append_event(f"{kind}_enter", name)
     self._scope.append(name)
 
@@ -490,6 +560,9 @@ class GraphCapture:
     if not self._scope:
       raise RuntimeError("cannot leave an empty graph scope stack")
     name = self._scope.pop()
+    session = self._replay_session()
+    if session is not None:
+      session.leave_scope()
     self._append_event(f"{kind}_exit", name)
 
   def finish(self) -> ExecutionGraph:
@@ -554,7 +627,7 @@ class LoopHandle:
     role: str | None = None,
     inputs: Any = (),
   ):
-    if self.runtime is not None:
+    if self.runtime is not None and self.capture is None:
       with self.runtime.iteration(index, role):
         yield {"outputs": ()}
       return
@@ -563,35 +636,38 @@ class LoopHandle:
       return
     if self.closed:
       raise RuntimeError("cannot enter an iteration of a closed loop")
-    self.loop.observed_iterations.append(index)
-    label = f"{self.loop.name}[{index}]"
-    enter = self.capture._append_event(
-      "loop_iteration_enter",
-      label,
-      attributes={"loop_id": self.loop.id, "iteration": index, "role": role},
-    )
-    input_ids = [
-      self.capture.tensor_id(value)
-      for value in _tensor_leaves(inputs, self.capture)
-    ]
-    sample = LoopSample(index, role, enter.id, input_tensors=input_ids)
-    self.loop.samples.append(sample)
-    self.capture._scope.append(label)
-    state: dict[str, Any] = {"outputs": ()}
-    try:
-      yield state
-    finally:
-      self.capture._scope.pop()
-      exit_event = self.capture._append_event(
-        "loop_iteration_exit",
+    with contextlib.ExitStack() as contexts:
+      if self.runtime is not None:
+        contexts.enter_context(self.runtime.iteration(index, role))
+      self.loop.observed_iterations.append(index)
+      label = f"{self.loop.name}[{index}]"
+      enter = self.capture._append_event(
+        "loop_iteration_enter",
         label,
         attributes={"loop_id": self.loop.id, "iteration": index, "role": role},
       )
-      sample.end_event = exit_event.id
-      sample.output_tensors = [
+      input_ids = [
         self.capture.tensor_id(value)
-        for value in _tensor_leaves(state.get("outputs", ()), self.capture)
+        for value in _tensor_leaves(inputs, self.capture)
       ]
+      sample = LoopSample(index, role, enter.id, input_tensors=input_ids)
+      self.loop.samples.append(sample)
+      self.capture._scope.append(label)
+      state: dict[str, Any] = {"outputs": ()}
+      try:
+        yield state
+      finally:
+        self.capture._scope.pop()
+        exit_event = self.capture._append_event(
+          "loop_iteration_exit",
+          label,
+          attributes={"loop_id": self.loop.id, "iteration": index, "role": role},
+        )
+        sample.end_event = exit_event.id
+        sample.output_tensors = [
+          self.capture.tensor_id(value)
+          for value in _tensor_leaves(state.get("outputs", ()), self.capture)
+        ]
 
   def close(self) -> None:
     if self.closed:
@@ -599,7 +675,6 @@ class LoopHandle:
     self.closed = True
     if self.runtime is not None:
       self.runtime.close()
-      return
     if self.capture is None or self.loop is None:
       return
     event = self.capture._append_event("loop_exit", self.loop.name, attributes={"loop_id": self.loop.id})
@@ -689,7 +764,12 @@ def wrap_region(
   name: str | None = None,
   attributes: dict[str, Any] | None = None,
 ):
-  """Wrap a callable with capture-only region entry/exit events."""
+  """Wrap capture regions and mirror their lexical scopes during factory replay.
+
+  Replay needs the same scope keys as capture, including decorated callables.
+  Ordinary eager execution and dynamic-only sessions do not add region scopes;
+  ``VECOPS_MIRROR_REGION_SCOPE=1`` can also request them for diagnostics.
+  """
   if function is None:
     return functools.partial(wrap_region, name=name, attributes=attributes)
   region_name = name or f"{function.__module__}.{function.__qualname__}"
@@ -703,21 +783,19 @@ def wrap_region(
         result = function(*args, **kwargs)
         state["outputs"] = _tensor_leaves(result, capture)
         return result
-    # Runtime (replay) path: optionally mirror the same lexical region into
-    # an active plan session so factory-site scopes match the captured
-    # graph exactly. Off by default: with scopes aligned the factory
-    # replay serves wrapper outputs, which exposed a latent slot-reuse
-    # crash (SIGSEGV via aliased views) that the epoch cursor logic must
-    # fix first. Enable with VECOPS_MIRROR_REGION_SCOPE=1.
-    if os.environ.get("VECOPS_MIRROR_REGION_SCOPE") != "1":
-      return function(*args, **kwargs)
+    # Match captured factory keys only when replay is active. Retained and
+    # escaping aliases are excluded by the planner; merely dropping a lexical
+    # region would silently route a different allocation into its parent scope.
     try:
       from vecops.planner.runtime import current_session
 
       session = current_session()
     except ImportError:
       session = None
-    if session is None:
+    if session is None or (
+        not session.enable_factory_replay
+        and os.environ.get("VECOPS_MIRROR_REGION_SCOPE") != "1"
+    ):
       return function(*args, **kwargs)
     session.enter_scope(region_name)
     try:

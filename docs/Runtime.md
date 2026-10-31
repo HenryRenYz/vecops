@@ -193,12 +193,19 @@ before the legacy pool was created; the adaptive direct-call facade instead
 requires that override to lie inside the caller's affinity. `VECOPS_THREAD_POOL_SPIN_COUNT` controls the bounded spin
 before parking and defaults to 256. This mode is opt-in because a workload
 with substantial interleaved ATen work can still prefer Torch's shared team.
-Team barriers use the standard-library atomic wait facility when the selected
-library provides it. Older Linux standard libraries park on a lock-free
-32-bit generation word with private futexes after the bounded spin; other
-platforms use a condition-variable fallback with predicate-based wakeup. This
-keeps barrier waits parked rather than burning CPU on unsupported
-`atomic<uint64_t>::wait` implementations.
+Joined native-team barriers use active generation-word spinning by default;
+the team completes before its caller can enter ATen or another executor.
+`VECOPS_THREAD_POOL_TEAM_SPIN_COUNT` configures this independently of idle
+workers: `4294967295` means active spinning until completion (the default),
+`2048` restores the earlier short-spin/park policy, and `0` parks immediately.
+Finite values spin at most that many iterations and then use atomic wait,
+with a private-futex or predicate-based condition-variable fallback when
+the standard library lacks atomic wait. Set the environment before creating
+the pool. Arrival and generation words occupy separate cache lines. Exception
+cancellation advances generation so both active and parked waiters can exit.
+Leaving a team joins its callbacks; the persistent worker threads are retained
+and revert to their separate bounded idle spin/parking policy. Thus the default
+does not keep workers actively spinning across intervening ATen/communication.
 Set `VECOPS_NATIVE_THREAD_POOL_OPS` to comma-separated qualified-name glob
 patterns to opt in only selected bridges, for example
 `alphafold3_native::diffusion_*`; unmatched bridges retain the Torch pool.
@@ -296,7 +303,7 @@ extensions use an opaque handle to enter a Python-owned `Operator`; that
 handle must not be stored after the owner goes away. It is not part of an
 independently distributed kernel artifact's ABI.
 
-The Python extension keeps up to eight exact call signatures per thread for
+The Python extension keeps up to 128 exact call signatures per thread for
 this process-local bridge. After a slow invocation has resolved and validated
 an `Executable`, a matching context-free or arena-provider,
 zero-external-workspace call may reuse that executable directly. The signature
@@ -305,8 +312,17 @@ kind, dtype, device, access, shape, stride, optional presence, explicit
 specialization values, and effective execution parallelism. A shape,
 specialization, or Torch thread-count change therefore returns to normal
 operator resolution; operator destruction invalidates the cached weak owner.
+Recordable instances also guard the thread-pool pointer, workspace-provider
+identity and raw requested-thread budget. Changing that context retires the
+old instance and prepares a new one even when tensor metadata is identical.
 Set `VECOPS_TORCH_PREPARED_CALL=0` before process startup to disable this hot
 path for diagnostics.
+
+`VECOPS_TORCH_HOT_CAPACITY=1..128` selects a smaller cache for A/B checks.
+`VECOPS_TORCH_HOT_STATS=1` enables calling-thread counters, available through
+`vecops._C.bridge_hot_cache_stats()` (hits, misses, preparations, evictions and
+context misses). `reset_bridge_hot_cache_stats()` resets counters while keeping
+entries warm. These source-bridge counters exclude dedicated graph plan leases.
 
 Source kernels without an external workspace also use a small thread-local
 workspace replay cache. Its identity includes the observed Dynamic axes,
@@ -345,3 +361,64 @@ events are reported. `vecops.workspace_observer.tracking()`, `drain()` and
 `drain_memory()` feed profiling/Chrome traces. DSL scratch lifetimes and
 workspace allocation sites are observed, not all allocator or process memory.
 Tracing is opt-in and does not imply output ordering or extra synchronization.
+
+## Persistent grid plans
+
+`KernelPlanAbi.h` is an optional artifact extension alongside the ordinary
+run ABI. `LoadedModule::plan_descriptor()` reports availability. A
+`PreparedKernel` owns its opaque instance and retains the artifact DSO;
+destroying the original `Executable` cannot invalidate its code or resources.
+Its external tensors remain caller-owned and must outlive synchronous execution.
+
+`bind` checks exact captured metadata/context and patches storage addresses and
+scalar payloads. `replay` executes the internal grids without decoding the
+source entry again. The generated Torch bridge retains a prepared object in
+its metadata hot cache for recordable artifacts. Shared metadata does not fix
+weight addresses or runtime values: every invocation binds its actual storage.
+
+The ABI also exposes `enter`, `run_lane` and `leave`. An embedding must enter
+once, invoke run_lane on every real resident worker, wait for all workers to
+finish (including cancellation), and leave exactly once. This protocol allows
+several prepared kernels to share a resident submission. Do not implement a
+barrier with callbacks that a provider may virtualize sequentially. The ABI's
+`thread_pool` identifies the actual provider; check its resident-team extension.
+The prepared object and all callbacks stay alive until every lane has finished.
+
+`execution::KernelSequence` provides this composition for C++ instances, with
+one team sized for the largest member. Smaller grids skip extra lanes while
+all lanes participate in dependencies. Logical-task-only providers retain an
+explicit synchronous fallback. Instances and sequences reject overlapping use.
+
+
+Torch graph lowering recognizes recordable source operators and prepares them
+from captured tensor metadata without retaining capture-time intermediate
+addresses. Its native `PlanBinding` patches only current data pointers and
+scalar payloads, then invokes the prepared C ABI. Exact metadata and optional
+presence must already be proven by the static graph guards. The ABI's retained
+lease owns the artifact and prepared state independently of Python owners.
+
+Consecutive void/out-style prepared operators using the same resident provider
+are grouped into one native island (pure Constant nodes may intervene).
+One team runs their grids in order, with barriers between stages. An ATen node,
+a return-producing operator, or a provider change ends the island. Metadata
+views and ATen work are currently still native interpreter operations; this is
+not whole-model fusion. Logical-only Torch providers execute the synchronous
+grid fallback and are never placed inside a resident barrier sequence.
+
+### Native pool wake policies
+
+`VECOPS_THREAD_POOL_WAKE_POLICY=generation` selects one shared atomic generation
+and a batch notification after publishing only the participating workers'
+mailboxes. The default `mailbox` policy keeps individual sleeping-worker
+notifications. Both policies preserve the same lifetime rule: nonparticipants
+never read the stack-owned Submission; completion requires acknowledgements
+only from the selected prefix. A generation wake can wake idle workers, but
+those workers only inspect their own empty mailbox.
+
+Within an explicitly bounded active region, publication avoids per-worker
+sleep locks and notifications. Ending the final region is serialized with
+submission publication, preventing a worker from sleeping during an
+unnotified active submission. Never extend an active region across ATen or
+communication copy work on the same cores. Compare both policies with realistic
+payloads and full inference before selecting a platform default; empty dispatch
+latency alone does not establish model throughput.

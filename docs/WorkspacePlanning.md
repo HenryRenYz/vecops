@@ -212,3 +212,30 @@ and prepare operators before entering a parallel region. Parallel callbacks may
 use returned Tensor views, `TaskContext::local`, and prepared operations; they
 must not issue new context allocation requests whose order would depend on lane
 arrival.
+
+## KernelBuilder plans
+
+`execution/KernelPlan.h` provides a persistent source-kernel model.
+`KernelBuilder::tensor` and `worker_tensor` declare symbolic typed storage;
+they expose layout metadata and cannot read capture-time tensor contents.
+`prepare_operation<P>(name, op, patterns...)` accepts the existing address-free
+operator patterns. Planning first declares all scratch; instantiation then
+places buffers and scratch together, allocates one arena per tier, and binds
+instance-owned prepared objects. No scratch declaration or placement lookup
+belongs in replay. Allocation remains conservative: independently live sites
+are not colored merely because their declarations occupy sibling C++ scopes.
+
+Default storage prefers fast memory and falls back to slow memory when the
+preferred arena is unavailable; required-fast storage must fit. A provider
+that deliberately shares arenas between plans still requires its embedding's
+serialization/lease discipline across instances. Within one plan, distinct
+buffers and operator scratch have disjoint placed spans.
+
+`grid` records a program callback. `worker_grid` records a worker callback
+whose synchronous `worker.programs(...)` loop can be surrounded by per-worker
+prologue/epilogue. Local captures inside that loop are valid only until it
+returns. `single` records data work once per execution; ordinary C++ outside
+these nodes executes only during construction. All recorded callbacks receive
+explicit input/scalar/state bindings and must not retain references to the
+builder's stack. SME/AMX resource scopes are entered on the executing worker,
+not retained from plan construction.

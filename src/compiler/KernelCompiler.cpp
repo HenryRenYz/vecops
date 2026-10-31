@@ -268,12 +268,14 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
   output
     << "#include \"vecops_spec.h\"\n"
        "#include \"vecops/runtime/KernelAbi.h\"\n"
+       "#include \"vecops/runtime/KernelPlanAbi.h\"\n"
        "#include \"vecops/execution/VectorLength.h\"\n"
        "#include \"vecops/tensor/Tensor.h\"\n"
        "#include <algorithm>\n#include <cstddef>\n#include <cstring>\n#include <exception>\n#include <limits>\n"
        "#include <memory>\n#include <stdexcept>\n#include <utility>\n\n"
     << "#include " << cpp_string(fs::absolute(kernel_file).lexically_normal().string())
-    << "\n#include \"vecops/execution/WorkspaceContext.h\"\n\n"
+    << "\n#include \"vecops/execution/WorkspaceContext.h\"\n"
+       "#include \"vecops/execution/SourceKernelPlan.h\"\n\n"
        "namespace {\n"
        "void set_error(VecopsError* error, int code, const char* message) {\n"
        "  if (!error || error->struct_size < sizeof(VecopsError)) return;\n"
@@ -283,7 +285,7 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
        "  std::memcpy(error->message, message, copied); error->message[copied] = '\\0';\n"
        "}\n"
        "template <typename Setup, typename... Args>\n"
-       "void invoke_source_kernel(const VecopsCall* call, const char* recipe, Setup&& setup, Args&&... args) {\n"
+       "void invoke_source_kernel(const VecopsCall* call, VecopsPreparedKernelV1* prepared, const char* recipe, Setup&& setup, Args&&... args) {\n"
        "#if defined(VECOPS_KERNEL_SVE_BYTES) || defined(VECOPS_KERNEL_SME_BYTES)\n"
        "#if defined(VECOPS_KERNEL_SVE_BYTES)\n"
        "  constexpr auto kernel_sve_bytes = VECOPS_KERNEL_SVE_BYTES;\n"
@@ -298,7 +300,10 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
        "  ::vecops::execution::require_current_thread_vector_lengths(\n"
        "    {kernel_sve_bytes, kernel_sme_bytes});\n"
        "#endif\n"
-       "#if defined(VECOPS_KERNEL_EXECUTION_CONTEXT)\n"
+       "#if defined(VECOPS_RECORDABLE_KERNEL)\n"
+       "  ::vecops::execution::source_plan_details::launch<static_cast<::vecops::nint_t>(::vecops::spec::Parallelism)>(\n"
+       "    call, prepared, [](auto& builder, auto... inputs) { __kernel__(builder, inputs...); }, args...);\n"
+       "#elif defined(VECOPS_KERNEL_EXECUTION_CONTEXT)\n"
        "  __kernel__(call->context, std::forward<Args>(args)...);\n"
        "#else\n"
        "  if constexpr (requires(::vecops::execution::WorkspaceContext& workspace) {\n"
@@ -393,7 +398,10 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
             "int32_t workspace(const VecopsCall*, uint64_t* size, VecopsError*) {\n"
             "  if (!size) return VECOPS_STATUS_INVALID_ARGUMENT; *size = 0; return VECOPS_STATUS_OK;\n"
             "}\n"
-            "int32_t run(const VecopsCall* call, VecopsError* error) {\n"
+            "int32_t dispatch(const VecopsCall* call, VecopsError* error, VecopsPreparedKernelV1* prepared) {\n"
+            "#if !defined(VECOPS_RECORDABLE_KERNEL)\n"
+            "  if (prepared) return VECOPS_STATUS_NOT_APPLICABLE;\n"
+            "#endif\n"
             "  if (!call || call->struct_size < sizeof(VecopsCall) || call->num_values != "
          << definition.parameters().size()
          << " || !call->values) { set_error(error, VECOPS_STATUS_INVALID_ARGUMENT, \"invalid call frame\"); return "
@@ -471,7 +479,8 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
       output << "    const auto& " << view << " = call->values[" << index << "].value.tensor;\n"
              << "    auto " << local << " = ::vecops::tensor::make_tensor(reinterpret_cast<"
              << (tensor_def->writable() ? "" : "const ") << cpp_type(resolved_dtype(*tensor_def, *tensor, binding))
-             << "*>(static_cast<std::byte*>(" << view << ".data) + " << view << ".byte_offset),\n"
+             << "*>(" << view << ".byte_offset ? static_cast<std::byte*>(" << view << ".data) + " << view
+             << ".byte_offset : static_cast<std::byte*>(" << view << ".data)),\n"
              << "      ::vecops::tensor::make_shape(";
       for (std::size_t axis = 0; axis < tensor_def->shape.size(); ++axis) {
         if (axis != 0)
@@ -496,7 +505,7 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
             "      set_error(error, VECOPS_STATUS_INVALID_ARGUMENT, \"workspace exceeds the host address space\");\n"
             "      return VECOPS_STATUS_INVALID_ARGUMENT;\n"
             "    }\n"
-         << "    invoke_source_kernel(call, " << cpp_string(definition.name())
+         << "    invoke_source_kernel(call, prepared, " << cpp_string(definition.name())
          << ", [&](auto& workspace) VECOPS_INLINE_LAMBDA {\n";
   for (const auto& observation : axis_observations)
     output << observation;
@@ -513,6 +522,18 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
        "VECOPS_STATUS_EXECUTION_ERROR;\n"
        "  }\n"
        "}\n"
+       "int32_t run(const VecopsCall* call, VecopsError* error) { return dispatch(call, error, nullptr); }\n"
+       "int32_t prepare_plan(const VecopsCall* call, VecopsPreparedKernelV1* output, VecopsError* error) {\n"
+       "  if (!output || output->struct_size < sizeof(VecopsPreparedKernelV1)) return VECOPS_STATUS_INVALID_ARGUMENT;\n"
+       "  return dispatch(call, error, output);\n"
+       "}\n"
+       "const VecopsKernelPlanDescriptorV1 plan_descriptor{sizeof(VecopsKernelPlanDescriptorV1), 1,\n"
+       "#if defined(VECOPS_RECORDABLE_KERNEL)\n"
+       "  1,\n"
+       "#else\n"
+       "  0,\n"
+       "#endif\n"
+       "  0, prepare_plan};\n"
        "const VecopsKernelDescriptorV1 descriptor = {\n"
        "  sizeof(VecopsKernelDescriptorV1), VECOPS_KERNEL_ABI_VERSION_MAJOR, VECOPS_KERNEL_ABI_VERSION_MINOR,\n  "
     << cpp_string(definition.name()) << ", " << cpp_string(binding.specialization_key) << ", "
@@ -521,6 +542,9 @@ std::string generate_adapter(const fs::path& kernel_file, const KernelDef& defin
        "} // namespace\n\n"
        "extern \"C\" VECOPS_RUNTIME_EXPORT const VecopsKernelDescriptorV1* vecops_kernel_query_v1() {\n"
        "  return &descriptor;\n"
+       "}\n"
+       "extern \"C\" VECOPS_RUNTIME_EXPORT const VecopsKernelPlanDescriptorV1* vecops_kernel_plan_query_v1() {\n"
+       "  return &plan_descriptor;\n"
        "}\n";
   return output.str();
 }

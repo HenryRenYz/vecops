@@ -396,6 +396,27 @@ int main(int argc, char** argv) {
   require(executable.value()->invoke(call.arguments()).ok(), "direct executable invocation");
   require(output == std::vector<float>({4, 7, 10, 13, 16, 19, 22, 25}), "direct result");
 
+  auto recordable = compiler->compile_kernel(fs::path(VECOPS_SOURCE_ROOT) / "tests/runtime/RecordableKernel.cpp",
+                                             definition, call);
+  require(recordable.ok(), recordable.status().message());
+  std::fill(output.begin(), output.end(), 0);
+  auto prepared_plan = recordable.value()->prepare(call.arguments());
+  require(prepared_plan.ok(), prepared_plan.status().message());
+  require(output == std::vector<float>(8, 0), "plan construction must not execute tensor computation");
+  require(prepared_plan.value()->abi().grids == 2, "source plan records both internal grids");
+  require(prepared_plan.value()->replay().ok(), "source plan direct replay");
+  require(output == std::vector<float>({4, 7, 10, 13, 16, 19, 22, 25}), "source plan result");
+  std::vector<float> rebound_input(8, 5), rebound_output(8);
+  auto rebound_call = kernel_call(rebound_input.data(), rebound_output.data());
+  CallFrame rebound_frame(rebound_call.arguments());
+  require(prepared_plan.value()->bind(rebound_frame.abi()).ok(), "source plan address rebinding");
+  recordable.value().reset(); // The prepared plan independently retains its DSO.
+  require(prepared_plan.value()->replay().ok(), "prepared plan outlives executable");
+  require(rebound_output == std::vector<float>(8, 16), "rebound plan result");
+  auto different_metadata = kernel_call(rebound_input.data(), rebound_output.data(), 5);
+  CallFrame different_frame(different_metadata.arguments());
+  require(!prepared_plan.value()->bind(different_frame.abi()).ok(), "prepared plan rejects changed metadata");
+
   auto* arena_provider = new RuntimeArenaProvider();
   const VecopsExecutionContext arena_context{
     .struct_size = sizeof(VecopsExecutionContext),

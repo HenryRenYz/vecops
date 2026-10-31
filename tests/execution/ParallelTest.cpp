@@ -302,6 +302,26 @@ TEST(ParallelTest, PersistentNativePoolSupportsNestedActiveRegions) {
     EXPECT_EQ(visits.load(std::memory_order_relaxed), 1);
 }
 
+TEST(ParallelTest, NativeMailboxesHaveNoStaleSubmissionAfterChangingParticipantPrefix) {
+  const auto* pool = vecops_native_thread_pool_v1(4);
+  const std::array<std::uint32_t, 8> sizes{0, 1, 2, 3, 4, 5, 17, 53};
+  for (int iteration = 0; iteration < 2000; ++iteration) {
+    std::array<std::atomic<int>, 53> visits{};
+    const auto tasks = sizes[iteration % sizes.size()];
+    if (iteration % 19 == 0)
+      vecops_native_thread_pool_begin_active(4);
+    const auto status = pool->parallel_for(pool->context, tasks, &visits,
+        [](void* context, std::uint32_t index, std::uint32_t) {
+          static_cast<decltype(visits)*>(context)->at(index).fetch_add(1, std::memory_order_relaxed);
+        }, nullptr);
+    if (iteration % 19 == 0)
+      vecops_native_thread_pool_end_active();
+    ASSERT_EQ(status, VECOPS_STATUS_OK);
+    for (std::size_t index = 0; index < visits.size(); ++index)
+      ASSERT_EQ(visits[index].load(std::memory_order_relaxed), index < tasks ? 1 : 0);
+  }
+}
+
 TEST(ParallelTest, MaximumIsPositiveAndRequestedWorkersHaveDenseIds) {
   const nint_t maximum = execution::max_parallelism();
   ASSERT_GE(maximum, 1);

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import _C
 
-_BUILD_API_VERSION = 10
+_BUILD_API_VERSION = 11
 
 
 def require_native_build_api() -> None:
@@ -36,6 +36,7 @@ def require_native_build_api() -> None:
     "grid_workers_available",
     "memory_event_callback_address",
     "content_watch_epoch",
+    "prepare_operator_plan",
   )
   missing = [name for name in required_symbols if not hasattr(_C, name)]
   if not hasattr(getattr(_C, "KernelDef", None), "runtime_parallelism"):

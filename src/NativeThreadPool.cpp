@@ -77,6 +77,27 @@ std::uint32_t configured_spin_count() noexcept {
   return static_cast<std::uint32_t>(std::min<unsigned long>(parsed, 1'000'000UL));
 }
 
+// Team callbacks are joined before their caller can enter another executor.
+// Keep these short internal barriers active by default; this is deliberately
+// separate from the bounded idle-worker spin before parking outside a team.
+std::uint32_t configured_team_spin_count() noexcept {
+  constexpr auto active = std::numeric_limits<std::uint32_t>::max();
+  const char* text = std::getenv("VECOPS_THREAD_POOL_TEAM_SPIN_COUNT");
+  if (text == nullptr || *text == '\0')
+    return active;
+  char* end = nullptr;
+  errno = 0;
+  const auto parsed = std::strtoull(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0' || *text == '-' || parsed > active)
+    return active;
+  return static_cast<std::uint32_t>(parsed);
+}
+
+bool shared_wake_enabled() noexcept {
+  const auto* text = std::getenv("VECOPS_THREAD_POOL_WAKE_POLICY");
+  return text && std::strcmp(text, "generation") == 0;
+}
+
 std::vector<int> allowed_cpus() {
   std::vector<int> result;
 #if defined(__linux__)
@@ -218,8 +239,8 @@ private:
 
 class NativeThreadPool {
   struct TeamBarrier {
-    explicit TeamBarrier(std::uint32_t count)
-      : count(count) {
+    explicit TeamBarrier(std::uint32_t count, std::uint32_t spin_count)
+      : count(count), spin_count(spin_count) {
     }
     static std::int32_t wait(void* opaque, VecopsError* error) {
       auto& self = *static_cast<TeamBarrier*>(opaque);
@@ -231,11 +252,18 @@ class NativeThreadPool {
       if (self.arrived.fetch_add(1, std::memory_order_acq_rel) + 1 == self.count) {
         self.arrived.store(0, std::memory_order_relaxed);
         self.generation.fetch_add(1, std::memory_order_release);
-        self.generation.notify_all();
+        if (self.spin_count != std::numeric_limits<std::uint32_t>::max())
+          self.generation.notify_all();
       } else {
-        for (unsigned spin = 0; spin < 2048 && self.generation.load(std::memory_order_acquire) == generation; ++spin)
-          cpu_relax();
-        self.generation.wait(generation, std::memory_order_acquire);
+        if (self.spin_count == std::numeric_limits<std::uint32_t>::max()) {
+          while (self.generation.load(std::memory_order_acquire) == generation)
+            cpu_relax();
+        } else {
+          for (std::uint32_t spin = 0;
+               spin < self.spin_count && self.generation.load(std::memory_order_acquire) == generation; ++spin)
+            cpu_relax();
+          self.generation.wait(generation, std::memory_order_acquire);
+        }
       }
       if (!self.cancelled.load(std::memory_order_acquire))
         return VECOPS_STATUS_OK;
@@ -248,11 +276,14 @@ class NativeThreadPool {
     }
     void self_wake() {
       generation.fetch_add(1, std::memory_order_release);
-      generation.notify_all();
+      if (spin_count != std::numeric_limits<std::uint32_t>::max())
+        generation.notify_all();
     }
     const std::uint32_t count;
+    const std::uint32_t spin_count;
     std::atomic<std::uint32_t> arrived{0};
-    vecops::runtime::detail::AtomicWait32 generation{0};
+    // Polling generation must not invalidate the arrival counter's cache line.
+    alignas(128) vecops::runtime::detail::AtomicWait32 generation{0};
     std::atomic<bool> cancelled{false};
   };
   struct Submission {
@@ -277,6 +308,8 @@ public:
   explicit NativeThreadPool(std::uint32_t threads, std::vector<int> cpus = pool_cpus())
     : threads_(std::max<std::uint32_t>(1, threads))
     , spin_count_(configured_spin_count())
+    , team_spin_count_(configured_team_spin_count())
+    , shared_wake_(shared_wake_enabled())
     , cpus_(std::move(cpus)) {
     workers_.reserve(threads_ - 1);
     try {
@@ -320,6 +353,10 @@ public:
       wake_workers();
   }
   void end_active() noexcept {
+    // Serialize with publication: a lock-free active submission must not race
+    // the last region ending and allow a worker to sleep after its mailbox
+    // has been published without notification.
+    std::lock_guard lock(submission_mutex_);
     auto active = active_scopes_.load(std::memory_order_acquire);
     while (active != 0 && !active_scopes_.compare_exchange_weak(active, active - 1, std::memory_order_acq_rel,
                                                                 std::memory_order_acquire)) {
@@ -328,6 +365,11 @@ public:
 
 private:
   void wake_workers() {
+    if (shared_wake_) {
+      wake_generation_.fetch_add(1, std::memory_order_release);
+      wake_generation_.notify_all();
+      return;
+    }
     for (auto& worker : workers_) {
       std::lock_guard lock(worker->mutex);
       worker->cv.notify_one();
@@ -397,13 +439,20 @@ private:
     // Only selected workers receive a mailbox. Idle workers never observe
     // the stack-backed submission, so its lifetime needs no idle-worker ack.
     Submission submission{
-      tasks, participants, opaque, body, team_body, participants, {}, nullptr, TeamBarrier(participants)};
+      tasks, participants, opaque, body, team_body, participants, {}, nullptr, TeamBarrier(participants, team_spin_count_)};
+    const bool active = active_scopes_.load(std::memory_order_acquire) != 0;
     for (std::uint32_t ordinal = 1; ordinal < participants; ++ordinal) {
       auto& worker = *workers_[ordinal - 1];
-      std::lock_guard lock(worker.mutex);
-      worker.inbox.store(&submission, std::memory_order_release);
-      worker.cv.notify_one();
+      if (shared_wake_ || active) {
+        worker.inbox.store(&submission, std::memory_order_release);
+      } else {
+        std::lock_guard lock(worker.mutex);
+        worker.inbox.store(&submission, std::memory_order_release);
+        worker.cv.notify_one();
+      }
     }
+    if (shared_wake_ && !active)
+      wake_workers();
     run_participant(submission, 0);
     submission.remaining.fetch_sub(1, std::memory_order_acq_rel);
     std::uint32_t spins = 0;
@@ -452,6 +501,17 @@ private:
           return;
         if (active_scopes_.load(std::memory_order_acquire) != 0)
           continue;
+        if (shared_wake_) {
+          // Only the generation is shared. Nonparticipants never load the
+          // stack submission pointer; the selected mailbox prefix still owns
+          // the complete acknowledgement/lifetime contract.
+          const auto generation = wake_generation_.load(std::memory_order_acquire);
+          if (worker.inbox.load(std::memory_order_acquire) == nullptr &&
+              !stopping_.load(std::memory_order_acquire) &&
+              active_scopes_.load(std::memory_order_acquire) == 0)
+            wake_generation_.wait(generation, std::memory_order_acquire);
+          continue;
+        }
         std::unique_lock lock(worker.mutex);
         worker.cv.wait(lock, [&] {
           return worker.inbox.load(std::memory_order_acquire) != nullptr || stopping_.load(std::memory_order_acquire) ||
@@ -466,11 +526,14 @@ private:
 
   const std::uint32_t threads_;
   const std::uint32_t spin_count_;
+  const std::uint32_t team_spin_count_;
+  const bool shared_wake_;
   const std::vector<int> cpus_;
   std::vector<std::unique_ptr<Worker>> workers_;
   std::mutex submission_mutex_;
   std::atomic<std::uint32_t> ready_{0};
   std::atomic<std::uint32_t> active_scopes_{0};
+  vecops::runtime::detail::AtomicWait32 wake_generation_{0};
   std::atomic<bool> stopping_{false};
   VecopsThreadPoolV1 provider_{};
 #if defined(__linux__)

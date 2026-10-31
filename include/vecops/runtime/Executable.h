@@ -20,9 +20,12 @@
 
 #include "vecops/runtime/Argument.h"
 #include "vecops/runtime/KernelAbi.h"
+#include "vecops/runtime/KernelPlanAbi.h"
 #include "vecops/runtime/Status.h"
 
 namespace vecops::runtime {
+
+class PreparedKernelLease;
 
 /**
  * @brief RAII owner of a loaded kernel DSO and its immutable descriptor.
@@ -64,6 +67,8 @@ public:
   [[nodiscard]] const std::filesystem::path& path() const {
     return path_;
   }
+  /** Optional recordable-grid extension; null for ordinary artifacts. */
+  [[nodiscard]] const VecopsKernelPlanDescriptorV1* plan_descriptor() const noexcept { return plan_descriptor_; }
 
 private:
   LoadedModule(std::filesystem::path path, void* handle, const VecopsKernelDescriptorV1* descriptor)
@@ -75,6 +80,42 @@ private:
   std::filesystem::path path_;
   void* handle_ = nullptr;
   const VecopsKernelDescriptorV1* descriptor_ = nullptr;
+  const VecopsKernelPlanDescriptorV1* plan_descriptor_ = nullptr;
+};
+
+/** Persistent grids retaining both their scratch and the defining artifact.
+ * bind changes addresses/scalars under exact metadata guards; replay executes
+ * the internal tasks directly. The C ABI view supports one larger resident
+ * region using enter/run_lane/leave. Callers serialize use and tensor writes.
+ */
+class PreparedKernel : public std::enable_shared_from_this<PreparedKernel> {
+public:
+  PreparedKernel(std::shared_ptr<LoadedModule> module, VecopsPreparedKernelV1 abi)
+    : module_(std::move(module)), abi_(abi) {}
+  PreparedKernel(const PreparedKernel&) = delete;
+  PreparedKernel& operator=(const PreparedKernel&) = delete;
+  ~PreparedKernel();
+  [[nodiscard]] Status bind(const VecopsCall& call);
+  [[nodiscard]] Status replay();
+  [[nodiscard]] const VecopsPreparedKernelV1& abi() const noexcept { return abi_; }
+  /** Export a refcounted C ABI lease independently retained by graph code. */
+  [[nodiscard]] std::shared_ptr<PreparedKernelLease> export_abi();
+private:
+  std::shared_ptr<LoadedModule> module_;
+  VecopsPreparedKernelV1 abi_;
+};
+
+/** Shared C ABI owner suitable for foreign native graph executors. */
+class PreparedKernelLease {
+public:
+  explicit PreparedKernelLease(std::shared_ptr<PreparedKernel> kernel);
+  ~PreparedKernelLease();
+  PreparedKernelLease(const PreparedKernelLease&) = delete;
+  PreparedKernelLease& operator=(const PreparedKernelLease&) = delete;
+  [[nodiscard]] const VecopsPreparedKernelV1& abi() const noexcept;
+private:
+  struct Record;
+  Record* record_;
 };
 
 /**
@@ -161,6 +202,11 @@ public:
    * is invalid.
    */
   [[nodiscard]] Status invoke_prevalidated(const VecopsCall& call) const;
+  /** Build a persistent plan without executing data operations. */
+  [[nodiscard]] Result<std::shared_ptr<PreparedKernel>> prepare(const ArgumentMetadata& arguments,
+                                                               const VecopsExecutionContext* context = nullptr) const;
+  /** Expert variant for a bridge with an already validated complete call. */
+  [[nodiscard]] Result<std::shared_ptr<PreparedKernel>> prepare_prevalidated(const VecopsCall& call) const;
 
 private:
   [[nodiscard]] Status invoke_unchecked(const VecopsCall& call) const;

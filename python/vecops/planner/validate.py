@@ -15,7 +15,7 @@ from .ir import ActionKind, MemoryPlan, MemoryTier, PLAN_FORMAT_VERSION
 
 def validate_plan(graph: ExecutionGraph, plan: MemoryPlan) -> None:
   """Raise ``ValueError`` if a plan is stale, incomplete, or unsafe."""
-  from .core import graph_digest
+  from .core import graph_digest, _loop_invariant_ends
 
   graph.validate()
   plan.machine.validate()
@@ -42,6 +42,7 @@ def validate_plan(graph: ExecutionGraph, plan: MemoryPlan) -> None:
             f"loop {loop.id} iteration {sample.iteration} changes carried-state arity"
           )
 
+  invariant_ends = _loop_invariant_ends(graph)
   by_tier: dict[MemoryTier, list] = defaultdict(list)
   for storage_id, placement in plan.placements.items():
     storage = graph.storages[storage_id]
@@ -50,6 +51,8 @@ def validate_plan(graph: ExecutionGraph, plan: MemoryPlan) -> None:
     if not 0 <= placement.begin_event <= placement.end_event:
       raise ValueError(f"storage {storage_id} has invalid planned lifetime")
     if placement.offset is not None:
+      if placement.end_event < invariant_ends.get(storage_id, 0):
+        raise ValueError(f"storage {storage_id} releases a loop invariant before loop exit")
       if placement.offset % placement.alignment:
         raise ValueError(f"storage {storage_id} has a misaligned offset")
       by_tier[placement.tier].append(placement)

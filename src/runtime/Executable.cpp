@@ -9,6 +9,7 @@
  */
 
 #include "vecops/runtime/Executable.h"
+#include <atomic>
 
 #include <array>
 #include <cstring>
@@ -231,7 +232,17 @@ Result<std::shared_ptr<LoadedModule>> LoadedModule::load(const std::filesystem::
     dlclose(handle);
     return descriptor_status;
   }
-  return std::shared_ptr<LoadedModule>(new LoadedModule(library_path, handle, descriptor));
+  auto module = std::shared_ptr<LoadedModule>(new LoadedModule(library_path, handle, descriptor));
+  dlerror();
+  auto plan_query = reinterpret_cast<VecopsKernelPlanQueryFnV1>(dlsym(handle, VECOPS_KERNEL_PLAN_QUERY_SYMBOL_V1));
+  if (dlerror() == nullptr && plan_query != nullptr) {
+    const auto* plan = plan_query();
+    if (!plan || plan->struct_size < sizeof(VecopsKernelPlanDescriptorV1) || plan->abi_major != 1 ||
+        (plan->supported && !plan->prepare))
+      return make_status(StatusCode::AbiMismatch, "invalid source-kernel plan extension");
+    if (plan->supported) module->plan_descriptor_ = plan;
+  }
+  return module;
 #else
   (void)library_path;
   return make_status(StatusCode::LoadError, "dynamic loading is not implemented on this platform");
@@ -313,6 +324,81 @@ Status Executable::invoke_unchecked(const VecopsCall& call) const {
 
 Status Executable::invoke_prevalidated(const VecopsCall& call) const {
   return invoke_unchecked(call);
+}
+
+PreparedKernel::~PreparedKernel() { if (abi_.context && abi_.destroy) abi_.destroy(abi_.context); }
+struct PreparedKernelLease::Record {
+  std::atomic<unsigned> refs{1};
+  std::shared_ptr<PreparedKernel> kernel;
+  VecopsPreparedKernelV1 exported{};
+};
+PreparedKernelLease::PreparedKernelLease(std::shared_ptr<PreparedKernel> kernel) : record_(new Record) {
+  record_->kernel = std::move(kernel);
+  record_->exported = record_->kernel->abi();
+  auto& abi = record_->exported;
+  abi.context = record_;
+  abi.bind = [](void* p, const VecopsCall* call, VecopsError* e) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi(); return inner.bind(inner.context, call, e);
+  };
+  abi.bind_prevalidated = [](void* p, const VecopsCall* call, VecopsError* e) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi(); return inner.bind_prevalidated(inner.context, call, e);
+  };
+  abi.replay = [](void* p, VecopsError* e) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi(); return inner.replay(inner.context, e);
+  };
+  abi.enter = [](void* p, VecopsError* e) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi(); return inner.enter(inner.context, e);
+  };
+  abi.run_lane = [](void* p, const VecopsTeamContextV1* team, VecopsError* e) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi(); return inner.run_lane(inner.context, team, e);
+  };
+  abi.leave = [](void* p, uint32_t ok) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi(); inner.leave(inner.context, ok);
+  };
+  abi.destroy = [](void* p) {
+    auto* record = static_cast<Record*>(p);
+    if (record->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete record;
+  };
+  abi.retain = [](void* p) { static_cast<Record*>(p)->refs.fetch_add(1, std::memory_order_relaxed); };
+}
+PreparedKernelLease::~PreparedKernelLease() { record_->exported.destroy(record_); }
+const VecopsPreparedKernelV1& PreparedKernelLease::abi() const noexcept { return record_->exported; }
+std::shared_ptr<PreparedKernelLease> PreparedKernel::export_abi() {
+  return std::make_shared<PreparedKernelLease>(shared_from_this());
+}
+Status PreparedKernel::bind(const VecopsCall& call) {
+  std::array<char, kErrorCapacity> message{};
+  VecopsError error{sizeof(VecopsError), 0, message.data(), message.size(), 0};
+  return kernel_status(abi_.bind(abi_.context, &call, &error), error, "prepared kernel binding failed");
+}
+Status PreparedKernel::replay() {
+  std::array<char, kErrorCapacity> message{};
+  VecopsError error{sizeof(VecopsError), 0, message.data(), message.size(), 0};
+  return kernel_status(abi_.replay(abi_.context, &error), error, "prepared kernel replay failed");
+}
+Result<std::shared_ptr<PreparedKernel>> Executable::prepare(const ArgumentMetadata& arguments,
+                                                          const VecopsExecutionContext* context) const {
+  auto status = can_invoke(arguments);
+  if (!status.ok()) return status;
+  CallFrame frame(arguments, nullptr, 0, context);
+  return prepare_prevalidated(frame.abi());
+}
+Result<std::shared_ptr<PreparedKernel>> Executable::prepare_prevalidated(const VecopsCall& call) const {
+  const auto* descriptor = module_->plan_descriptor();
+  if (!descriptor) return make_status(StatusCode::NotApplicable, "artifact has no recordable grids");
+  VecopsPreparedKernelV1 result{};
+  result.struct_size = sizeof(result);
+  std::array<char, kErrorCapacity> message{};
+  VecopsError error{sizeof(VecopsError), 0, message.data(), message.size(), 0};
+  auto status = kernel_status(descriptor->prepare(&call, &result, &error), error, "kernel plan preparation failed");
+  if (!status.ok()) return status;
+  if (result.struct_size < sizeof(result) || result.abi_major != 1 || !result.context || !result.bind ||
+      !result.bind_prevalidated || !result.replay ||
+      !result.enter || !result.run_lane || !result.leave || !result.destroy || result.workers == 0) {
+    if (result.context && result.destroy) result.destroy(result.context);
+    return make_status(StatusCode::AbiMismatch, "invalid prepared kernel ABI");
+  }
+  return std::make_shared<PreparedKernel>(module_, result);
 }
 
 } // namespace vecops::runtime

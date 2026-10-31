@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import math
 import traceback
+import weakref
 from typing import Any, Iterable
 
 from .capture import GraphCapture
@@ -105,11 +106,20 @@ def register_tensor(
   external: bool = False,
   annotations: dict[str, Any] | None = None,
 ) -> str:
+  # Internal metadata registration is not a user storage observation. In
+  # particular explicit planner factories register after torch.empty returns,
+  # when an executable capture's TorchFunctionMode has become active again.
+  # Keep dispatch semantics intact; suppress only Python function overrides.
+  import torch
+  with torch._C.DisableTorchFunction():
+    metadata = tensor_metadata(tensor)
+    storage_identity = _storage_identity(tensor)
+    storage_bytes = _storage_bytes(tensor)
   return capture.tensor(
     tensor,
-    tensor_metadata(tensor),
-    storage_identity=_storage_identity(tensor),
-    storage_bytes=_storage_bytes(tensor),
+    metadata,
+    storage_identity=storage_identity,
+    storage_bytes=storage_bytes,
     name=name,
     kind=kind,
     persistent=persistent,
@@ -168,6 +178,9 @@ class TorchDispatchRecorder:
 
   def __new__(cls, capture: GraphCapture):
     from torch.utils._python_dispatch import TorchDispatchMode
+    # A dynamically created Mode class can outlive its instance through Python
+    # type GC cycles. Its dispatch closure must not retain a whole graph/arena.
+    capture = weakref.proxy(capture)
 
     class _Mode(TorchDispatchMode):
       def __torch_dispatch__(self, function, types, args=(), kwargs=None):
@@ -199,6 +212,14 @@ class TorchDispatchRecorder:
               )
             input_entries.append((tensor, access, argument_name))
             input_aliases.append((tensor, aliases))
+
+        tape = getattr(capture, "_torch_replay_tape", None)
+        if tape is not None:
+          tape.validate_operator(function, args, kwargs)
+          # Reject unsupported values (notably explicit Generators) before
+          # executing a mutating/random kernel. Ordinary capture is unchanged.
+          tape.encode(args)
+          tape.encode(kwargs)
 
         result = function(*args, **kwargs)
         outputs = tensor_leaves(result)
@@ -243,12 +264,14 @@ class TorchDispatchRecorder:
           source = _source_location()
           if source is not None:
             attributes["source"] = source
-        capture.record_operator(
+        event = capture.record_operator(
           str(function),
           inputs=input_entries,
           outputs=outputs,
           attributes=attributes,
         )
+        if tape is not None:
+          tape.record(function, args, kwargs, result, event)
         return result
 
     return _Mode()

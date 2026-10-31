@@ -57,7 +57,8 @@ private:
  * type. This helper is an additional readable kernel-local contract and
  * supports the exact brace-list form used by source kernels.
  */
-template <TensorLike Tensor>
+template <typename Tensor>
+  requires (TensorLike<Tensor> || requires(const Tensor& tensor) { tensor.pattern(); Tensor::Ndim; })
 inline void assert_shape(const Tensor& tensor, std::initializer_list<AssertDimension> shape,
                          std::initializer_list<AssertDimension> strides) {
   VECOPS_ASSERT(shape.size() == Tensor::Ndim, "assert_shape shape rank mismatch");

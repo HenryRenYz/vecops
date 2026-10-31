@@ -324,8 +324,17 @@ VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_openmp_thread_pool_v1(voi
  *
  * The first call fixes the physical worker count for the lifetime of the
  * process. Later calls return the same provider. Worker threads park between
- * submissions so an embedding's own parallel runtime can use the same CPU set
- * without competing with a permanently spinning vecops team.
+ * submissions after the bounded VECOPS_THREAD_POOL_SPIN_COUNT idle spin
+ * (default 256), unless the caller explicitly holds an active region. Threads
+ * are retained rather than destroyed when a synchronous team returns.
+ *
+ * Barriers inside a joined team use active generation-word spinning by
+ * default. VECOPS_THREAD_POOL_TEAM_SPIN_COUNT configures this independently:
+ * UINT32_MAX (4294967295) spins until completion, a finite value spins that
+ * many iterations before atomic wait, and zero parks immediately. 2048
+ * restores the previous short-spin/park policy. Both spin settings are read
+ * when the pool is first created. Active team barriers do not extend the
+ * team's lifetime across a subsequent ATen/embedding runtime operation.
  */
 VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_native_thread_pool_v1(uint32_t threads);
 

@@ -15,7 +15,7 @@ from .ir import (
   StoragePlacement,
 )
 from .validate import plan_summary, validate_plan
-from .runtime import PlanSession, current_session, empty, empty_like
+from .runtime import PlanSession, current_session, empty, empty_like, contiguous, executable_factories
 from .profile import profile_from_system
 
 __all__ = [
@@ -35,6 +35,8 @@ __all__ = [
   "current_session",
   "empty",
   "empty_like",
+  "contiguous",
+  "executable_factories",
   "plan_memory",
   "plan_summary",
   "profile_from_system",

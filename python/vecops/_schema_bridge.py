@@ -68,6 +68,52 @@ def _workspace_observer_pointer() -> Any:
   return _workspace_observer_factory()
 
 
+def prepare_replay_plan(function, arguments, describe_tensor):
+  """Prepare grids from captured metadata, without executing the operator.
+
+  Produced intermediates need no capture-time storage owner: the graph supplies
+  metadata and replay binds their actual addresses before entering any grid.
+  """
+  from ._dtype import normalize_dtype
+  key = tuple(function._schema.name.split('::', 1))
+  registration = _registrations.get(key)
+  if registration is None or not registration.materialized:
+    return None
+  owner = _loaded_bridge_modules[str(registration.library_path.resolve())][0]
+  query = owner.vecops_torch_bridge_pool_v1
+  query.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+  query.restype = ctypes.c_void_p
+  pool = query(registration.library.encode(), registration.name.encode())
+  if not pool:
+    raise RuntimeError('registered Torch bridge has no execution provider')
+  records, flags, dtypes, outputs = [], [], [], []
+  parameters = registration.kernel_def.inputs
+  for index, (parameter, value) in enumerate(zip(parameters, arguments)):
+    if isinstance(parameter, native.TensorDef):
+      access = parameter.access
+      flag = 3 if access == native.TensorAccess.inout else 2 if access == native.TensorAccess.output else 1
+      flags.append(flag); dtypes.append(0)
+      if parameter.output:
+        outputs.append(index)
+      if value is None:
+        records.append(None)
+      else:
+        metadata = describe_tensor(value)
+        records.append(dict(kind='tensor', data=0, dtype=normalize_dtype(metadata.dtype.removeprefix('torch.')),
+                            sizes=metadata.shape, strides=metadata.strides, flags=flag))
+    else:
+      records.append(dict(kind='scalar', dtype=parameter.dtype, value=value))
+      flags.append(0); dtypes.append(int(parameter.dtype))
+  values = {}
+  for name, value in zip(_ordered_values(registration.kernel_def, registration.spec_order), arguments[len(parameters):]):
+    if value is not None:
+      values[name] = int(value) if registration.kernel_def.values[name] == native.ConstInt else normalize_dtype(value)
+  prepared = native.prepare_operator_plan(registration.operator._handle, records, values, pool)
+  if prepared is None:
+    return None
+  return prepared, flags, dtypes, outputs if registration.return_outputs else []
+
+
 def _thread_pool_pointer(torch: Any, qualified_name: str) -> ctypes.c_void_p:
   """Resolve the opt-in process-local vecops pool once per interpreter."""
   global _native_thread_pool
@@ -501,6 +547,15 @@ extern "C" VECOPS_RUNTIME_EXPORT int32_t vecops_torch_bridge_register_v2(
   } catch (...) {
     return VECOPS_STATUS_EXECUTION_ERROR;
   }
+}
+extern "C" VECOPS_RUNTIME_EXPORT const VecopsThreadPoolV1* vecops_torch_bridge_pool_v1(
+    const char* ns, const char* name) {
+  if (!ns || !name) return nullptr;
+  std::lock_guard<std::mutex> lock(registry_mutex);
+  auto found = states.find(std::string(ns) + "::" + name);
+  if (found == states.end()) return nullptr;
+  auto& state = *found->second;
+  return state.pool ? state.pool : &state.torch_pool;
 }
 """)
 
@@ -1058,7 +1113,23 @@ def _dladdr_library(address: int) -> Path:
   info = DlInfo()
   if not dladdr(ctypes.c_void_p(address), ctypes.byref(info)) or not info.dli_fname:
     raise RuntimeError("cannot determine the shared library providing a Torch GOMP symbol")
-  return Path(os.fsdecode(info.dli_fname)).resolve()
+  logical = Path(os.fsdecode(info.dli_fname)).resolve()
+  # glibc can retain the requested/original l_name after audit redirection.
+  # The VMA containing the FUNCTION ADDRESS proves which inode was mapped.
+  if os.environ.get('VECOPS_NUMA_PLACEMENT'):
+    from ._numa_loader import is_loader_copy
+
+    for line in Path('/proc/self/maps').read_text().splitlines():
+      fields = line.split(maxsplit=5)
+      if len(fields) != 6 or 'x' not in fields[1] or not fields[5].startswith('/'):
+        continue
+      start, end = (int(value, 16) for value in fields[0].split('-'))
+      if start <= address < end:
+        mapped = Path(fields[5]).resolve()
+        if mapped == logical or is_loader_copy(logical, mapped):
+          return mapped
+        raise RuntimeError(f'OpenMP symbol mapping {mapped} differs from dladdr provenance {logical}')
+  return logical
 
 
 def _verify_gomp_runtime(path: Path) -> tuple[str, str]:
@@ -1067,11 +1138,18 @@ def _verify_gomp_runtime(path: Path) -> tuple[str, str]:
     raise RuntimeError("Clang's direct Torch GOMP adapter is currently supported only on ELF/Linux")
   path = path.resolve()
   loaded_runtimes = _mapped_openmp_runtime_paths()
+  mapped_path = path
   if path not in loaded_runtimes:
+    from ._numa_loader import is_loader_copy
+
+    aliases = [candidate for candidate in loaded_runtimes if is_loader_copy(path, candidate)]
+    if len(aliases) == 1:
+      mapped_path = aliases[0]
+  if mapped_path not in loaded_runtimes:
     found = ", ".join(map(str, sorted(loaded_runtimes))) or "none"
     raise RuntimeError(f"Torch's packaged GNU runtime {path} is not loaded (found OpenMP runtimes: {found})")
   try:
-    handle = ctypes.CDLL(str(path), mode=os.RTLD_LOCAL | os.RTLD_NOW | os.RTLD_NOLOAD)
+    handle = ctypes.CDLL(str(mapped_path), mode=os.RTLD_LOCAL | os.RTLD_NOW | os.RTLD_NOLOAD)
   except OSError as exc:
     raise RuntimeError(
       f"Torch's packaged OpenMP runtime {path} is not already loaded; refusing to load a second runtime"
@@ -1084,7 +1162,7 @@ def _verify_gomp_runtime(path: Path) -> tuple[str, str]:
     )
   addresses = {symbol: ctypes.cast(getattr(handle, symbol), ctypes.c_void_p).value for symbol in required}
   foreign = {symbol: _dladdr_library(address) for symbol, address in addresses.items() if address}
-  if len(foreign) != len(required) or any(symbol_path != path for symbol_path in foreign.values()):
+  if len(foreign) != len(required) or any(symbol_path != mapped_path for symbol_path in foreign.values()):
     detail = ", ".join(f"{symbol}={symbol_path}" for symbol, symbol_path in sorted(foreign.items())) or "no symbols"
     raise RuntimeError(f"Torch GOMP symbols do not all resolve to packaged runtime {path}: {detail}")
   import torch
@@ -1291,7 +1369,8 @@ def _compile_pending_torch_bridges_impl(
       publications = []
       validators = []
       resolved: dict[tuple[str, str], Path] = {}
-      planned_artifacts: dict[str, Path] = {}
+      planned_artifacts: set[str] = set()
+      artifact_aliases: dict[str, list[tuple[str, str]]] = {}
 
       for index, (registration, config) in enumerate(group):
         registration.gomp_runtime_path = bridge_policy.runtime_path
@@ -1330,9 +1409,11 @@ def _compile_pending_torch_bridges_impl(
           resolved[(registration.library, registration.name)] = cached
           continue
         if artifact_key in planned_artifacts:
-          resolved[(registration.library, registration.name)] = planned_artifacts[artifact_key]
+          # The backend chooses the final filename (including a possible
+          # platform library prefix). Resolve aliases after publication.
+          artifact_aliases.setdefault(output_name, []).append((registration.library, registration.name))
           continue
-        planned_artifacts[artifact_key] = artifact_directory / f"{output_name}.so"
+        planned_artifacts.add(artifact_key)
 
         if attempt is None:
           first_registration.compiler.build_dir.mkdir(parents=True, exist_ok=True)
@@ -1453,6 +1534,8 @@ def _compile_pending_torch_bridges_impl(
             finally:
               Path(temporary).unlink(missing_ok=True)
           resolved[(registration.library, registration.name)] = destination
+          for alias in artifact_aliases.get(output_name, ()):
+            resolved[alias] = destination
           built_count += 1
 
       for registration, _ in group:

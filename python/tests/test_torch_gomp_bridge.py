@@ -128,11 +128,23 @@ def test_default_torch_bridge_remains_on_aten_adapter():
   assert "GOMP_parallel" not in source
 
 
-def test_gomp_symbol_verification_requires_already_loaded_runtime(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize('numa_copy', [False, True])
+def test_gomp_symbol_verification_requires_already_loaded_runtime(monkeypatch, tmp_path: Path, numa_copy):
   from vecops import _schema_bridge
 
   runtime = tmp_path / "libgomp.so.1"
   runtime.write_bytes(b"runtime")
+  mapped = runtime
+  if numa_copy:
+    import hashlib
+    cache = tmp_path / 'cache'
+    digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+    mapped = cache / 'v1/host/0' / ('identity-' + digest) / 'root' / str(runtime)[1:]
+    mapped.parent.mkdir(parents=True)
+    mapped.write_bytes(runtime.read_bytes())
+    mapped.chmod(0o500)
+    monkeypatch.setenv('VECOPS_NUMA_PLACEMENT', '0')
+    monkeypatch.setenv('VECOPS_NUMA_CACHE_DIR', str(cache))
   symbols = {
     name: object()
     for name in (
@@ -147,11 +159,15 @@ def test_gomp_symbol_verification_requires_already_loaded_runtime(monkeypatch, t
   monkeypatch.setattr(_schema_bridge.os, "RTLD_NOLOAD", 4, raising=False)
   monkeypatch.setattr(_schema_bridge.os, "RTLD_LOCAL", 0, raising=False)
   monkeypatch.setattr(_schema_bridge.os, "RTLD_NOW", 2, raising=False)
-  monkeypatch.setattr(_schema_bridge, "_mapped_openmp_runtime_paths", lambda: {runtime.resolve()})
-  monkeypatch.setattr(_schema_bridge.ctypes, "CDLL", lambda *_args, **_kwargs: SimpleNamespace(**symbols))
+  monkeypatch.setattr(_schema_bridge, "_mapped_openmp_runtime_paths", lambda: {mapped.resolve()})
+  def noload(path, *, mode):
+    assert path == str(mapped.resolve())
+    assert mode & _schema_bridge.os.RTLD_NOLOAD
+    return SimpleNamespace(**symbols)
+  monkeypatch.setattr(_schema_bridge.ctypes, "CDLL", noload)
   addresses = {symbol: index + 100 for index, symbol in enumerate(symbols.values())}
   monkeypatch.setattr(_schema_bridge.ctypes, "cast", lambda symbol, _type: SimpleNamespace(value=addresses[symbol]))
-  monkeypatch.setattr(_schema_bridge, "_dladdr_library", lambda _address: runtime.resolve())
+  monkeypatch.setattr(_schema_bridge, "_dladdr_library", lambda _address: mapped.resolve())
   monkeypatch.setattr(_schema_bridge, "_verified_gomp_handles", {})
   monkeypatch.setitem(__import__("sys").modules, "torch", SimpleNamespace(get_num_threads=lambda: 3))
 
@@ -194,7 +210,8 @@ def test_torch_gomp_discovery_accepts_hash_only_wheel_name_and_deduplicates_syml
   assert _schema_bridge._torch_openmp_runtime((torch_libs,), "ATen parallel backend: OpenMP") == "gomp"
 
 
-def test_read_write_bridge_publishes_artifact_after_unchanged_validation(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("prefix", ["", "lib"])
+def test_read_write_bridge_publishes_artifact_after_unchanged_validation(monkeypatch, tmp_path: Path, prefix):
   import vecops._identity as identity
   from vecops import _schema_bridge
 
@@ -215,7 +232,7 @@ def test_read_write_bridge_publishes_artifact_after_unchanged_validation(monkeyp
     def compile_batch(self, batch):
       self.calls += 1
       task = batch.tasks[0]
-      artifact = Path(task.artifact_directory) / f"{task.output_name}.so"
+      artifact = Path(task.artifact_directory) / f"{prefix}{task.output_name}.so"
       artifact.parent.mkdir(parents=True, exist_ok=True)
       artifact.write_bytes(b"native-bridge-fixture")
       return SimpleNamespace(
@@ -272,8 +289,24 @@ def test_read_write_bridge_publishes_artifact_after_unchanged_validation(monkeyp
   monkeypatch.setattr(identity, "tree_identity", lambda path, *_args: f"tree:{path}")
   monkeypatch.setattr(_schema_bridge, "_load_bridge", lambda reg, *_args: setattr(reg, "materialized", True))
 
-  assert _schema_bridge._compile_pending_torch_bridges_impl(registrations=[registration]) == 1
-  assert registration.materialized
+  from dataclasses import replace
+  alias = replace(registration, name="test_alias")
+  # Equal generated source/signature requests share one native artifact.
+  original_source = _schema_bridge._generate_torch_source(
+    registration.library, registration.name, registration.kernel_def,
+    return_outputs=registration.return_outputs, spec_order=registration.spec_order,
+  )
+  monkeypatch.setattr(_schema_bridge, "_generate_torch_source", lambda *_args, **_kwargs: original_source)
+  loaded_paths = []
+  def load(reg, path, *_args):
+    assert path.is_file()
+    loaded_paths.append(path)
+    reg.materialized = True
+  monkeypatch.setattr(_schema_bridge, "_load_bridge", load)
+  assert _schema_bridge._compile_pending_torch_bridges_impl(registrations=[registration, alias]) == 1
+  assert registration.materialized and alias.materialized
+  assert loaded_paths[0] == loaded_paths[1]
+  assert loaded_paths[0].name.startswith(prefix + "vecops_bridge_")
   published = list((tmp_path / "published").glob("*"))
   assert len(published) == 2
   assert any(path.suffix == ".identity" for path in published)

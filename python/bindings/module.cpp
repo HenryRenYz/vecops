@@ -521,6 +521,53 @@ struct BridgeCallSignature {
   }
 };
 
+// The repeating AF3 trunk visits more than eight distinct source signatures.
+// A smaller cache repeatedly rebuilds KernelInstances instead of binding them.
+constexpr std::size_t bridge_hot_max_capacity = 128;
+std::size_t bridge_hot_capacity() {
+  static const auto value = [] {
+    const char* text = std::getenv("VECOPS_TORCH_HOT_CAPACITY");
+    if (!text || !*text) return bridge_hot_max_capacity;
+    char* end = nullptr;
+    const auto parsed = std::strtoul(text, &end, 10);
+    if (*end || parsed == 0 || parsed > bridge_hot_max_capacity)
+      throw std::invalid_argument("VECOPS_TORCH_HOT_CAPACITY must be in [1,128]");
+    return static_cast<std::size_t>(parsed);
+  }();
+  return value;
+}
+bool bridge_hot_stats_enabled() {
+  static const bool value = [] {
+    const char* text = std::getenv("VECOPS_TORCH_HOT_STATS");
+    return text && std::strcmp(text, "0") != 0;
+  }();
+  return value;
+}
+struct BridgeHotStats {
+  std::uint64_t hits = 0, misses = 0, prepares = 0, evictions = 0, context_misses = 0;
+};
+thread_local BridgeHotStats bridge_hot_stats;
+
+struct BridgePlanContext {
+  const VecopsThreadPoolV1* pool = nullptr;
+  std::uint64_t workspace_identity = 0;
+  std::uint32_t requested_threads = 0;
+  bool operator==(const BridgePlanContext&) const = default;
+  static BridgePlanContext capture(const VecopsCall& call) {
+    BridgePlanContext result;
+    const auto* context = call.context;
+    if (!context) return result;
+    if (context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) + sizeof(context->thread_pool))
+      result.pool = context->thread_pool;
+    if (context->struct_size >= offsetof(VecopsExecutionContext, requested_threads) + sizeof(context->requested_threads))
+      result.requested_threads = context->requested_threads;
+    if (context->struct_size >= offsetof(VecopsExecutionContext, workspace_provider) + sizeof(context->workspace_provider) &&
+        context->workspace_provider)
+      result.workspace_identity = context->workspace_provider->identity;
+    return result;
+  }
+};
+
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
 const VecopsWorkspaceArenaProvider* current_memory_workspace_provider();
 #endif
@@ -623,6 +670,40 @@ public:
   /** Prepare each unique artifact once per compiler, adopting it into every provider. */
   [[nodiscard]] static Status prepare_batch(std::span<const BatchItem> items, std::size_t parallel_jobs,
                                             vecops::nint_t execution_parallelism);
+  static std::shared_ptr<vecops::runtime::PreparedKernelLease> prepare_grid_plan(
+      std::uint64_t handle, ArgumentMetadata arguments, vecops::runtime::SpecializationValues specialization,
+      const VecopsThreadPoolV1* pool) {
+    std::shared_ptr<State> state;
+    {
+      std::lock_guard lock(operator_registry_mutex);
+      auto found = operator_registry.find(handle);
+      if (found != operator_registry.end()) state = found->second.lock();
+    }
+    if (!state) throw std::invalid_argument("native operator is no longer registered");
+    VecopsExecutionContext context{};
+    context.struct_size = sizeof(context);
+    context.thread_pool = pool ? pool : vecops_cpu_thread_pool_v1();
+    context.requested_threads = context.thread_pool->max_parallelism(context.thread_pool->context);
+#if defined(VECOPS_PYTHON_HAS_MEMORY)
+    context.workspace_provider = current_memory_workspace_provider();
+#endif
+    for (std::size_t i = 0; i < state->operator_instances.size(); ++i) {
+      auto values = state->default_values[i];
+      for (const auto& [name, value] : specialization) values.insert_or_assign(name, value);
+      auto executable = state->operator_instances[i]->resolve(KernelCall(arguments, std::move(values)), &context);
+      if (!executable) {
+        if (executable.status().code() == StatusCode::NotApplicable || executable.status().code() == StatusCode::NotFound)
+          continue;
+        throw_status(executable.status());
+      }
+      if (!executable.value()->module()->plan_descriptor()) return {};
+      vecops::runtime::CallFrame frame(arguments, nullptr, 0, &context);
+      auto prepared = executable.value()->prepare_prevalidated(frame.abi());
+      if (!prepared) throw_status(prepared.status());
+      return prepared.value()->export_abi();
+    }
+    return {};
+  }
 
   py::object invoke_values(py::args arguments, py::kwargs values) const {
     if (arguments.size() > definition_->parameters().size())
@@ -1067,9 +1148,10 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     std::shared_ptr<Executable> executable;
     BridgeCallSignature signature;
     std::uint64_t last_use = 0;
+    BridgePlanContext context;
+    std::shared_ptr<vecops::runtime::PreparedKernel> prepared;
   };
-  constexpr std::size_t hot_capacity = 8;
-  static thread_local std::array<std::optional<HotEntry>, hot_capacity> hot_entries;
+  static thread_local std::array<std::optional<HotEntry>, bridge_hot_max_capacity> hot_entries;
   static thread_local std::uint64_t hot_clock = 0;
   static const bool hot_path_enabled = [] {
     const char* value = std::getenv("VECOPS_TORCH_PREPARED_CALL");
@@ -1085,7 +1167,8 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
   const bool cacheable = hot_path_enabled && (call->context == nullptr || provider_context) &&
                          call->workspace == nullptr && call->workspace_size == 0;
   if (cacheable) {
-    for (auto& slot : hot_entries) {
+    for (std::size_t i = 0; i < bridge_hot_capacity(); ++i) {
+      auto& slot = hot_entries[i];
       if (!slot || slot->handle != handle)
         continue;
       auto owner = slot->state.lock();
@@ -1095,10 +1178,32 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
       }
       if (slot->signature.matches(*call, num_specs, specs)) {
         slot->last_use = ++hot_clock;
+        if (slot->prepared) {
+          if (!(slot->context == BridgePlanContext::capture(*call))) {
+            if (bridge_hot_stats_enabled()) ++bridge_hot_stats.context_misses;
+            slot.reset();
+            continue;
+          }
+          auto bound = slot->prepared->bind(*call);
+          if (bound.ok()) {
+            if (bridge_hot_stats_enabled()) ++bridge_hot_stats.hits;
+            return slot->prepared->replay();
+          }
+          // Equal tensor metadata can occur in a new workspace or provider
+          // context. Retire the old instance and prepare in the current one.
+          if (bound.code() == StatusCode::InvalidArgument || bound.code() == StatusCode::NotApplicable) {
+            if (bridge_hot_stats_enabled()) ++bridge_hot_stats.context_misses;
+            slot.reset();
+            continue;
+          }
+          return bound;
+        }
+        if (bridge_hot_stats_enabled()) ++bridge_hot_stats.hits;
         return slot->executable->invoke_prevalidated(*call);
       }
     }
   }
+  if (cacheable && bridge_hot_stats_enabled()) ++bridge_hot_stats.misses;
 
   std::shared_ptr<PyOperator::State> state;
   {
@@ -1169,7 +1274,14 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
     auto executable =
       state->operator_instances[index]->resolve(KernelCall(kernel_call.arguments(), std::move(values)), call->context);
     if (executable) {
-      auto result =
+      std::shared_ptr<vecops::runtime::PreparedKernel> prepared;
+      if (executable.value()->module()->plan_descriptor()) {
+        if (bridge_hot_stats_enabled()) ++bridge_hot_stats.prepares;
+        auto plan = executable.value()->prepare_prevalidated(*call);
+        if (!plan) return plan.status();
+        prepared = std::move(plan).value();
+      }
+      auto result = prepared ? prepared->replay() :
         executable.value()->invoke(kernel_call.arguments(), call->workspace, call->workspace_size, call->context);
       if (!result.ok())
         return result;
@@ -1178,7 +1290,7 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
                                                       state->recipes[index]->definition().runtime_parallelism());
         if (signature) {
           std::size_t replace = 0;
-          for (std::size_t candidate = 0; candidate < hot_entries.size(); ++candidate) {
+          for (std::size_t candidate = 0; candidate < bridge_hot_capacity(); ++candidate) {
             if (!hot_entries[candidate]) {
               replace = candidate;
               break;
@@ -1186,7 +1298,10 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
             if (hot_entries[candidate]->last_use < hot_entries[replace]->last_use)
               replace = candidate;
           }
-          hot_entries[replace].emplace(HotEntry{handle, state, executable.value(), std::move(*signature), ++hot_clock});
+          if (bridge_hot_stats_enabled() && hot_entries[replace]) ++bridge_hot_stats.evictions;
+          hot_entries[replace].emplace(HotEntry{handle, state, executable.value(), std::move(*signature), ++hot_clock,
+                                               BridgePlanContext::capture(*call),
+                                               std::move(prepared)});
         }
       }
       return result;
@@ -1551,7 +1666,48 @@ Most applications should use :mod:`vecops`, whose Python wrappers normalize
 dtypes, derive schemas, and own framework integration. This module mirrors C++
 value types for diagnostics, explicit build control, and wrapper implementation;
 its constructor-level interfaces intentionally expose native concepts.)doc";
-  module.attr("build_api_version") = 10;
+  module.attr("build_api_version") = 11;
+  py::class_<vecops::runtime::PreparedKernelLease, std::shared_ptr<vecops::runtime::PreparedKernelLease>>(
+      module, "PreparedKernelLease")
+    .def_property_readonly("abi_address", [](const vecops::runtime::PreparedKernelLease& self) {
+      return reinterpret_cast<std::uintptr_t>(&self.abi());
+    })
+    .def_property_readonly("workers", [](const vecops::runtime::PreparedKernelLease& self) { return self.abi().workers; })
+    .def_property_readonly("grids", [](const vecops::runtime::PreparedKernelLease& self) { return self.abi().grids; });
+  module.def("prepare_operator_plan", [](std::uint64_t handle, py::list records, py::dict values,
+                                         std::uintptr_t pool) {
+    std::vector<Value> arguments;
+    arguments.reserve(records.size());
+    for (const auto item : records) {
+      if (item.is_none()) { arguments.emplace_back(std::monostate{}); continue; }
+      auto record = py::cast<py::dict>(item);
+      auto dtype = py::cast<DType>(record["dtype"]);
+      if (py::cast<std::string>(record["kind"]) == "tensor") {
+        arguments.emplace_back(TensorView{
+          .data = reinterpret_cast<void*>(py::cast<std::uintptr_t>(record["data"])),
+          .dtype = dtype,
+          .sizes = py::cast<std::vector<std::int64_t>>(record["sizes"]),
+          .strides = py::cast<std::vector<std::int64_t>>(record["strides"]),
+          .flags = py::cast<std::uint64_t>(record["flags"])});
+      } else {
+        arguments.emplace_back(python_scalar(record["value"], dtype));
+      }
+    }
+    auto specialization = specialization_values(std::move(values));
+    py::gil_scoped_release release;
+    return PyOperator::prepare_grid_plan(handle, ArgumentMetadata(std::move(arguments)), std::move(specialization),
+                                         reinterpret_cast<const VecopsThreadPoolV1*>(pool));
+  }, py::arg("handle"), py::arg("records"), py::arg("values"), py::arg("pool"));
+  module.def("bridge_hot_cache_stats", [] {
+    py::dict result;
+    result["enabled"] = bridge_hot_stats_enabled(); result["capacity"] = bridge_hot_capacity();
+    result["hits"] = bridge_hot_stats.hits; result["misses"] = bridge_hot_stats.misses;
+    result["prepares"] = bridge_hot_stats.prepares; result["evictions"] = bridge_hot_stats.evictions;
+    result["context_misses"] = bridge_hot_stats.context_misses;
+    return result;
+  }, "Main-calling-thread source-bridge cache counters; enable before use with VECOPS_TORCH_HOT_STATS=1.");
+  module.def("reset_bridge_hot_cache_stats", [] { bridge_hot_stats = {}; },
+             "Reset this thread's counters without discarding prepared entries.");
   module.def(
     "content_watch_directory", [](const std::filesystem::path& path) { return content_watch.add(path); },
     py::arg("path"));

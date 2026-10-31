@@ -325,3 +325,66 @@ Its Clang probe suppresses automatic crash-reproducer files while retaining
 the diagnostic in the attestation; this avoids accumulating preprocessed
 sources across isolated builds. Suppression applies only to the probe, not
 to kernel compilation.
+
+## Recordable C++ source kernels
+
+Define `VECOPS_RECORDABLE_KERNEL` and accept `execution::KernelBuilder&` as
+the leading `__kernel__` parameter. Tensor arguments are symbolic typed
+`TensorArgument`s; runtime scalar arguments are `ScalarArgument`s. The DSL
+`T.template(source=...)` annotations and positional ABI stay unchanged.
+`__kernel__` executes only while building a plan. It may inspect metadata and
+declare grids, buffers and prepared operations; data work must be registered
+with `grid`, `worker_grid` or `single`.
+
+```cpp
+#define VECOPS_RECORDABLE_KERNEL 1
+#include "vecops/execution/KernelPlan.h"
+void __kernel__(vecops::execution::KernelBuilder& k, auto x, auto out, auto alpha) {
+  using namespace vecops;
+  k.grid<static_cast<nint_t>(spec::Parallelism)>(
+      "scale", meta::cint<0>, x.template size<0>(), meta::cint<1>,
+      execution::kernel_bind(x, out, alpha),
+      [](auto, const auto& item, auto x, auto out, float alpha) {
+        for (auto i = item.begin(); i < item.end(); ++i) out(i) = x(i) * alpha;
+      });
+}
+```
+
+Registered bodies are stateless; all state enters through explicit bindings.
+Bindings retain typed layouts, not first-invocation addresses. Use `.pattern()`
+or `tensor::unbind(arg)` for address-free planning. Transformed patterns can
+use `TypeOnlyPatternMetadata<Transform>` without constructing a bound closure.
+Do not hide pointers/references in `kernel_constant` or arbitrary metadata.
+C++ effect declarations remain an author contract, not compiler-proven purity.
+
+The adapter exports the optional `vecops_kernel_plan_query_v1` C ABI.
+`Executable::prepare` builds a dedicated instance without executing tensor
+computation. Eager calls retain a bounded TLS instance cache. Exact tensor
+metadata, optional presence and execution services identify an instance;
+addresses and runtime scalar values can change. Grids do not call the builder,
+source entry, allocator or operator preparation on replay. A logical-task-only
+provider executes synchronous individual grids; a resident provider executes
+all grids in one submission.
+
+
+For data-dependent compact work, record the scan as `single` (or a grid),
+write a one-element `nint_t` count buffer, and use
+`indirect_grid<P>(name, maximum, count, bindings, body)`. The recorded maximum
+fixes storage and worker capacity; the current count determines executable
+programs on each replay. A count outside `[0, maximum]` cancels execution.
+This does not permit data-dependent allocation or preparation inside a grid.
+
+`kernel_bind` accepts symbolic tensors, runtime scalars, prepared state and
+plain owned metadata. Plain metadata is copied into a `KernelConstant`;
+borrowed addresses and bound tensors must instead be represented by symbolic
+slots. Receive prepared state as `const auto&` in callbacks to avoid copying
+its scratch owners on each worker. A local `constexpr` used as a template
+argument must remain a constant in the callback, rather than becoming a
+runtime parameter with the same name.
+
+`tensor::layout_view(source, layout, element_offset)` and symbolic
+`tensor::transpose<I, J>` construct address-free views. They preserve the input
+slot, existing view offset, and the layout's Const/Dynamic types; neither
+materializes a tensor nor converts its dtype. The caller must ensure that the
+new layout fits the underlying storage. View offsets derived from runtime
+scalars belong inside a recorded callback, after resolving those scalars.

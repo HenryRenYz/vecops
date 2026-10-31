@@ -13,6 +13,7 @@ import contextlib
 import contextvars
 import os
 import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
@@ -27,8 +28,25 @@ _active_session: contextvars.ContextVar[PlanSession | None] = contextvars.Contex
   "vecops_memory_plan_session", default=None
 )
 _active_session_count = 0
+_executable_factories = contextvars.ContextVar('vecops_executable_factories', default=False)
 _torch_empty: Any | None = None
 _torch_empty_like: Any | None = None
+
+
+@contextlib.contextmanager
+def executable_factories():
+  """Record real factory nodes for an executable instead of eager arena views.
+
+  Only affects ``empty``/``empty_like`` inside ``GraphCapture.capture_torch``.
+  Metadata capture and ordinary PlanSession allocation remain unchanged. The
+  executable owns allocation/liveness planning; source-session temporaries are
+  not frozen into external snapshot bindings. Nested scopes are supported.
+  """
+  token = _executable_factories.set(True)
+  try:
+    yield
+  finally:
+    _executable_factories.reset(token)
 
 
 def _load_torch_factories() -> None:
@@ -69,6 +87,10 @@ def _caller_source(depth: int = 1) -> tuple[str, str]:
 @dataclass(frozen=True)
 class _FactoryCandidate:
   tensor_id: str
+  shape: tuple[int, ...]
+  strides: tuple[int, ...]
+  dtype: str
+  storage_bytes: int
 
 
 class _RuntimeLoop:
@@ -90,7 +112,18 @@ class _RuntimeLoop:
 
 
 class PlanSession:
-  """Single-use owner of physical fast/slow arenas for one memory plan."""
+  """Owner of physical fast/slow arenas for one memory plan.
+
+  Static factory replay caches eligible Tensor views on entry. It may coexist
+  with dynamic factories, whose storage-owned leases use the remaining budget
+  for retained, escaping or otherwise unselected allocations. Strict replay
+  validates selected sites; expected dynamic sites are not replay failures.
+  Captures must describe persistent aliases and asynchronous lifetimes before
+  a storage can safely be admitted as a synchronous temporary slot.
+  The ordinary context manager closes on exit. ``activation()`` instead keeps
+  the same arenas and model bindings across sequential synchronous invocations;
+  its owner must call ``close()`` after releasing dependent executables.
+  """
 
   def __init__(
     self,
@@ -103,6 +136,7 @@ class PlanSession:
     large_pages: bool = True,
     strict_factory_replay: bool = False,
     enable_factory_replay: bool = False,
+    enable_dynamic_factories: bool = False,
     validate: bool = True,
   ) -> None:
     if validate:
@@ -120,6 +154,8 @@ class PlanSession:
     self.large_pages = large_pages
     self.strict_factory_replay = strict_factory_replay
     self.enable_factory_replay = enable_factory_replay
+    self.enable_dynamic_factories = enable_dynamic_factories
+    self._dynamic_pool = None
     self.fast_owner = None
     self.slow_owner = None
     self._fast_owner_bytes = 0
@@ -136,12 +172,22 @@ class PlanSession:
       "copied_storages": 0,
       "bound_objects": 0,
     }
+    self._known_factory_keys: set[tuple[Any, ...]] = set()
     self._factory_sites = self._build_factory_sites()
+    self._factory_signatures = {key[:4] for key in self._factory_sites}
     self._factory_cursors: dict[tuple[tuple[Any, ...], tuple[int, ...]], int] = {}
+    # Cache metadata, never Tensor objects or replay slots. Scope/source and
+    # epoch cursors remain invocation-specific, including retained ordinals.
+    self._factory_metadata_cache: dict[tuple[Any, ...], tuple[str, bool, tuple[int, ...] | None]] = {}
+    self._factory_metadata_cache_hits = 0
+    self._factory_metadata_cache_misses = 0
+    self._factory_cursor_keys: list[list[tuple[Any, ...]]] = []
     self._scope: list[str] = []
     self._loop_epochs: list[int] = []
     self._iteration_aliases: list[tuple[str, str]] = []
     self._next_loop_epoch = 0
+    self._activation_lock = threading.Lock()
+    self._persistent_ready = False
     self._planned_factory_allocations = 0
     self._factory_fallbacks = 0
     self._factory_fallback_reasons: Counter[str] = Counter()
@@ -194,6 +240,24 @@ class PlanSession:
           self._factory_large_page_bytes = getattr(
             self.fast_owner, "large_page_bytes", 0
           )
+      if self.enable_dynamic_factories:
+        from ._pool import TensorPool
+
+        capacity = max(0, self.plan.machine.fast_capacity - allocated_fast_bytes)
+        if capacity:
+          owner = self.system.allocate(
+            capacity, placement="high_bandwidth", domain=self.domain,
+            fallback=None, alignment=self.plan.machine.alignment,
+            large_pages=self.large_pages,
+          )
+          self._dynamic_pool = TensorPool(owner, capacity, self.plan.machine.alignment)
+      if self.enable_factory_replay:
+        for candidates in self._factory_sites.values():
+          for candidate in candidates:
+            if candidate is None:
+              continue
+            view = self.tensor_view(candidate.tensor_id)
+            object.__setattr__(view, "_vecops_arena_view", True)
       self._token = _active_session.set(self)
       _active_session_count += 1
     except Exception:
@@ -202,6 +266,7 @@ class PlanSession:
         self._token = None
       self.fast_owner = None
       self.slow_owner = None
+      self._dynamic_pool = None
       self._fast_owner_bytes = 0
       self._slow_owner_bytes = 0
       self._closed = True
@@ -210,6 +275,45 @@ class PlanSession:
 
   def __exit__(self, exc_type, exc, traceback) -> None:
     self.close()
+
+  @contextlib.contextmanager
+  def activation(self):
+    """Activate a persistent arena without reallocating or rebinding state.
+
+    Activations cannot overlap or nest. Views/leases and bound module data
+    remain owned while inactive; only the context-local factory interception
+    ends. Close explicitly after graphs, requests and borrowed outputs finish.
+    Exceptions deactivate the session while preserving it for a later call.
+    """
+    global _active_session_count
+    if not self._activation_lock.acquire(blocking=False):
+      raise RuntimeError('memory plan activations cannot overlap or nest')
+    try:
+      if self._closed:
+        raise RuntimeError('cannot activate a closed memory plan session')
+      if (current_session() is not None or self._token is not None or
+          (self._entered and not self._persistent_ready)):
+        raise RuntimeError('memory plan activations cannot overlap or nest')
+      if self._scope or self._loop_epochs or self._factory_cursor_keys or self._iteration_aliases:
+        raise RuntimeError('previous memory plan activation left an unbalanced runtime scope')
+      # Factory ordinals describe one invocation, not the arena's lifetime.
+      # Keep owners, state bindings and metadata caches; restart root epochs.
+      self._factory_cursors.clear()
+      self._next_loop_epoch = 0
+      if not self._entered:
+        self.__enter__()
+        self._persistent_ready = True
+      else:
+        self._token = _active_session.set(self)
+        _active_session_count += 1
+      try:
+        yield self
+      finally:
+        _active_session.reset(self._token)
+        self._token = None
+        _active_session_count -= 1
+    finally:
+      self._activation_lock.release()
 
   def close(self) -> None:
     global _active_session_count
@@ -222,6 +326,7 @@ class PlanSession:
     self._arena_bases.clear()
     self._copied_storages.clear()
     self._factory_cursors.clear()
+    self._factory_cursor_keys.clear()
     self._scope.clear()
     self._loop_epochs.clear()
     self._iteration_aliases.clear()
@@ -231,12 +336,13 @@ class PlanSession:
       _active_session_count -= 1
     self.fast_owner = None
     self.slow_owner = None
+    self._dynamic_pool = None
     self._fast_owner_bytes = 0
     self._slow_owner_bytes = 0
     self._closed = True
 
   def stats(self) -> dict[str, int | None]:
-    """Return arena backing and model-state binding telemetry."""
+    """Return arena, binding, replay and metadata-cache telemetry."""
     return {
       "fast_arena_bytes": self.plan.fast_arena_bytes,
       "allocated_fast_arena_bytes": (
@@ -251,12 +357,19 @@ class PlanSession:
       "slow_target_id": getattr(self.slow_owner, "target_id", None),
       "fast_large_page_bytes": getattr(self.fast_owner, "large_page_bytes", 0),
       "slow_large_page_bytes": getattr(self.slow_owner, "large_page_bytes", 0),
+      "factory_metadata_cache_hits": self._factory_metadata_cache_hits,
+      "factory_metadata_cache_misses": self._factory_metadata_cache_misses,
       "planned_factory_allocations": self._planned_factory_allocations,
       "factory_fallbacks": self._factory_fallbacks,
       "factory_allocated_bytes": self._factory_allocated_bytes,
       "factory_large_page_bytes": self._factory_large_page_bytes,
       "factory_reserved_bytes": self._factory_reserved_bytes,
       "factory_owner_allocations": self._factory_owner_allocations,
+      "dynamic_reserved_bytes": self._dynamic_pool.capacity if self._dynamic_pool else 0,
+      "dynamic_live_bytes": self._dynamic_pool.live_bytes if self._dynamic_pool else 0,
+      "dynamic_peak_bytes": self._dynamic_pool.peak_bytes if self._dynamic_pool else 0,
+      "dynamic_allocations": self._dynamic_pool.allocations if self._dynamic_pool else 0,
+      "dynamic_misses": self._dynamic_pool.misses if self._dynamic_pool else 0,
       **self._binding_stats,
     }
 
@@ -285,8 +398,8 @@ class PlanSession:
         {"reason": reason, "key": repr(key)}
       )
 
-  def _build_factory_sites(self) -> dict[tuple[Any, ...], list[_FactoryCandidate]]:
-    result: dict[tuple[Any, ...], list[_FactoryCandidate]] = {}
+  def _build_factory_sites(self) -> dict[tuple[Any, ...], list[_FactoryCandidate | None]]:
+    result: dict[tuple[Any, ...], list[_FactoryCandidate | None]] = {}
     factories = {"aten.empty.memory_format", "aten.empty_like.default"}
     # The same physical allocation can appear twice: once self-registered
     # by the planner factory (explicit, direct-caller source) and once
@@ -326,14 +439,30 @@ class PlanSession:
         if dedupe in seen_tensors:
           continue
         seen_tensors.add(dedupe)
-        placement = self.plan.placements[self.graph.tensors[tensor_id].storage_id]
+        tensor = self.graph.tensors[tensor_id]
+        storage = self.graph.storages[tensor.storage_id]
+        key = _factory_key(event, source, tensor_id)
+        self._known_factory_keys.add(key)
+        # Preserve allocation order even when only some calls at one source
+        # site are replayable. A retained tensor must not consume the next
+        # temporary's static slot.
+        slots = result.setdefault(key, [])
+        slots.append(None)
+        placement = self.plan.placements[tensor.storage_id]
         if placement.offset is None or placement.tier != MemoryTier.fast:
           continue
         if placement.annotations.get("loop_replay_safe") is False:
           continue
-        key = _factory_key(event, source, tensor_id)
-        result.setdefault(key, []).append(_FactoryCandidate(tensor_id))
-    return result
+        if (tensor.metadata.requires_grad or storage.persistent
+            or any(self.graph.tensors[alias].escapes
+                   or self.graph.tensors[alias].persistent
+                   for alias in storage.tensors)):
+          continue
+        slots[-1] = _FactoryCandidate(
+            tensor_id, tuple(tensor.metadata.shape),
+            tuple(tensor.metadata.strides), tensor.metadata.dtype, storage.bytes,
+        )
+    return {key: slots for key, slots in result.items() if any(slots)}
 
   def _factory_tensor(
     self,
@@ -343,15 +472,35 @@ class PlanSession:
     *,
     source: tuple[str, str],
   ):
-    if not self.enable_factory_replay:
+    if not self.enable_factory_replay and not self.enable_dynamic_factories:
       return None
     if name not in {"aten.empty.memory_format", "aten.empty_like.default"}:
       return None
+    cached_metadata = None
     if name == "aten.empty_like.default":
       prototype = args[0]
       shape = tuple(prototype.shape)
       dtype = kwargs.get("dtype") or prototype.dtype
       device = kwargs.get("device") or prototype.device
+      if not kwargs:
+        import torch
+
+        # Subclasses, non-strided layouts, non-CPU devices and keyword
+        # overrides retain the general path, including unplanned fallbacks.
+        if (type(prototype) is torch.Tensor
+            and prototype.layout == torch.strided and device.type == "cpu"):
+          signature = (shape, tuple(prototype.stride()), dtype, device)
+          cached_metadata = self._factory_metadata_cache.get(signature)
+          if cached_metadata is None:
+            self._factory_metadata_cache_misses += 1
+            cached_metadata = (
+                str(dtype), str(device).startswith("cpu"),
+                self._factory_strides(name, args, kwargs, shape),
+            )
+            if len(self._factory_metadata_cache) < 256:
+              self._factory_metadata_cache[signature] = cached_metadata
+          else:
+            self._factory_metadata_cache_hits += 1
     else:
       shape = (
         tuple(args[0])
@@ -362,72 +511,114 @@ class PlanSession:
 
       dtype = kwargs.get("dtype") or torch.get_default_dtype()
       device = kwargs.get("device") or torch.device("cpu")
-    if not str(device).startswith("cpu"):
-      self._factory_fallback("non_cpu", (name, shape, str(dtype), str(device)))
+    if cached_metadata is None:
+      dtype_name = str(dtype)
+      is_cpu = str(device).startswith("cpu")
+    else:
+      dtype_name, is_cpu, _ = cached_metadata
+    if not is_cpu:
+      self._factory_fallback("non_cpu", (name, shape, dtype_name, str(device)))
       return None
     key = (
-      tuple(self._scope),
-      source[0],
-      source[1],
-      name,
-      shape,
-      str(dtype),
+      tuple(self._scope), source[0], source[1], name, shape, dtype_name,
     )
-    candidates = self._factory_sites.get(key)
-    if not candidates:
-      self._factory_fallback("unplanned_site", key)
-      return None
-    cursor_key = (key, tuple(self._loop_epochs))
-    cursor = self._factory_cursors.get(cursor_key, 0)
-    if cursor < len(candidates):
-      candidate = candidates[cursor]
+    candidates = self._factory_sites.get(key) if self.enable_factory_replay else None
+    if candidates:
+      cursor_key = (key, tuple(self._loop_epochs))
+      cursor = self._factory_cursors.get(cursor_key, 0)
+      if cursor == 0 and self._factory_cursor_keys:
+        self._factory_cursor_keys[-1].append(cursor_key)
       self._factory_cursors[cursor_key] = cursor + 1
-    else:
-      self._factory_fallback("epoch_exhausted", key)
-      if self.strict_factory_replay:
-        raise RuntimeError(
-          f"planned factory site {key!r} executed too many times in one loop epoch"
-        )
-      return None
+      if cursor < len(candidates):
+        candidate = candidates[cursor]
+        if candidate is None:
+          return (self._dynamic_factory_tensor(name, args, kwargs, shape, dtype)
+                  if self.enable_dynamic_factories else None)
+        import torch
 
-    expected = self.graph.tensors[candidate.tensor_id].metadata
-    compatible = (
-      tuple(expected.shape) == shape
-      and expected.dtype == str(dtype)
-      and str(device).startswith("cpu")
-    )
-    if not compatible:
+        if cached_metadata is not None:
+          # Only keyword-free requests can reach this branch. A hit does not
+          # authorize a different candidate shape/layout or reuse its cursor.
+          strides = cached_metadata[2]
+          supported = strides is not None and strides == candidate.strides
+        else:
+          strides = self._factory_strides(name, args, kwargs, shape)
+          supported = (
+            strides is not None and strides == candidate.strides
+            and not kwargs.get("requires_grad", False)
+            and not kwargs.get("pin_memory", False)
+            and kwargs.get("layout", torch.strided) == torch.strided
+            and not (set(kwargs) - {"dtype", "device", "layout", "pin_memory",
+                                    "requires_grad", "memory_format"})
+          )
+        if supported:
+          self._planned_factory_allocations += 1
+          self._factory_allocated_bytes += candidate.storage_bytes
+          return self._views[candidate.tensor_id]
+        reason = "metadata_mismatch"
+      else:
+        reason = "epoch_exhausted"
+      self._factory_fallback(reason, key)
+      if self.strict_factory_replay:
+        raise RuntimeError(f"planned factory site {key!r}: {reason}")
+    elif (self.enable_factory_replay and key not in self._known_factory_keys
+          and key[:4] in self._factory_signatures):
       self._factory_fallback("metadata_mismatch", key)
       if self.strict_factory_replay:
-        raise RuntimeError(
-          f"planned factory site {key!r} expected shape={expected.shape}, "
-          f"dtype={expected.dtype}; got shape={shape}, dtype={dtype}, device={device}"
-        )
-      return None
-    self._planned_factory_allocations += 1
-    storage = self.graph.storages[self.graph.tensors[candidate.tensor_id].storage_id]
-    self._factory_allocated_bytes += storage.bytes
-    # The plan proves that this physical slot is dead before its next replay.
-    # Reusing the prebuilt Tensor view removes both allocator and view-building
-    # overhead from the hot path. Mark the view so consumers that retain
-    # tensors across iterations (e.g. framework value caches) can clone
-    # before caching; the slot's memory is recycled at the next epoch.
-    tensor_entry = self.graph.tensors[candidate.tensor_id]
-    view = self.tensor_view(candidate.tensor_id)
-    if tensor_entry.escapes or tensor_entry.persistent:
-      # The plan expects this slot to live until graph exit; a factory
-      # replay would recycle it at the next loop epoch. Serve a private
-      # copy so retained tensors never observe recycled memory.
-      import torch as _torch
+        raise RuntimeError(f"planned factory site {key!r}: uncaptured metadata")
+    elif not self.enable_dynamic_factories:
+      self._factory_fallback("unplanned_site", key)
+    if self.enable_dynamic_factories:
+      return self._dynamic_factory_tensor(name, args, kwargs, shape, dtype)
+    return None
 
-      private = _torch.empty_like(view)
-      private.copy_(view)
-      return private
-    try:
-      object.__setattr__(view, "_vecops_arena_view", True)
-    except (AttributeError, TypeError):
-      pass
-    return view
+  @staticmethod
+  def _factory_strides(name, args, kwargs, shape):
+    """Resolve empty_like's dense preserve-format contract for either arena."""
+    import torch
+
+    default = (torch.preserve_format if name == "aten.empty_like.default"
+               else torch.contiguous_format)
+    memory_format = kwargs.get("memory_format", default)
+    if memory_format not in (torch.contiguous_format, torch.preserve_format):
+      return None
+    if name == "aten.empty.memory_format" and memory_format != torch.contiguous_format:
+      return None
+    if name == "aten.empty_like.default" and memory_format == torch.preserve_format:
+      prototype = args[0]
+      ordered = sorted((stride, dim) for dim, stride in zip(shape, prototype.stride())
+                       if dim > 1)
+      expected = 1
+      for stride, dim in ordered:
+        if stride != expected:
+          break
+        expected *= dim
+      else:
+        return tuple(prototype.stride())
+    strides = []
+    stride = 1
+    for dim in reversed(shape):
+      strides.append(stride)
+      stride *= max(1, dim)
+    return tuple(reversed(strides))
+
+  def _dynamic_factory_tensor(self, name, args, kwargs, shape, dtype):
+    """Lease unplanned, retained, and escaping tensors outside static slots."""
+    import torch
+
+    if (self._dynamic_pool is None or kwargs.get("out") is not None
+        or kwargs.get("pin_memory", False)
+        or kwargs.get("layout", torch.strided) != torch.strided
+        or set(kwargs) - {"dtype", "device", "layout", "pin_memory",
+                          "requires_grad", "memory_format"}):
+      return None
+    strides = self._factory_strides(name, args, kwargs, shape)
+    if strides is None:
+      return None
+    replacement = self._dynamic_pool.empty(shape, dtype, strides)
+    if replacement is not None and kwargs.get("requires_grad", False):
+      replacement.requires_grad_(True)
+    return replacement
 
   def enter_scope(self, name: str) -> None:
     """Mirror one framework scope, canonicalizing sampled loop indices."""
@@ -449,11 +640,14 @@ class PlanSession:
   def _loop_iteration(self, name: str, index: int | str, sample: int):
     self._next_loop_epoch += 1
     self._loop_epochs.append(self._next_loop_epoch)
+    self._factory_cursor_keys.append([])
     self._iteration_aliases.append((str(index), str(sample)))
     self._scope.append(f"{name}[{sample}]")
     try:
       yield
     finally:
+      for key in self._factory_cursor_keys.pop():
+        self._factory_cursors.pop(key, None)
       self._scope.pop()
       self._iteration_aliases.pop()
       self._loop_epochs.pop()
@@ -675,7 +869,16 @@ def empty(*shape: Any, **kwargs: Any):
   """Drop-in ``torch.empty`` that uses a planned arena when one is active."""
   session = current_session()
   capture = current_capture()
-  if (session is None or not session.enable_factory_replay) and capture is None:
+  if (_executable_factories.get() and capture is not None
+      and getattr(capture, '_torch_replay_tape', None) is not None):
+    # Executable capture needs a real dispatcher factory node. Returning an
+    # eager planner view here hides the allocation from the executable tape,
+    # turning every temporary into a pinned external arena snapshot. Metadata
+    # capture and normal eager planner placement retain their existing paths.
+    if _torch_empty is None:
+      _load_torch_factories()
+    return _torch_empty(*shape, **kwargs)
+  if (session is None or not (session.enable_factory_replay or session.enable_dynamic_factories)) and capture is None:
     if _torch_empty is None:
       _load_torch_factories()
     return _torch_empty(*shape, **kwargs)
@@ -704,7 +907,12 @@ def empty_like(prototype: Any, **kwargs: Any):
   """Drop-in ``torch.empty_like`` that uses a planned arena when active."""
   session = current_session()
   capture = current_capture()
-  if (session is None or not session.enable_factory_replay) and capture is None:
+  if (_executable_factories.get() and capture is not None
+      and getattr(capture, '_torch_replay_tape', None) is not None):
+    if _torch_empty_like is None:
+      _load_torch_factories()
+    return _torch_empty_like(prototype, **kwargs)
+  if (session is None or not (session.enable_factory_replay or session.enable_dynamic_factories)) and capture is None:
     if _torch_empty_like is None:
       _load_torch_factories()
     return _torch_empty_like(prototype, **kwargs)
@@ -729,4 +937,16 @@ def empty_like(prototype: Any, **kwargs: Any):
   return result
 
 
-__all__ = ["PlanSession", "current_session", "empty", "empty_like"]
+def contiguous(tensor):
+  """Materialize a contiguous tensor in the active dynamic fast pool if set."""
+  if tensor.is_contiguous():
+    return tensor
+  session = current_session()
+  if session is None or not session.enable_dynamic_factories:
+    return tensor.contiguous()
+  result = empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
+  result.copy_(tensor)
+  return result
+
+
+__all__ = ["PlanSession", "current_session", "empty", "empty_like", "contiguous"]

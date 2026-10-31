@@ -26,7 +26,13 @@ from .ir import (
 
 @dataclass(frozen=True)
 class PlannerConfig:
-  """Stable policy switches for one planner invocation."""
+  """Stable policy switches for one planner invocation.
+
+  ``temporary_scope`` restricts temporary fast placement to an exact named
+  component of its allocation scope. ``only_explicit_factory_temporaries``
+  excludes allocations that eager execution cannot route through planner
+  factories. Neither option changes model-state or input placement policies.
+  """
 
   minimum_fast_bytes: int = 4096
   prefer_all_fast_when_fit: bool = False
@@ -38,6 +44,8 @@ class PlannerConfig:
   allow_input_fast: bool = True
   allow_persistent_fast: bool = True
   require_replayable_temporaries: bool = False
+  temporary_scope: str | None = None
+  only_explicit_factory_temporaries: bool = False
   minimum_weighted_accesses: float = 1.0
 
 
@@ -55,6 +63,9 @@ class _Profile:
   external_home: bool
   graph_output: bool
   loop_replay_safe: bool
+  loop_invariant_end: int
+  allocation_scope: tuple[str, ...]
+  explicit_factory: bool
   benefit_ns: float = 0.0
 
   @property
@@ -71,7 +82,8 @@ class _Profile:
 
   @property
   def fast_end(self) -> int:
-    return self.last_access if self.external_home and self.last_access is not None else self.end
+    return (max(self.last_access, self.loop_invariant_end)
+            if self.external_home and self.last_access is not None else self.end)
 
 
 class _RangeAddMax:
@@ -159,9 +171,43 @@ def _storage_class(graph: ExecutionGraph, storage_id: str) -> StorageClass:
   return StorageClass.external
 
 
+def _loop_invariant_ends(graph: ExecutionGraph) -> dict[str, int]:
+  """Keep values observed across a sampled backedge alive for the whole loop.
+
+  Captured steady samples stand for later iterations. Their last observed read
+  is not the last runtime read of a closed-over operand allocated earlier.
+  """
+  indexes = {event.id: event.index for event in graph.events}
+  accesses: dict[str, set[int]] = defaultdict(set)
+  for event in graph.events:
+    for use in event.uses:
+      accesses[graph.tensors[use.tensor_id].storage_id].add(event.index)
+  required: dict[str, int] = {}
+  for loop in graph.loops:
+    if loop.end_event is None or loop.trip_count == 1:
+      continue
+    for sample in loop.samples:
+      if sample.role != "steady_sample" or sample.end_event is None:
+        continue
+      begin, end = indexes[sample.begin_event], indexes[sample.end_event]
+      for storage_id, storage in graph.storages.items():
+        allocated = indexes.get(storage.allocation_event, 0)
+        if allocated < begin and any(begin <= i <= end for i in accesses.get(storage_id, ())):
+          required[storage_id] = max(required.get(storage_id, 0), indexes[loop.end_event])
+  return required
+
+
 def _profiles(graph: ExecutionGraph, machine: MachineProfile) -> list[_Profile]:
   weights = _event_weights(graph)
+  invariant_ends = _loop_invariant_ends(graph)
   event_indexes = {event.id: event.index for event in graph.events}
+  event_scopes = {event.id: event.scope for event in graph.events}
+  explicit_factories = {
+    graph.tensors[tensor_id].storage_id
+    for event in graph.events
+    if event.attributes.get("explicit_factory") is True
+    for tensor_id in event.outputs
+  }
   steady_ranges = [
     (event_indexes[sample.begin_event], event_indexes[sample.end_event])
     for loop in graph.loops
@@ -218,10 +264,15 @@ def _profiles(graph: ExecutionGraph, machine: MachineProfile) -> list[_Profile]:
     weighted = sum(weights[index] for index in storage_accesses)
     read_only = storage_id not in writes
     allocation_index = event_indexes.get(storage.allocation_event, 0)
+    effective_end = max(storage.lifetime_end, invariant_ends.get(storage_id, 0))
     loop_replay_safe = all(
-      storage.lifetime_end <= end
+      effective_end <= end
       for begin, end in steady_ranges
       if begin <= allocation_index <= end
+    )
+    loop_replay_safe = loop_replay_safe and not any(
+      graph.tensors[item].escapes or graph.tensors[item].persistent
+      for item in storage.tensors
     )
     result.append(
       _Profile(
@@ -229,7 +280,7 @@ def _profiles(graph: ExecutionGraph, machine: MachineProfile) -> list[_Profile]:
         bytes=storage.bytes,
         storage_class=_storage_class(graph, storage_id),
         begin=storage.lifetime_start,
-        end=storage.lifetime_end,
+        end=effective_end,
         accesses=storage_accesses,
         weighted_accesses=weighted,
         weighted_access_bytes=access_bytes.get(storage_id, 0.0),
@@ -237,6 +288,9 @@ def _profiles(graph: ExecutionGraph, machine: MachineProfile) -> list[_Profile]:
         external_home=storage.external or storage.persistent,
         graph_output=storage_id in output_storages,
         loop_replay_safe=loop_replay_safe,
+        loop_invariant_end=invariant_ends.get(storage_id, 0),
+        allocation_scope=tuple(event_scopes.get(storage.allocation_event, ())),
+        explicit_factory=storage_id in explicit_factories,
       )
     )
 
@@ -268,6 +322,13 @@ def _eligible(profile: _Profile, config: PlannerConfig) -> bool:
   if profile.storage_class == StorageClass.external:
     return False
   if profile.storage_class == StorageClass.temporary and not config.allow_temporary_fast:
+    return False
+  if (profile.storage_class == StorageClass.temporary
+      and config.temporary_scope is not None
+      and config.temporary_scope not in profile.allocation_scope):
+    return False
+  if (profile.storage_class == StorageClass.temporary
+      and config.only_explicit_factory_temporaries and not profile.explicit_factory):
     return False
   if (
     profile.storage_class == StorageClass.temporary

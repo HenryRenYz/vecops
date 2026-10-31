@@ -54,6 +54,13 @@ def native_thread_pool_region(
   threads = int(threads)
   if threads <= 0:
     raise ValueError("native thread-pool region requires a positive thread count")
+  from .graph.capture import current_capture
+  capture = current_capture()
+  if capture is not None and getattr(capture, '_torch_replay_tape', None) is not None:
+    from .graph._replay_pool import capture_pool_region
+    with capture_pool_region(capture, threads):
+      yield
+    return
   _C.native_thread_pool_begin_active(threads)
   try:
     yield

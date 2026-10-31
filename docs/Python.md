@@ -1818,6 +1818,139 @@ serialized IR.
 observed operator access. It extends the tensor and its complete alias storage
 group to graph exit without classifying the value as a model output.
 
+### Native CPU replay from the same GraphCapture
+
+`GraphCapture` also records a real eager invocation into an executable tensor
+program. This extends the existing capture mechanism; precompile/manual graph
+captures retain their metadata-only behavior.
+
+```python
+capture = vecops.graph.GraphCapture("denoiser-step")
+captured_output = capture.capture_torch(model, positions, noise)
+replay = capture.compile_torch()
+next_output = replay(next_positions, next_noise)
+```
+
+Capture executes the function once, including its input/state mutations. CPU
+RNG state is restored after capture by default, including capture failure;
+`preserve_rng_state=False` opts into consuming capture's random draws. Replay
+executes recorded standard ATen CPU random kernels against the current default
+CPU Generator, advancing its state normally. `torch.manual_seed` therefore
+reproduces the same replay sequence. Explicit Generator arguments are rejected
+before capture executes their operator.
+
+The executable uses Torch's C++ `Code`/`InterpreterState`, with direct,
+token-checked CPU `SafeKernelFunction` bindings. There is no Python node loop,
+model callback, profiling executor, fusion pass or dead-code elimination.
+Void native calls and writes to externally supplied output buffers remain in
+recorded order. ATen kernels must have native packaged registration evidence;
+materialized vecops registrations and their modules remain strongly owned.
+Other native custom operators require `native_operators={qualified_name: owner}`.
+Python CPU registrations, tensor subclasses, active Python dispatch/function
+modes, hidden functional/pre-dispatch transformation contexts and outer CPU
+autocast contexts are rejected explicitly. Dispatcher registrations, including
+operators called internally by an accepted native kernel, must remain stable
+for the executable's lifetime. Dynamic registration replacement is unsupported.
+For each recorded node, an additional saved native binding either remains valid
+or throws its invalidation error if its own CPU registration is replaced; it
+cannot redirect that node's binding into Python. This does not claim to detect
+arbitrary changes to an unrecorded nested dispatcher call.
+
+Pytree structure and non-Tensor arguments are static. Native guards validate
+CPU strided layout, shape, strides, dtype, storage offset/capacity, supported
+dispatch keys, StorageImpl alias groups and byte-overlap geometry (including
+separate `frombuffer` storages). Guards deliberately reject some otherwise
+compatible standalone copies of views if their storage capacities differ.
+Data-dependent output shapes, Python scalar extraction, NumPy/list data escapes, resizing/rebinding
+storage, asynchronous operations and indirect Python calls are unsupported.
+An unsupported capture raises, clears its capture context and cannot compile;
+replay never silently runs an eager fallback. A kernel error clears replay's
+execution locks, but earlier in-place writes/random draws are not rolled back.
+Failed compilation restores the capture's ownership state and releases temporary
+arena allocations. To avoid retaining those allocations through a saved exception,
+inactive compiler-frame locals are cleared; error text and traceback locations
+remain available. The same successful capture may be compiled again.
+
+With `native_pointwise=True`, floating results of multiplication can also
+consume a boolean scalar or a mask whose final dimension is statically one.
+The boolean is converted to 0/1 and broadcast over SIMD feature lanes. This
+preserves multiplication semantics (including `0 * NaN` and signed zero),
+rather than replacing it with a mask-select operation. Plain bool-to-floating
+copies/conversions with that layout are supported too. General boolean inner
+vectors and boolean output operations keep their native ATen implementations.
+The restriction is checked before kernel compilation; no vector load of the
+SDK's bool element type is required.
+
+An enabled `native_thread_pool_region` is captured as native begin/end events in
+the same tape. Compilation retains the actual provider DSO and validates its V1
+factory and activation C ABI; a provider without that evidence raises explicitly.
+Replay invokes the C ABI directly and unwinds outstanding regions on a kernel
+error, without calling Python region wrappers. This preserves an explicitly
+enabled region's scheduling hint; it does not enable regions disabled by a model.
+
+Per-node float32 matmul precision is captured, including temporary precision
+changes inside a Python module. Native execution restores the caller's precision
+on success and error, and does not set it when already correct. Graph execution
+rejects reentry/concurrent calls, including capture versus capture/replay and
+calls through a different graph in the same process, to protect Torch's
+process-global math policy and capture's default-RNG fork. Concurrent
+external mutation of Torch global configuration, dispatcher registrations, the
+default Generator during capture, or live tensor contents is unsupported.
+A factory's omitted dtype is normalized
+to its observed result dtype so a later default-dtype change cannot change its
+output type.
+
+Only graph inputs and first-used external bindings retain tensor owners during
+capture. Produced temporaries follow eager lifetimes; capture retains their IR
+metadata rather than all intermediate payloads. Capture/recorder ownership avoids
+reference cycles, so releasing the capture/executable does not require cyclic GC
+to return private arena allocations. This is distinct from an
+allocator guarantee: ordinary functional ATen results still allocate through
+ATen during replay. Optional `memory_plan=` must describe this exact capture and
+can replace internal, nonescaping empty-factory allocations with private planned
+views. Unsupported fast placements fail; unapplied slow functional placements
+are listed in `replay.allocator_policy`.
+
+When capture observes a live `PlanSession`, compilation isolates the bound
+planner views into a graph-private arena on the same requested memory tier and
+domain by default. Disconnected accessed byte components are compacted; relative
+view geometry and overlap within each component are preserved. Holes within a
+strided tensor's accessed span remain allocated. The original session may remain active,
+reuse its slots, close or leave old output aliases alive without overwriting the
+graph's private storage. `allocator_policy` reports copied bytes, source arena
+capacity/offset, requested domain, actual allocation target ID and large-page
+bytes. Captured arena state/weights become compile-time snapshots by default;
+the explicit immutable-state lease can instead pin validated dedicated slots.
+See [Planner state borrowing and arena compaction](#planner-state-borrowing-and-arena-compaction)
+for eligibility, lifetime and external-mutation rules. This differs from the live content semantics for
+ordinary weights outside an arena. Absolute `storage_offset` observations and
+`as_strided(..., storage_offset=<integer>)` on rebased aliases are rejected.
+A relative `as_strided` with `storage_offset=None` is supported only when its
+recorded output keeps the same storage/dtype and accesses a byte span contained
+in its self tensor's retained span; empty outputs access no bytes. Expanding a
+slice or empty alias beyond that retained span is rejected. A graph input overlapping such an arena
+currently requires explicit input staging and is rejected at compilation.
+Empty-only borrowed arena bindings and partially overlapping unrecognized
+storage owners are also rejected. Compiling another executable from the same
+capture makes another independent arena; it does not share writable graph slots.
+
+Weights/buffers bound outside a planner arena retain their captured storage
+handles: in-place content updates are visible, while rebinding a module
+attribute or `.data` requires recapture. Outputs preserve their execution
+aliases. An output aliased to an input or static bound buffer is borrowed and
+may change on later execution; clone it to retain a previous step. Functional
+outputs have their ordinary ATen allocation lifetime. No guarantee of distinct
+storage for every returned output is implied.
+
+The thin Torch-only executor is compiled at the first executable capture against the installed Torch
+version and C++ ABI. It does not link a second OpenMP runtime or an SDK library.
+`VECOPS_GRAPH_REPLAY_CXX` selects an explicit compiler and
+`VECOPS_GRAPH_REPLAY_CACHE` selects the private binary cache. Frozen C++ source,
+compiler/version, Torch/ABI and include/library paths form the cache identity;
+interprocess locking protects cache construction. First-use native module build,
+graph capture, graph lowering and steady replay costs should be measured
+separately.
+
 ### Offline HBM/DDR planning
 
 `vecops.planner` consumes a concrete `ExecutionGraph` without importing Torch.
@@ -1890,6 +2023,8 @@ never receives an unnecessary HBM-to-DDR writeback.
 Compiled templates select NumPy execution or a generated Torch bridge from
 the runtime tensor arguments. Torch bridge tasks are content-addressed and
 compiled on the first real call or at the end of `vecops.precompile()`.
+Registrations sharing a bridge artifact resolve to the backend-published
+filename, including its platform-specific library prefix.
 Use `T.compile_pending(parallelism=N)` to materialize all declared bridges
 in a shared build graph before execution.
 
@@ -1924,6 +2059,11 @@ On Linux, `VECOPS_THREAD_POOL_CPU_LIST` may provide an explicit comma/range CPU
 list for worker pinning; this is useful when the submitting OpenMP thread is
 already pinned to one CPU but the native pool should span the rank's full mask.
 `VECOPS_THREAD_POOL_SPIN_COUNT` sets the bounded worker spin before parking.
+It does not configure barriers inside a joined native team. Those actively
+spin by default; `VECOPS_THREAD_POOL_TEAM_SPIN_COUNT=2048` restores short
+spinning followed by parking (`0` parks immediately, `4294967295` is the
+active default). Set it before pool creation. Leaving the joined team returns
+workers to the bounded idle-wait policy; their OS threads remain persistent.
 `VECOPS_NATIVE_THREAD_POOL_OPS` optionally limits native-pool injection to
 comma-separated qualified operator globs. The default remains
 `VECOPS_THREAD_POOL=torch`.
@@ -2902,3 +3042,325 @@ scalar declaration, including updates inside structured control flow. A
 trapping or effectful reassignment retains the declaration it requires even
 when its resulting value is unread; cleanup preserves its original execution
 path and exception timing.
+
+#### Planner state borrowing and arena compaction
+
+`GraphCapture.compile_torch(borrow_readonly_state=False)` keeps the default
+isolation/snapshot contract for captured planner storage. Disconnected accessed
+byte spans are compacted into a private owner. Views and actual overlapping
+byte ranges retain their relative positions within each connected component;
+one independent StorageImpl is retained per original storage identity across
+its components. Tensor strides remain unchanged. Storage capacity, raw pointers
+and absolute storage offsets are not a portable property of the replay. Explicit
+storage-offset observations and absolute-offset `as_strided` on planner-arena
+aliases are rejected. Relative `as_strided(..., storage_offset=None)` inherits the
+relocated self offset and is permitted only within self's retained byte span
+(with same storage identity/dtype); empty outputs access no byte. Relative views
+that expand into other components or beyond a sliced/empty self are rejected.
+
+The explicit `borrow_readonly_state=True` policy can instead pin an existing
+planner owner for immutable model-state slots. Eligibility requires an actual
+bound/copied parameter or buffer, a fast replicated read-only placement marked
+`eager_external_replica`, and a slot that never overlaps any other plan placement,
+even at a different epoch. The bound view is frozen independently of a module's
+later `.data` restoration. Closing the source session does not free this owner.
+The caller must not mutate borrowed state, including through old aliases, until
+the executable is released. This is an immutable lease, not a general read-only
+input optimization. Captured writes through any actual byte alias are rejected.
+Unselected factory/dynamic buffers still receive private storage. The allocator
+policy reports copied bytes, compact components and borrowed state ranges.
+
+Storage identity observations through the private `torch._C._is_alias_of` helper
+are rejected during executable capture, including cases where a mixed borrowed
+state/private temporary owner would split one original storage. A capture-only
+Python profile guard detects this C call, chains an existing Python profile and
+restores it on success/failure. An active non-callable C profiler (such as
+`cProfile`) is rejected without replacing it: capture first, then profile replay.
+This guards the supported Tensor program; it is not a sandbox for arbitrary
+private C APIs or Python control flow. Replay itself has no profiling callback.
+
+
+### Prepared C++ source nodes in Torch replay
+
+Sources defining `VECOPS_RECORDABLE_KERNEL` are lowered to persistent grid
+plans during `GraphCapture.compile_torch()`. Check
+`replay.allocator_policy['recorded_cpp_plan_nodes']` for the number selected.
+`replay._executor.native_islands()` is a diagnostic count of multi-operator
+resident islands. Set `VECOPS_THREAD_POOL=native` before source registration
+to select a resident provider; the ordinary Torch provider may expose logical
+tasks only and therefore use synchronous individual grids. Replay keeps native
+plan leases, not Python source callbacks. Unconverted sources continue using
+the existing native boxed path.
+
+`capture.compile_torch(native_pointwise=True)` optionally lowers supported
+floating `to.dtype`/`_to_copy`/clone, add/sub/mul/div, negation and ReLU intermediates into
+recordable SIMD C++ grids. Broadcasting has fixed captured metadata; input
+addresses and Tensor scalar values remain dynamic. Unsupported dtype/layout or
+overload combinations keep their native ATen implementation. Each original
+operation still stores its result in the captured dtype, including BF16 rounding
+boundaries. Escaping functional results continue using ATen allocation.
+Supported in-place arithmetic and `copy_` retain their target storage and alias
+semantics. Same-dtype copies, including singleton-feature broadcasting, preserve
+raw element bits; readonly `const` inputs do not introduce an FP32 conversion
+that would quiet signaling NaNs or alter their payloads. Kernel artifacts are prepared once for each metadata/VL/SVL/worker
+specialization; each executable still owns independent scratch and plan frames.
+
+With this option, internal nonpersistent, nonescaping factories and lowered
+results share a private static scratch arena. Slot reuse uses the complete
+storage lifetime, including aliases, and never reuses an input's last-use slot
+at the event producing a new result. Immutable bound views are constructed at
+compile time. Views of dynamic inputs are evaluated before computation and
+follow rebound addresses. Planner input/binding overlap checks use actual live
+byte spans; disjoint views of one arena owner require no staging copy.
+Recorded `to`/`contiguous` calls that returned the exact input tensor are
+eliminated under these static metadata guards, so they do not split an island.
+The C++ executor also moves `as_strided`/relative static views whose tensor
+roots are graph inputs and whose metadata is literal into the submission
+prologue. They still follow rebound input addresses on every call; their list
+construction and view binding occur before all compute, allowing the native
+team to advance across the original view locations. Data operations and mutable
+calls retain their original order. `executable._executor.prologue_views()`
+reports this additional preparation count. Scalar views retain typed empty
+shape/stride lists during capture, including after input address rebinding.
+
+Allocator diagnostics include `native_pointwise_nodes`, `hoisted_static_views`,
+`eliminated_static_noops`, `static_factory_count`, `static_scratch_arena_bytes`
+and `native_island_sizes`.
+The latter lists all resident submissions, including singleton plans. The older
+`native_islands()` count includes multi-plan islands only. Torch CPU profiling
+also exposes `vecops::kernel_plan`, `vecops::plan_bind`,
+`vecops::native_island` and `vecops::resident_team` scopes; their nested times
+must not be summed as independent wall contributions. Compilation, source
+attestation and scratch allocation are setup work, outside steady replay.
+
+
+### Optional NUMA-group dynamic-library loader
+
+The independent Linux/glibc `vecops_numa_loader` CMake target is enabled with
+`VECOPS_BUILD_NUMA_LOADER=ON` (default OFF). Set `LD_AUDIT` to its installed DSO
+and configure `VECOPS_NUMA_PLACEMENT` before exec. It selects independent,
+content-verified library files for each configured NUMA group; members share
+one inode. It never changes page policy/protection and does not intercept
+kernel launch/replay. See [the loader guide](NumaLoader.md) for configuration,
+path compatibility, diagnostics, and deployment.
+
+The former `prepare_code_locality` COW/page-migration API has been removed.
+File isolation replaces that deployment path, but does not guarantee physical
+page placement: verify matched model timings before adopting a sharing group.
+Torch GOMP provenance checks retain a NOLOAD handle to the actual mapped DSO;
+a loader copy must prove both its source association and exact content, and all
+required symbol addresses must belong to that same object.
+
+
+## Independent CPU communication
+
+`vecops.distributed` provides an optional Linux coherent-shared-memory c10d
+backend. Its C++ transport (`vecops::comm`) has no Torch, Kutacc or KUPL
+link dependency. The Torch adapter is built lazily against the installed Torch
+headers and ABI; an available C++20 compiler is required. Importing configuration
+types alone does not import Torch. Install the `communication` extra for Torch
+and, on Python <3.11, TOML parsing.
+
+```python
+import torch.distributed as dist
+from vecops import distributed as vd
+
+vd.register_backend()
+dist.init_process_group("vecops", pg_options=vd.Options.from_file("platform.toml"))
+group = vd.group()
+full = group.all_gather(local, dim=0, hints=vd.Hints(reuse="once"))
+other_shard = group.reshard(pair, source_axis=0, target_axis=1)
+```
+
+Run this under `torchrun` or another launcher that sets the usual rendezvous and
+rank environment. Bind each process before initialization. The backend discovers
+the CPU NUMA node from affinity and takes its memory target and replica domain
+from the **vecops platform file**; model configuration need only supply its path
+(or `VECOPS_COMM_CONFIG`). The example
+`configs/platforms/920f4.toml` describes the concrete CPU/HBM mapping. It is
+machine-specific data, not a transport assumption. Without a platform file,
+communication uses ordinary OS placement and the flat algorithm.
+
+The version-1 TOML separates `topology.domains` (arbitrary parent tree, e.g.
+host/socket/die/NUMA), `memory.pools` (owners, kinds and OS target nodes),
+`resources` (shared bandwidth-resource identities), `topology.links` (resource
+references), and `communication` (implementation policy). Nominal resource
+capacities are descriptive and do not constitute evidence for automatic routing.
+Routing supports nested coarse-to-fine partitions and unequal group sizes:
+
+* `algorithm="flat"` keeps direct published-source reads.
+* `algorithm="hierarchical"`, `replica_domain="die"` retains the compact
+  single-level policy: one distributed replica/source/destination domain above
+  `relay_threshold_bytes`, followed by private materialization or a consumer.
+* Explicit `communication.levels` composes `share` and `copy` independently.
+  For example `levels=[{domain="socket",mode="share"},
+  {domain="die",mode="copy"},{domain="numa",mode="share"}]` shares across
+  sockets, replicates into each die, then borrows those distributed replicas
+  within the die. A copy stage pulls each source directly into its assigned
+  destination rank; no preliminary leader aggregation occurs. Source modulo
+  destination group size balances equal payloads. It is deterministic for
+  asymmetric groups, though not a weighted-byte optimal assignment for ragged
+  traffic. Stage barriers protect parent replicas before downstream reuse.
+* `algorithm="auto"` keeps flat routing until a valid calibration exists, unless
+  explicit level modes override that default.
+  `communication.calibration="routes.json"` loads measured overrides for exact
+  operation/dtype/input/output sizes and strides. `tuning.tune_all_gather` tests
+  supplied mode combinations under simultaneous all-rank traffic, rotates their
+  order and compares median max-rank times against the first/default candidate.
+  It requires at least 5% gain above observed variation. `write_profile` saves
+  evidence and installs the selected table. Calibration runs before capture and
+  seal; replay never tunes. A different boot, frequency policy, rank placement,
+  worker count, topology or transport binary invalidates the profile and keeps
+  default routing. Context includes every member's worker count and frequency
+  tag; validity is a collective decision, so one stale member makes the whole
+  group fall back. Missing/mismatched profile files fail collectively.
+  `VECOPS_COMM_TUNING_TAG` can also invalidate profiles after
+  manual clock/MSR changes not reflected in sysfs frequency policy. Nominal GB/s
+  numbers never trigger an automatic choice.
+
+`configs/platforms/hierarchy-example.toml` shows explicit socket/die/NUMA
+nesting, a die-owned DDR pool and a shared link resource. It is a schema example,
+not a measured platform. Use the communication benchmark to produce a cold
+profile, for example:
+
+```sh
+torchrun --nproc-per-node=8 benchmarks/comm/TorchCollectives.py \
+  --backend vecops --config configs/platforms/920f4.toml \
+  --cpus rank-cpus.json --tokens 768 --batch-dim \
+  --iterations 20 --tune-profile routes-768.json --output timing-768.json
+```
+
+The relay size threshold still applies to explicit per-level copy modes. To
+calibrate copy versus sharing below that heuristic, set
+`communication.relay_threshold_bytes=0` in the calibration platform file and
+deploy the resulting profile with that same file. Otherwise candidates below
+the threshold all execute direct sharing; their timing cannot establish a copy
+route benefit. A copy-level hint does not override this separate size policy.
+
+The profile only covers measured layouts. `SharedExchange.py` separately
+compares the joint producer + AllToAll + consumer cost for private, source-placed
+and destination-placed outputs under native graph replay, including reuse=1/4.
+A synchronization-only microbenchmark cannot establish the benefit of aliases.
+
+Additional supported policy keys are `initial_capacity_bytes`, `chunk_bytes`,
+`require_placement`, and `timeout_ms`. `direction` currently accepts only `auto`:
+AllToAll pushes into peer inboxes; AllGather pulls published data. Strict
+placement installs persistent shared-object `MPOL_BIND|MPOL_F_STATIC_NODES`,
+temporarily binds only the allocating caller, and verifies both the installed
+policy and actual shared pages; a missing target or failed placement raises an error. No machine
+configuration is modified. `Options.threads` selects participating lanes in the
+existing vecops native pool, not a second communication pool.
+
+Standard c10d operations include CPU strided AllGather/AllToAll, contiguous
+single-tensor variants, broadcast, barrier, ragged gather through
+`all_gatherv_into_tensor`, and FP32 SUM all-reduce. Local strided outputs cannot
+overlap internally, and distinct output regions must be disjoint. Wire dtype,
+counts and sequence are validated across ranks. Inputs may alias outputs because
+publication completes before materialization. All outputs remain private,
+materialized tensors: hints never authorize shared aliases.
+`Hints(copy_levels=(0,1,0))` explicitly overrides a value AllGather's per-level
+route; other backends ignore it. The number/order matches the platform levels. Other c10d backends ignore these
+performance hints; the value facade uses native functional collectives during
+vecops graph capture, including its Gloo fallback.
+
+Eager `async_op=True` is cooperative: submission retains tensors and queues work;
+`wait()` progresses submissions in order. It does not promise background overlap.
+A graph communication node drains any older queued work before execution.
+Use the facade, or `vd.launch(...)` from a graph adapter, to record the mutable
+native `vecops_comm::run` operation. Capture builds immutable layouts, copy offsets
+and an owned plan handle. Replay rebinds addresses and executes that plan without
+Python/c10d Work construction or layout planning. Preserve the owner mapping
+returned by `vd.native_operators()` when compiling an explicit graph. A plain
+unadapted c10d call is not a graph-capture interface.
+
+After all plans have been exercised to provision windows, `vd.seal()` freezes
+both window growth and new plan registration. Do this only when no further model
+shapes or collectives need preparation. `vd.statistics()` reports calls, plans,
+capacity growths and copied bytes. The initial implementation limits each group
+to 256 ranks and 1024 distinct cached plans. Groups are serialized; concurrent
+execution of one prepared instance is rejected. Errors poison the communicator
+and wake waiting peers; process loss is detected by the group timeout. Per-Work
+finite timeout overrides, multi-host transport and background progress are not
+implemented. Cold initialization uses a Torch Store; the hot payload and control
+protocol use shared mappings and acquire/release atomics, without Store traffic.
+
+### Explicit borrowing and page aliases
+
+`consume_all_gather(source, output, operator_name, specs, owners=...)` is one
+native effect: publish, acquire source snapshots/domain replicas, invoke a
+registered CPU consumer and retire its lease. The consumer signature is
+`(Tensor addresses, Tensor(a!) output, int...) -> ()`; DSL optional `int?`
+specialization parameters are also accepted when every concrete value is supplied.
+The int64 address table exists only inside C++. All readers must join before it returns. Addresses
+cannot escape into Python, caches, a later collective or another graph effect.
+The output is independently owned; this can consume directly into a packed
+matrix layout without a complete gathered intermediate. The graph keeps every
+consumer compiler/DSO owner alive. This is an explicit contract, not something
+`reuse="once"` authorizes automatically.
+
+`PageExchange(block_shape, dtype, slots=1, placement="destination")` collectively
+prepares fixed, shared AllToAll storage before capture. Each rank sees a
+peer-major producer and a source-major consumer. Aliases are mapped once;
+page tables are prefaulted cold. The first stride is page padded, including for
+empty/small blocks, so kernels must honor strides rather than assume a dense
+Tensor. `placement="source"` charges remote reads to consumers;
+`"destination"` charges remote writes to producers. Physical pages follow the
+owning rank's configured memory target. Consumer mappings are OS read-only;
+writing them is a contract violation. The normal protocol is:
+
+```python
+exchange = vd.PageExchange((rows, channels), torch.bfloat16, slots=2)
+# Construct before capture; capture/replay the following tensor program.
+exchange.begin(slot)                         # waits for previous readers
+producer_kernel(..., out=exchange.producer(slot))
+exchange.publish(slot)                       # acquire every producer
+consumer_kernel(exchange.consumer(slot), out=owned_result)
+exchange.retire(slot)                        # after ALL readers have joined
+```
+
+These calls capture mutable `vecops_comm::exchange` effects with both aliased
+storages as arguments. They cannot be DCE'd as pure view operations. Both slots
+may be live together; reuse waits for each previous reader. Phase locks are per
+slot, so a wait on one slot cannot prevent another slot from retiring. The 1–64 slots must
+cover maximum simultaneous versions. There is no hot mmap, layout allocation,
+payload copy or page placement. Copying an existing private Tensor into the
+producer is allowed, but then that copy remains part of the workload; only a
+producer writing this layout directly removes it. Page alias storage is not
+silently substituted for standard writable c10d outputs. HugeTLB aliases and
+automatic graph producer-layout rewriting are not implemented. A consumer clone
+is needed if its value must remain writable/live after retirement. Call
+`exchange.abort()` if a producer/consumer fails outside a transport effect;
+`vd.backend().abort()` cancels the whole communicator and its exchange regions.
+Prepared exchange storage is group-owned until the process group is destroyed;
+include all live regions/slots in the model's preparation memory budget.
+
+For C++-only use, configure `VECOPS_BUILD_COMMUNICATION=ON` and consume
+`find_package(Vecops REQUIRED COMPONENTS comm)` / `vecops::comm`. Pass a cold
+bootstrap exchange callback and optionally an existing `VecopsThreadPoolV1` to
+`Communicator::create`, then prepare `Specification` instances and execute their
+pointer arrays. No framework runtime is needed.
+
+Regular peer-interleaved AllGather outputs use destination-row ownership:
+one worker writes all peer fragments of a row, avoiding source-dependent work
+imbalance and split cache-line ownership. Recognition (equal run/row geometry)
+is cold-plan work; pointer rebinding is checked at execution. Ragged, irregular,
+large-run and independent-output layouts retain generic peer scheduling.
+The vecops platform file accepts the `[communication]` scheduling policy:
+
+```toml
+copy_schedule = "auto"      # default; "peer" selects peer scheduling
+```
+
+Every explicit payload copy uses the public vec module: contiguous snapshots,
+strided pack/unpack, hierarchical replicas and destination-row transport. Long
+runs use four independent vector loads before their stores; predication handles
+unaligned short fragments and tails without reading beyond the source. No libc
+copy backend or instruction-selection setting exists. ISA selection occurs once
+in baseline code, before worker callbacks: SVE, AVX512, AVX2 or the portable vec
+implementation. The same source implements all variants; older CPUs never enter
+unsupported instructions. Python wheels include both copy and cold-dispatch
+sources and freeze the complete header set in the communication build identity.
+`backend.statistics()` exposes `row_copy_calls` and `row_copy_bytes`. Byte counters
+count explicit payload, never actual interconnect traffic or consumer-kernel
+reads. Layout/ISA selection does not alter peer synchronization, snapshot
+lifetime, graph ordering or numerical data.
