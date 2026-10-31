@@ -3364,3 +3364,15 @@ sources and freeze the complete header set in the communication build identity.
 count explicit payload, never actual interconnect traffic or consumer-kernel
 reads. Layout/ISA selection does not alter peer synchronization, snapshot
 lifetime, graph ordering or numerical data.
+
+For protocol audits, `benchmarks/comm/instrument_protocol.py --source-checkout
+<checkout> --output <new-private-directory>` creates an independent communication
+source tree with opt-in C diagnostic hooks. `comm_diag_start()` reserves records
+before inference; `comm_diag_stop(path)` disables capture and writes JSON after
+inference. Use a single calling thread per process and match identical
+communicator epochs across ranks. The records distinguish caller-only and
+pool copy submissions, blocked waits by publication phase, descriptor cache
+misses, capacity growth, capacity-equal mapping checks, and actual payload mmap
+calls. Consumer execution remains a separate nested interval. These hooks are
+absent from production builds. Copy submission wall includes worker dispatch
+and completion; it is not a measurement of pure vector instruction time.
