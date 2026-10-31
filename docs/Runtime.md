@@ -401,9 +401,27 @@ Consecutive void/out-style prepared operators using the same resident provider
 are grouped into one native island (pure Constant nodes may intervene).
 One team runs their grids in order, with barriers between stages. An ATen node,
 a return-producing operator, or a provider change ends the island. Metadata
-views and ATen work are currently still native interpreter operations; this is
-not whole-model fusion. Logical-only Torch providers execute the synchronous
+views that cannot be lowered and ATen work remain native interpreter operations;
+static alias geometry may be lowered before island formation. This is not
+whole-model fusion. Logical-only Torch providers execute the synchronous
 grid fallback and are never placed inside a resident barrier sequence.
+
+Prepared effect adapters can also use this ABI. The CPU communication adapter
+retains its communicator/plan and per-node pointer arrays, with the exact same
+physical provider identity as source kernels. Its copies are lane tasks and its
+protocol actions are leader-only tasks followed by local barriers. Borrowed
+source consumers execute their recorded grids in that team, not a nested team.
+The embedding must cancel barriers after any lane throws and call `leave(false)`
+only after all lanes have exited. Communication failure also poisons the group
+so remote ranks leave their polling loops. The C++ `comm::Plan::execute_on_team`
+entry point has the same all-lanes and cancellation contract; it does not own or
+launch a thread team itself.
+
+The graph adapter may describe static tensor argument paths for an effect whose
+schema contains TensorLists. Lowering resolves those paths once, binds individual
+tensor addresses through the ordinary plan ABI and discards only unused pure
+list constructors. It must preserve mutable effects and their order; this is
+not permission to eliminate communication or other void native calls.
 
 ### Native pool wake policies
 
@@ -419,7 +437,8 @@ Within an explicitly bounded active region, publication avoids per-worker
 sleep locks and notifications. Ending the final region is serialized with
 submission publication, preventing a worker from sleeping during an
 unnotified active submission. Never extend an active region across ATen or
-communication copy work on the same cores. Compare both policies with realistic
+independently scheduled copy work on the same cores. Communication lanes already
+inside the same resident team do not introduce a competing pool. Compare both policies with realistic
 payloads and full inference before selecting a platform default; empty dispatch
 latency alone does not establish model throughput.
 

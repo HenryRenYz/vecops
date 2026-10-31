@@ -5,12 +5,14 @@
 #include "vecops/comm/Copy.h"
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <mutex>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
@@ -102,6 +104,17 @@ void worker(int rank,Bootstrap* store) {
     for(auto& thread:workers)thread.join();
     return 0;
   };
+  auto on_team=[](auto&& body) {
+    struct Team {std::barrier<> phase{4};} team;
+    std::mutex mutex;std::exception_ptr failure;std::vector<std::thread> lanes;
+    auto work=[&](uint32_t lane) {
+      VecopsTeamContextV1 context{sizeof(VecopsTeamContextV1),lane,4,&team,
+        [](void* opaque,VecopsError*)->int{static_cast<Team*>(opaque)->phase.arrive_and_wait();return 0;}};
+      try{body(context);}catch(...){team.phase.arrive_and_drop();std::lock_guard lock(mutex);if(!failure)failure=std::current_exception();}
+    };
+    for(uint32_t lane=1;lane<4;++lane)lanes.emplace_back(work,lane);
+    work(0);for(auto& lane:lanes)lane.join();if(failure)std::rethrow_exception(failure);
+  };
   auto comm=Communicator::create(rank,ranks,options,exchange,&executor);
   // Three ranks, independent pointer rebinding, non-vector tails, empty and
   // single rows, canary padding, and unsupported large-run fallback.
@@ -117,7 +130,8 @@ void worker(int rank,Bootstrap* store) {
       std::array<void*,ranks> destinations;
       for(int peer=0;peer<ranks;++peer)destinations[peer]=destination.data()+peer*run;
       const void* input[]{source.data()};
-      gather->execute(destinations.data(),input);
+      if(iteration==0)gather->execute(destinations.data(),input);
+      else on_team([&](const auto& team){gather->execute_on_team(destinations.data(),input,team);});
       for(int row=0;row<rows;++row) {
         for(int peer=0;peer<ranks;++peer)for(int byte=0;byte<run;++byte)
           check(destination[row*stride+peer*run+byte]==uint8_t(peer*17+row*run+byte+iteration));
@@ -135,6 +149,10 @@ void worker(int rank,Bootstrap* store) {
   plan->consume(inputs,[&](const void* const* sources,size_t size) {
     check(size==ranks);for(int r=0;r<ranks;++r)for(int i=0;i<17;++i)check(static_cast<const float*>(sources[r])[i]==r+1);
   });
+  Plan::TeamConsumer consumer=[&](const void* const* sources,size_t size,const VecopsTeamContextV1&) {
+    check(size==ranks);for(int r=0;r<ranks;++r)for(int i=0;i<17;++i)check(static_cast<const float*>(sources[r])[i]==r+1);
+  };
+  on_team([&](const auto& team){plan->execute_on_team(nullptr,inputs,team,&consumer);});
   std::vector<std::shared_ptr<ExchangeBuffer>> buffers;
   for(auto placement:{PagePlacement::Source,PagePlacement::Destination}) {
     auto buffer=comm->prepare_exchange(17*sizeof(float),2,placement);

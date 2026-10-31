@@ -109,12 +109,27 @@ public:
    * retirement are one native graph effect; no full gathered tensor is made.
    */
   void consume(const void* const* inputs, const Consumer& consumer);
+  /** Execute on an already resident physical team. Every lane must enter in
+   * the same order; idle copy lanes still join dependencies. Lane zero owns
+   * protocol publication/polling while other lanes wait locally. No nested
+   * pool submission occurs. A team consumer is invoked on ALL lanes and must
+   * join every reader before return; it may use the same team's barriers.
+   * Exceptions poison the communicator; the embedding must cancel its team
+   * when a lane throws. Arrays/consumer and their owners outlive all lanes.
+   */
+  using TeamConsumer = std::function<void(const void* const*, size_t, const VecopsTeamContextV1&)>;
+  void execute_on_team(void* const* outputs, const void* const* inputs,
+      const VecopsTeamContextV1& team, const TeamConsumer* consumer = nullptr);
+  /** The retained provider and maximum width used by this plan. */
+  const VecopsThreadPoolV1* thread_pool() const noexcept;
+  uint32_t workers() const noexcept;
   const Specification& specification() const noexcept;
 private:
   struct State;
   std::unique_ptr<State> state_;
   explicit Plan(std::unique_ptr<State>);
-  void execute_impl(void* const*, const void* const*, const Consumer*);
+  void execute_impl(void* const*, const void* const*, const Consumer*,
+      const VecopsTeamContextV1* = nullptr, const TeamConsumer* = nullptr);
   friend class Communicator;
 };
 class ExchangeBuffer {

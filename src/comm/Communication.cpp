@@ -255,13 +255,7 @@ struct Communicator::State {
     ++stats.capacity_growths;
   }
   void batch(std::vector<Job>& jobs) {
-    size_t tasks=0;
-    for(auto& job:jobs) {
-      if (!job.shape->bytes) {job.tasks=0;continue;}
-      job.tasks=std::max<size_t>(1,(job.shape->bytes+options.chunk_bytes-1)/options.chunk_bytes);
-      if(job.shape->offsets.size()!=1) job.tasks=std::min(job.tasks,job.shape->offsets.size());
-      tasks=add(tasks,job.tasks); stats.copy_bytes+=job.shape->bytes;
-    }
+    size_t tasks=prepare_batch(jobs);
     if (!tasks) return;
     Batch b{&jobs,tasks,copy};
     uint32_t lanes=std::min<size_t>(options.threads,tasks);
@@ -270,6 +264,16 @@ struct Communicator::State {
       int status=executor->parallel_for(executor->context,lanes,&b,Batch::work,&error);
       if(status) throw std::runtime_error(std::string("vecops comm executor: ")+message);
     } else Batch::work(&b,0,1);
+  }
+  size_t prepare_batch(std::vector<Job>& jobs) {
+    size_t tasks=0;
+    for(auto& job:jobs) {
+      if (!job.shape->bytes) {job.tasks=0;continue;}
+      job.tasks=std::max<size_t>(1,(job.shape->bytes+options.chunk_bytes-1)/options.chunk_bytes);
+      if(job.shape->offsets.size()!=1) job.tasks=std::min(job.tasks,job.shape->offsets.size());
+      tasks=add(tasks,job.tasks); stats.copy_bytes+=job.shape->bytes;
+    }
+    return tasks;
   }
   bool row_batch(std::vector<Job>& jobs,const std::vector<const void*>& sources,size_t rows,size_t stride) {
     if(!options.row_owned_copy || !rows || jobs.size()<2)return false;
@@ -306,6 +310,9 @@ struct Plan::State {
   size_t descriptor_id=0, required=0, largest=0;
   bool relay=false;
   size_t interleaved_rows=0,interleaved_stride=0;
+  size_t team_tasks=0;
+  uint64_t team_epoch=0;
+  bool team_rows=false;
   std::vector<int> copy_levels;
   explicit State(std::shared_ptr<Communicator> comm, Specification value):owner(std::move(comm)),spec(std::move(value)) {
     copy_levels=spec.copy_levels.empty()?owner->state_->options.copy_levels:spec.copy_levels;
@@ -463,95 +470,151 @@ void Plan::consume(const void* const* inputs,const Consumer& consumer) {
     throw std::invalid_argument("a borrowed consumer requires AllGather and a callback");
   execute_impl(nullptr,inputs,&consumer);
 }
-void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Consumer* consumer) {
+const VecopsThreadPoolV1* Plan::thread_pool()const noexcept{return state_->owner->state_->executor;}
+uint32_t Plan::workers()const noexcept{return state_->owner->state_->options.threads;}
+void Plan::execute_on_team(void* const* outputs,const void* const* inputs,
+    const VecopsTeamContextV1& team,const TeamConsumer* consumer) {
+  if(!team.worker_count || team.worker_id>=team.worker_count || (team.worker_count>1 && !team.barrier))
+    throw std::invalid_argument("invalid resident communication team");
+  if(consumer && (state_->spec.operation!=Operation::AllGather || !*consumer))
+    throw std::invalid_argument("a team consumer requires AllGather and a callback");
+  execute_impl(outputs,inputs,nullptr,&team,consumer);
+}
+void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Consumer* consumer,
+    const VecopsTeamContextV1* team,const TeamConsumer* team_consumer) {
   auto& p=*state_; auto& c=*p.owner->state_;
-  std::lock_guard lock(c.mutex);
+  const uint32_t lane=team?team->worker_id:0;
+  const bool borrowed=consumer || team_consumer;
+  const auto op=p.spec.operation; const int rank=c.rank,size=c.size;
+  auto* own=c.peers[rank].header;
+  std::unique_lock lock(c.mutex,std::defer_lock);
+  auto sync=[&] {
+    if(team && team->worker_count>1) {
+      char message[256]{};VecopsError error{sizeof(VecopsError),0,message,sizeof(message),0};
+      if(team->barrier(team->context,&error))throw std::runtime_error(message[0]?message:"communication team cancelled");
+    }
+  };
+  // Protocol work is a one-lane action in the SAME resident submission. Other
+  // lanes wait on the local generation, never all polling remote cache lines.
+  auto control=[&](auto&& work){if(lane==0)work();sync();};
+  auto prepare_copy=[&]{if(team)p.team_tasks=c.prepare_batch(p.jobs);};
+  auto copy=[&] {
+    if(!team){c.batch(p.jobs);return;}
+    const uint32_t lanes=std::min<size_t>({c.options.threads,team->worker_count,p.team_tasks});
+    if(lane<lanes){Batch b{&p.jobs,p.team_tasks,c.copy};Batch::work(&b,lane,lanes);}
+    sync();
+  };
   try {
-    const auto op=p.spec.operation; const int rank=c.rank,size=c.size;
-    auto* own=c.peers[rank].header;
-    if(load(&own->aborted)) throw std::runtime_error("vecops communicator is aborted");
-    c.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(c.options.timeout_ms);
-    const uint64_t epoch=++c.epoch;
-    for(auto& peer:c.peers) c.wait(&peer.header->done,epoch-1);
-    c.reserve(p.required);
-    const auto* local=descriptor(own,p.descriptor_id);
-    own->descriptor=p.descriptor_id;
-    store(&own->arrived,epoch);
-    for(auto& peer:c.peers) c.wait(&peer.header->arrived,epoch);
-    for(int peer=0;peer<size;++peer) {
-      const auto* h=c.peers[peer].header;
-      if(p.validated_descriptors[peer]!=h->descriptor) {
-        const auto* remote=descriptor(c.peers[peer].header,h->descriptor);
-        if(remote->operation!=local->operation || remote->root!=local->root || remote->element_type!=local->element_type || remote->route!=local->route ||
-           remote->sends[rank]!=local->receives[peer] || local->sends[peer]!=remote->receives[rank])
-          throw std::runtime_error("vecops collective sequence/count mismatch");
-        size_t offset=0;for(int source=0;source<rank;++source)offset=add(offset,remote->receives[source]);
-        p.remote_inbox_offsets[peer]=offset;
-        p.validated_descriptors[peer]=h->descriptor;
-      }
-      c.peers[peer].map_data(mul(load(&h->capacity),size+1));
-    }
-    p.jobs.clear();
-    if(op==Operation::AllToAll) {
+    control([&] {
+      lock.lock();
+      if(load(&own->aborted)) throw std::runtime_error("vecops communicator is aborted");
+      c.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(c.options.timeout_ms);
+      p.team_epoch=++c.epoch;
+      for(auto& peer:c.peers)c.wait(&peer.header->done,p.team_epoch-1);
+      c.reserve(p.required);
+      const auto* local=descriptor(own,p.descriptor_id);
+      own->descriptor=p.descriptor_id;
+      store(&own->arrived,p.team_epoch);
+      for(auto& peer:c.peers)c.wait(&peer.header->arrived,p.team_epoch);
       for(int peer=0;peer<size;++peer) {
-        p.jobs.push_back({&p.inputs[peer],static_cast<const char*>(inputs[peer]),c.peers[peer].data+p.remote_inbox_offsets[peer],true,0});
+        const auto* h=c.peers[peer].header;
+        if(p.validated_descriptors[peer]!=h->descriptor) {
+          const auto* remote=descriptor(c.peers[peer].header,h->descriptor);
+          if(remote->operation!=local->operation || remote->root!=local->root || remote->element_type!=local->element_type || remote->route!=local->route ||
+             remote->sends[rank]!=local->receives[peer] || local->sends[peer]!=remote->receives[rank])
+            throw std::runtime_error("vecops collective sequence/count mismatch");
+          size_t offset=0;for(int source=0;source<rank;++source)offset=add(offset,remote->receives[source]);
+          p.remote_inbox_offsets[peer]=offset;p.validated_descriptors[peer]=h->descriptor;
+        }
+        c.peers[peer].map_data(mul(load(&h->capacity),size+1));
       }
-    } else if(op!=Operation::Barrier && (op!=Operation::Broadcast || rank==p.spec.root)) {
-      p.jobs.push_back({&p.inputs[0],static_cast<const char*>(inputs[0]),c.peers[rank].data,true,0});
-    }
-    c.batch(p.jobs);store(&own->ready,epoch);
-    for(auto& peer:c.peers)c.wait(&peer.header->ready,epoch);
-    std::iota(p.origins.begin(),p.origins.end(),0);std::fill(p.replicas.begin(),p.replicas.end(),0);
-    p.relay=op==Operation::AllGather && c.options.relay && p.largest>=c.options.relay_threshold;
+      p.jobs.clear();
+      if(op==Operation::AllToAll) {
+        for(int peer=0;peer<size;++peer)
+          p.jobs.push_back({&p.inputs[peer],static_cast<const char*>(inputs[peer]),c.peers[peer].data+p.remote_inbox_offsets[peer],true,0});
+      } else if(op!=Operation::Barrier && (op!=Operation::Broadcast || rank==p.spec.root))
+        p.jobs.push_back({&p.inputs[0],static_cast<const char*>(inputs[0]),c.peers[rank].data,true,0});
+      prepare_copy();
+    });
+    copy();
+    control([&] {
+      store(&own->ready,p.team_epoch);
+      for(auto& peer:c.peers)c.wait(&peer.header->ready,p.team_epoch);
+      std::iota(p.origins.begin(),p.origins.end(),0);std::fill(p.replicas.begin(),p.replicas.end(),0);
+      p.relay=op==Operation::AllGather && c.options.relay && p.largest>=c.options.relay_threshold;
+    });
     if(p.relay)for(size_t level=0;level<c.options.replica_levels.size();++level) {
       if(!p.copy_levels[level])continue;
-      const auto& groups=c.options.replica_levels[level];
-      int members=0;for(int r=0;r<size;++r)members+=groups[r]==groups[rank];
-      p.jobs.clear();
-      for(int source=0;source<size;++source) {
-        if(groups[source]==groups[rank])continue;
-        int target=source%members,rep=rank;
-        for(int r=0;r<size;++r)if(groups[r]==groups[rank] && target--==0){rep=r;break;}
-        const int origin=p.origins[source];
-        const char* from=c.peers[origin].data+(p.replicas[source]?(source+1)*load(&c.peers[origin].header->capacity):0);
-        char* to=c.peers[rep].data+(source+1)*load(&c.peers[rep].header->capacity);
-        if(rep==rank && from!=to)p.jobs.push_back({&p.relay_shapes[source],from,to,true,0});
-        p.origins[source]=rep;p.replicas[source]=1;
-      }
-      c.batch(p.jobs);store(&own->stages[level],epoch);
-      // A subsequent level may reuse a replica slot on the same rank. Join
-      // all readers before allowing that overwrite, including other groups.
-      for(auto& peer:c.peers)c.wait(&peer.header->stages[level],epoch);
-    }
-    p.jobs.clear();
-    if(op==Operation::AllGather) {
-      for(int source=0;source<size;++source) {
-        const char* base=c.peers[source].data;
-        if(p.replicas[source]) {
-          int replica=p.origins[source];
-          base=c.peers[replica].data+(source+1)*load(&c.peers[replica].header->capacity);
+      control([&] {
+        const auto& groups=c.options.replica_levels[level];
+        int members=0;for(int r=0;r<size;++r)members+=groups[r]==groups[rank];
+        p.jobs.clear();
+        for(int source=0;source<size;++source) {
+          if(groups[source]==groups[rank])continue;
+          int target=source%members,rep=rank;
+          for(int r=0;r<size;++r)if(groups[r]==groups[rank] && target--==0){rep=r;break;}
+          const int origin=p.origins[source];
+          const char* from=c.peers[origin].data+(p.replicas[source]?(source+1)*load(&c.peers[origin].header->capacity):0);
+          char* to=c.peers[rep].data+(source+1)*load(&c.peers[rep].header->capacity);
+          if(rep==rank && from!=to)p.jobs.push_back({&p.relay_shapes[source],from,to,true,0});
+          p.origins[source]=rep;p.replicas[source]=1;
         }
-        p.borrowed[source]=base;
-        if(!consumer)p.jobs.push_back({&p.outputs[source],base,static_cast<char*>(outputs[source]),false,0});
-      }
-    } else if(op==Operation::AllToAll) {
-      for(int source=0;source<size;++source)p.jobs.push_back({&p.outputs[source],c.peers[rank].data+p.receive_offsets[source],static_cast<char*>(outputs[source]),false,0});
-    } else if(op==Operation::Broadcast) {
-      p.jobs.push_back({&p.outputs[0],c.peers[p.spec.root].data,static_cast<char*>(outputs[0]),false,0});
-    } else if(op==Operation::SumFloat32) {
-      if(p.spec.outputs[0].element_bytes!=4 || (p.outputs[0].bytes && p.outputs[0].offsets.size()!=1))
-        throw std::invalid_argument("FP32 SUM requires contiguous float32 output");
-      auto* out=static_cast<float*>(outputs[0]);size_t count=p.outputs[0].bytes/4;
-      for(size_t i=0;i<count;++i){float sum=0;for(int r=0;r<size;++r)sum+=reinterpret_cast<const float*>(c.peers[r].data)[i];out[i]=sum;}
+        prepare_copy();
+      });
+      copy();
+      control([&] {
+        store(&own->stages[level],p.team_epoch);
+        // Includes readers in every group before a later level reuses a slot.
+        for(auto& peer:c.peers)c.wait(&peer.header->stages[level],p.team_epoch);
+      });
     }
-    if(consumer || !p.interleaved_rows ||
-       !c.row_batch(p.jobs,p.borrowed,p.interleaved_rows,p.interleaved_stride))
-      c.batch(p.jobs);
-    if(consumer) (*consumer)(p.borrowed.data(),p.borrowed.size());
-    if(load(&own->aborted))throw std::runtime_error("vecops communication cancelled");
-    store(&own->done,epoch);++c.stats.calls;
+    control([&] {
+      p.jobs.clear();p.team_rows=false;
+      if(op==Operation::AllGather) {
+        for(int source=0;source<size;++source) {
+          const char* base=c.peers[source].data;
+          if(p.replicas[source]) {
+            int replica=p.origins[source];
+            base=c.peers[replica].data+(source+1)*load(&c.peers[replica].header->capacity);
+          }
+          p.borrowed[source]=base;
+          if(!borrowed)p.jobs.push_back({&p.outputs[source],base,static_cast<char*>(outputs[source]),false,0});
+        }
+      } else if(op==Operation::AllToAll) {
+        for(int source=0;source<size;++source)p.jobs.push_back({&p.outputs[source],c.peers[rank].data+p.receive_offsets[source],static_cast<char*>(outputs[source]),false,0});
+      } else if(op==Operation::Broadcast)
+        p.jobs.push_back({&p.outputs[0],c.peers[p.spec.root].data,static_cast<char*>(outputs[0]),false,0});
+      if(team && !borrowed && p.interleaved_rows && c.options.row_owned_copy && p.jobs.size()>1) {
+        p.team_rows=true;const auto run=p.jobs.front().shape->run;
+        for(size_t peer=0;peer<p.jobs.size();++peer)
+          p.team_rows &= reinterpret_cast<uintptr_t>(p.jobs[peer].destination)==reinterpret_cast<uintptr_t>(p.jobs.front().destination)+peer*run;
+        if(p.team_rows){const auto bytes=mul(mul(p.interleaved_rows,run),p.jobs.size());c.stats.copy_bytes+=bytes;c.stats.row_copy_bytes+=bytes;++c.stats.row_copy_calls;}
+      }
+      if(!p.team_rows)prepare_copy();
+    });
+    if(op==Operation::SumFloat32) {
+      auto* out=static_cast<float*>(outputs[0]);const size_t count=p.outputs[0].bytes/4;
+      const auto lanes=team?std::min(team->worker_count,c.options.threads):1u;
+      if(lane<lanes)for(size_t i=count*lane/lanes;i<count*(lane+1)/lanes;++i) {
+        float sum=0;for(int r=0;r<size;++r)sum+=reinterpret_cast<const float*>(c.peers[r].data)[i];out[i]=sum;
+      }
+      sync();
+    } else if(team && p.team_rows) {
+      detail::CopyRows job{p.borrowed.data(),p.jobs.front().destination,p.jobs.size(),p.interleaved_rows,p.jobs.front().shape->run,p.interleaved_stride};
+      const auto lanes=std::min<size_t>({c.options.threads,team->worker_count,p.interleaved_rows});
+      if(lane<lanes)c.copy->rows(&job,lane,lanes);
+      sync();
+    } else if(team)copy();
+    else if(borrowed || !p.interleaved_rows || !c.row_batch(p.jobs,p.borrowed,p.interleaved_rows,p.interleaved_stride))c.batch(p.jobs);
+    if(consumer)(*consumer)(p.borrowed.data(),p.borrowed.size());
+    if(team_consumer){(*team_consumer)(p.borrowed.data(),p.borrowed.size(),*team);sync();}
+    control([&] {
+      if(load(&own->aborted))throw std::runtime_error("vecops communication cancelled");
+      store(&own->done,p.team_epoch);++c.stats.calls;
+    });
   }catch(...){p.owner->abort();throw;}
 }
+
 namespace {
 constexpr uint32_t max_slots=64;
 struct alignas(128) SlotControl {uint64_t ready=0,retired=0;};
