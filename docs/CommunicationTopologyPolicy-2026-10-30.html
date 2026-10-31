@@ -1,0 +1,214 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>vecops通信：分层策略、放置与带宽配置细化</title>
+<style>body{max-width:1080px;margin:40px auto;padding:0 26px 70px;font:16px/1.8 system-ui,sans-serif;color:#172837;background:#fafcfd}h1{font-size:31px;line-height:1.4}h2{margin-top:40px;border-top:1px solid #d5e0e8;padding-top:20px;font-size:23px}h3{font-size:19px}a{color:#176b73}table{width:100%;border-collapse:collapse;font-size:14px;margin:20px 0}th,td{border:1px solid #d5e0e8;padding:10px;vertical-align:top;text-align:left}th{background:#eaf0f4}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf1f5;padding:18px;font:13px/1.7 ui-monospace,monospace}code{font:0.88em ui-monospace,monospace}.note{border-left:4px solid #176b73;background:#edf6f6;padding:12px 18px}.muted{color:#536779}@media print{body{margin:0;background:white}h2,h3{break-after:avoid}}</style></head><body>
+<p class="muted">2026-10-30 · 对通信框架提案的策略与配置补充 · 拟议schema，尚未实现</p>
+<h1>逐层共享/复制、分布式落点与带宽模型</h1>
+<p class="note">推荐方案：任意深度的拓扑包含树；树之外有明确共享范围的容量资源；每个层级独立选择共享、复制与消费布局；跨层传输按chunk分配目的落点和发起lane。首版用资源总容量＋可选独占路径带宽，不要求用户填写完整并发曲线。</p>
+<p><a href="/home/renyz/project/vecops-neo/docs/CommunicationFrameworkDesign-2026-10-30.html">主设计文档</a>定义通信语义、Torch兼容、graph依赖和生命周期。本补充细化策略搜索与配置，不修改实现，也没有新增性能实验。</p>
+
+<section id="choices"><h2>1. 每个层级的选择可组合，副本落点是独立维度</h2>
+<p>“die间传一份，再die内传播”至少拆成四个维度：在哪些域生成额外副本、每份副本的物理片段放在哪些target、由哪个计算域执行push/pull、后继直接读/复制/pack。不要用一个hierarchical开关把它们绑死。</p>
+<table><thead><tr><th>组合</th><th>跨die行为</th><th>目的die内部行为</th></tr></thead><tbody>
+<tr><td>全局源端共享</td><td>不预复制；消费者实际读时穿过跨die路径。</td><td>读源端片段，或直接生成自有packed结果。</td></tr>
+<tr><td>die复制＋NUMA共享</td><td>每片数据在每个目的die只建立一份副本。</td><td>该die的NUMA共享这份分布式副本；没有完整本地副本的消费者仍付die内远端访问。</td></tr>
+<tr><td>die复制＋NUMA复制</td><td>同上。</td><td>再为每个消费NUMA建立本地副本，后续本地读。</td></tr>
+<tr><td>每NUMA直接复制</td><td>各NUMA直接从源die得到自己的副本，跨die可能重复传相同片段。</td><td>无需中继；适合作为简单基线，也可能因并发性或小消息更快。</td></tr>
+<tr><td>分层复制＋直接消费布局</td><td>按域建立适量副本。</td><td>从分片直接生成本地packed/转置结果，不建立完整普通布局副本。</td></tr>
+</tbody></table>
+<p>“某层共享”只是没有在该层边界预复制，不意味着没有跨边界流量。下层若决定本地物化而直接读取远端源，真实DAG可能退化为重复跨die复制，必须按实际数据流计费。某些片段也可保留源位置、另一些复制；小规模首版先限制到每个消息bucket一致的策略，避免搜索爆炸。</p>
+<p>将来跨socket同理：socket间共享，或每socket一份；在socket内部又可每die一份或共享；再在die内部选择NUMA副本。共享策略要求地址能力、只读/写权限和lease合法；任意组合不是跳过这些条件。</p>
+</section>
+
+<section id="placement"><h2>2. 不先聚集：每个source/chunk可直接写目的die的不同位置</h2>
+<p>目的die的“一份完整副本”是逻辑概念，可以由分布在四个HBM target上的片段组成。比如A0/A1/A2/A3分别把源片段写到B0/B1/B2/B3；各进程映射这些片段形成逻辑完整视图。不需要A端先聚合，也不需要B端单leader接收全部数据。</p>
+<p>等量输入、等能力target时，一一对应是简单候选；不存在必须匹配相同NUMA序号的硬件语义。数据量不等、部分NUMA无rank或容量不足时，按chunk拆开并轮转/加权分配；push执行器靠近source，pull执行器靠近destination，两者单独选。</p>
+<p>放置目标应平衡的是<strong>归一化的关键资源负载</strong>，而不仅是入口字节：</p>
+<pre>对每个候选落点j，估计新增：
+  写入/入口时间、后续读取/出口时间、域内转发时间、执行lane占用、容量。
+目标：尽量降低各资源上的 Σ需求 / 有效容量 的最大值，
+      并满足消费者关键路径与slot生命周期约束。
+
+同构情况下通常接近平均分片；异构情况下按有效容量和消费权重加权。
+“流量平均”也应限定同一时间窗口，不能只比较整轮累计字节。</pre>
+<p>die复制＋NUMA共享时，每块会被多个NUMA读，落点要同时计一次写入和多次远端服务；die复制＋NUMA复制时，还要计后续fan-out。均匀放置减少单HBM服务热点，但不能消除共享跨die cut的总容量限制。所有page位置在prepare完成；不在replay中轮换物理页，只轮转预建slot或执行顺序。</p>
+<p>为控制实现复杂度，首版可用容量受限的加权轮转/贪心落点：每加一个chunk，选使最大归一化负载增加最小的target；随后做少量交换改进。2–8个target无需通用最优多商品流求解器。对4+2等不对称组同样适用；证据不足时保留flat计划。</p>
+</section>
+
+<section id="tree"><h2>3. 支持任意深度包含树，但不把每层都当成必经中继</h2>
+<p>推荐软件内部支持通用Domain树，kind只是标签。典型为host→socket→die→NUMA；也可省略die，或增加cluster、cache group、device partition。未来host上层可以有network locality group。任意深度的树和递归遍历成本很低，不需要先写死两层再迁移。</p>
+<p>树回答“属于谁”，不完整回答“流量经过哪里”。新增显式Link/Fabric和容量资源作为补充：树可以生成默认候选路径，已知ring/mesh、直连、NIC亲和和共享cut用覆盖规则表达。hwloc也把距离/带宽矩阵作为层次结构之外的信息。</p>
+<p>内存挂在拥有/服务它的domain：DDR pool可挂die，HBM target挂NUMA。实际OS暴露的多个DDR NUMA节点仍各自保留target身份，pool把它们共同关联到一个controller资源；不能因为挂在die就合并掉OS页放置和容量，也不能为每个别名重复生成一份带宽。</p>
+<p>同样，“同socket不同die”的路径消耗die链路；“跨socket”的路径消耗inter-socket资源，但不应因树的祖先关系自动再扣一次不存在的die-link。路径包含哪些资源由拓扑路由规则决定，不能简单把所有祖先的带宽取min。</p>
+</section>
+
+<section id="cost"><h2>4. min带宽是有用的起点，但必须补上三项信息</h2>
+<p>对独占的一条长流，若源、目标、路径资源独立且每字节各消耗一次，吞吐上界可以用min(源可用速率、目标可用速率、路径容量)。用户提出的DDR A→DDR B正属于这个简化模型的候选。但这通常是上界，不能直接作为实测吞吐。</p>
+<table><thead><tr><th>缺失信息</th><th>为什么需要</th><th>最小补充</th></tr></thead><tbody>
+<tr><td>资源共享范围</td><td>四条流穿过同一128 GB/s cut，不能每条都分128；NUMA间150究竟是每对还是所有pair共享会改变结论。</td><td>每个容量资源有唯一ID，路径引用它。aggregate只建一个；per_pair显式展开，必须有证据。</td></tr>
+<tr><td>读/写字节计费与方向</td><td>同一DDR控制器内copy，搬运M通常至少读M＋写M；两个独立controller则各服务M。push/pull的发起带宽也不同。</td><td>资源声明计费口径；路径声明需求系数和方向。必要时加入独占路径实测上限。</td></tr>
+<tr><td>发起并行度和消息粒度</td><td>1核吃不满450 GB/s；小块、strided、短段与长流差别大，启动与尾部不能忽略。</td><td>可选solo profile按操作、worker数、大小/布局bucket定义，不强迫手写整条曲线。</td></tr>
+</tbody></table>
+<pre>资源r的容量 Cr，流f速率 xf，需求系数 arf：
+    Σf arf * xf ≤ Cr
+流的独占执行上限：
+    xf ≤ Bsolo(f, workers, size, layout)
+
+固定一阶段工作量Df时，资源服务时间下界：
+    max_r [ Σf arf * Df / Cr ]
+再结合启动、阶段依赖、计算干扰和尾部估计关键路径。
+这不是精确仿真；先用于排除明显拥塞的候选，再用实测校验相近方案。</pre>
+<p>例如copy在同一controller内读写M，若配置的是该controller读写合计C，需求为2M；不能再按M/C预测。跨两个独立controller，分别计读M、写M，互联再按其口径计M。写分配、RFO、cache复用可能改变物理流量，因此粗略系数只是模型；不能把应用copy读写总GB/s直接当链路payload GB/s。</p>
+<p>die内DDR→某HBM还可能受die内fabric、发起端带宽、读写混合特性限制，因此不总是min(DDR,HBM)。DDR→DDR也必须计两端可用能力。若两个方向共享容量，显式配置sum约束；若独立，配置两个有向资源。未知时不能默认独立；保守模型必须标注假设，且不能把未知带宽写成0或无限。</p>
+</section>
+
+<section id="bandwidth"><h2>5. 带宽数值分三层，不要求首版拟合完整曲线</h2>
+<table><thead><tr><th>层</th><th>内容</th><th>建议</th></tr></thead><tbody>
+<tr><td>基础配置，必需</td><td>拓扑、共享范围、每个瓶颈资源的有效总容量、计费口径；容量可未知。</td><td>先用少量可解释的固定值。优先使用可复现实测，规格值标记nominal，仅供粗排。</td></tr>
+<tr><td>路径校准，可选但重要</td><td>特定read/write/push/pull的独占吞吐、worker饱和点、启动延迟、真实stride/message bucket。</td><td>自动读取校准profile；未提供时保守估计或禁用收益不明确的自动优化。</td></tr>
+<tr><td>争用校准，后续可选</td><td>共享资源在不同并发数/混合方向的聚合吞吐、上下界和误差。</td><td>仅对关键路径补测，如1/2/4路；不做全机器全组合拟合。</td></tr>
+</tbody></table>
+<p>“独占流量＋满载流量”两个数字比一个数字好，但必须定义满载场景：几条流、每条多少worker、是否双向、内存类型/页大小、消息大小，以及结果是每流还是聚合。两点不自动确定中间曲线；不要无依据线性插值。</p>
+<p>最小实用模型是<strong>共享资源总容量＋每流独占路径上限</strong>。若观测聚合吞吐随并发显著变化，再添加按并发bucket的aggregate上限；那是对原资源约束的细化，不是额外再扣一次同样开销。</p>
+<p>设计应保留来源、条件和不确定度，但不要求用户手填所有字段。平台拓扑配置与机器校准profile分开：前者稳定易读，后者由benchmark生成并按allowed CPU、频率策略、页模式和机器标识匹配。x86改频等变化应使相应执行/路径校准失效，不能继续用旧solo数值判定收益。</p>
+</section>
+
+<section id="config"><h2>6. 配置格式建议：通用树、内存pool、资源、路径覆盖分开</h2>
+<p>以下为拟议TOML片段，不能直接作为当前vecops配置运行。Domain用parent表达任意深度；numa_nodes是把已发现CPU NUMA叶节点归入组的便捷写法，内部展开后仍是普通Domain。下面完整列出两socket/每socket两die的分组，只展示部分内存和链路条目。128/450仅演示规格值，非新的性能结论。</p>
+<pre>[topology]
+schema_version = 1
+discover = "auto"
+root = "host0"
+calibration = "machine-calibration.json"
+
+[[topology.domains]]
+id = "s0"
+kind = "socket"
+parent = "host0"
+
+[[topology.domains]]
+id = "s1"
+kind = "socket"
+parent = "host0"
+
+[[topology.domains]]
+id = "s0.d0"
+kind = "die"
+parent = "s0"
+numa_nodes = [0, 1, 2, 3]
+
+[[topology.domains]]
+id = "s0.d1"
+kind = "die"
+parent = "s0"
+numa_nodes = [4, 5, 6, 7]
+
+[[topology.domains]]
+id = "s1.d0"
+kind = "die"
+parent = "s1"
+numa_nodes = [8, 9, 10, 11]
+
+[[topology.domains]]
+id = "s1.d1"
+kind = "die"
+parent = "s1"
+numa_nodes = [12, 13, 14, 15]
+
+# os_nodes各自的容量/页归属保留，共享同一带宽资源。
+[[memory.pools]]
+id = "ddr.s0d0"
+owner = "s0.d0"
+kind = "dram"
+os_nodes = [0, 1, 2, 3]
+capacity = "discover"
+resource = "ddr-controller.s0d0"
+
+[[memory.pools]]
+id = "hbm.n0"
+owner = "numa:0"
+kind = "hbm"
+os_nodes = [16]
+capacity = "discover"
+resource = "hbm-port.n0"
+
+[[resources]]
+id = "ddr-controller.s0d0"
+kind = "memory"
+capacity_GBps = 128.0
+basis = "read_write_bytes"
+source = "nominal"
+
+[[resources]]
+id = "hbm-port.n0"
+kind = "memory"
+capacity_GBps = 450.0
+basis = "read_write_bytes"
+source = "nominal"
+
+# 一个ID表示共享cut，不给每对rank各生成128GB/s。
+# 这里仅演示“两方向合计”假设；真实方向语义须确认/校准。
+[[resources]]
+id = "die-cut.s0"
+kind = "fabric"
+capacity_GBps = 128.0
+basis = "payload_bytes"
+direction_model = "shared_total"
+source = "nominal"
+
+[[topology.links]]
+a = "s0.d0"
+b = "s0.d1"
+resource = "die-cut.s0"
+
+# inter-socket同样连接s0和s1，并引用一个或多个实测资源。
+# die内NUMA fabric也可声明：需明确aggregate还是per_pair，未知则留未知。
+# 校准文件另外保存solo push/pull、worker/size bucket和并发上限。
+
+[communication]
+policy = "auto"
+
+[[communication.levels]]
+domain_kind = "socket"
+replication = "auto"
+
+[[communication.levels]]
+domain_kind = "die"
+replication = "one_per_domain"   # 或none / auto
+placement = "balanced_shards"    # 不表示均匀页交织
+direction = "auto"
+
+[[communication.levels]]
+domain_kind = "numa"
+replication = "none"             # die复制＋NUMA共享
+consumer_layout = "auto"
+
+# 同一个kind出现多层或有多个实例时，可用domain id/路径精确匹配。
+# 设置numa层one_per_domain即变为die复制＋NUMA复制。
+# 设置die层none且numa层none即全局共享候选。
+# 普通Torch out契约不允许借用时，按计划物化或prepare报错。</pre>
+<p><code>balanced_shards</code>是逻辑片段的落点规划，不等于所有缓冲区都用MPOL_INTERLEAVE。OS页面放置在分配/prefault阶段落实并验证；残页和大页按能力处理。复用同一物理controller的多个pool必须引用同一resource，pool owner只是局部性，不自动新增独立带宽。</p>
+<p>为了保持简单，可提供平台preset或重复条目的模板展开；内部schema保持规范化ID和显式资源引用。不要求配置文件把运行时rank拓扑写死，rank placement由实际启动绑定得到。没有die层的平台可省略该层，针对kind=die的prefer规则无匹配则跳过。</p>
+</section>
+
+<section id="selection"><h2>7. 策略搜索保持有界，目标是端到端关键路径</h2>
+<ol>
+<li>由合法能力和输出契约过滤候选：能共享映射不等于允许暴露borrowed输出。</li>
+<li>按实际消费者分组，枚举少量复制层级：原始共享、每socket/每die/每NUMA副本，以及相邻两级组合；只生成有需求的副本。</li>
+<li>对每个策略选择分布式落点；同构输入先试对应映射、轮转、加权chunk分片，避免集中单leader。</li>
+<li>选择push/pull、参与lane和chunk大小；按资源总负载与消费者成本估计makespan，保留少数候选。</li>
+<li>对差距明显且证据覆盖的候选自动启用；接近或参数未知则prepare期小范围A/B或保持基线。各rank共同commit同一计划。</li>
+</ol>
+<p>性能证明是条件性的：可证明同一数据跨昂贵cut的逻辑重复量下降；不能证明更高的域内流量、更多副本、producer写出变慢和consumer远端读取一定能被抵消。优化目标计入通信后的使用，而不是只让collective计时变短。</p>
+<p>强制策略应独立覆盖层级复制、落点、方向和lane，不用一个mode编码所有组合。prefer失败给解释并fallback；require在prepare报错；资源容量、别名、lease及计数一致性约束不可被强制开关绕过。</p>
+</section>
+
+<section id="scope"><h2>8. 首版复杂度边界与验证</h2>
+<p>值得首版就做的：任意深度树、内存pool/controller分离、显式共享资源、每层复制选择、分片落点、简单resource-load模型、explain输出。这些会决定API和正确归因，后补代价大。</p>
+<p>可以后做的：完整mesh路由、每种混合负载的性能曲线、精确cache/coherence仿真、全局最优流量求解。首版用离线校准表和少量候选A/B即可，未知能力与容量保留unknown，避免虚假的精确数字。</p>
+<p>验证应分别覆盖2socket/单socket、无die层、3+1/4+2rank、大小不均片段、HBM不足、单direction/双direction竞争。测每target物理驻留、写入/服务字节、实际lane占用和端到端耗时；共享路径的流量会出现在消费者阶段，不能只数通信memcpy。每条资源和计量基准在explain中可追溯，防止同一controller算四遍或同一有效吞吐既当路径耗时又重复扣资源。</p>
+<p>依据：<a href="/home/renyz/project/vecops-neo/build/memory-bench/campaign-20261029/report/920f-4-socket1-report-zh.html">内存性能报告</a>、<a href="/home/renyz/project/af3-torchneo/docs/920f4_communication_memory_2026-10-30.html">通信归因报告</a>；拓扑参考<a href="https://www.open-mpi.org/projects/hwloc/doc/v2.10.0/a00342.php">hwloc distances/memory attributes</a>；页策略参考<a href="https://docs.kernel.org/admin-guide/mm/numa_memory_policy.html">Linux NUMA memory policy</a>。</p>
+</section>
+</body></html>

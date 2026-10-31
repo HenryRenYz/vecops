@@ -18,6 +18,7 @@ requires-python = ">=3.9"
 [project.optional-dependencies]
 numpy = ["numpy>=1.23"]
 torch = ["torch>=2.9"]
+communication = ["torch>=2.9", "tomli>=2; python_version<'3.11'"]
 test = [
   "numpy>=1.23",
   "pytest>=7",

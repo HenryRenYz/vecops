@@ -17,3 +17,6 @@ __pycache__/
 !/docs/internal/new-dsl-design.md
 /benchmarks/**/*AB.md
 /benchmarks/**/MatmulCoverage.md
+
+# Local profiling snapshots and raw measurements
+/benchmark-results/

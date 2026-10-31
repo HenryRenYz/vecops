@@ -31,12 +31,22 @@ option(VECOPS_ENABLE_OPENMP
        "Use OpenMP for vecops CPU parallel execution" ON)
 option(VECOPS_BUILD_COMPILER "Build the C++ kernel compiler" ON)
 option(VECOPS_BUILD_PYTHON "Build the optional Python extension" OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(_VECOPS_COMM_DEFAULT ON)
+else()
+    set(_VECOPS_COMM_DEFAULT OFF)
+endif()
+option(VECOPS_BUILD_COMMUNICATION "Build Linux coherent shared-memory collectives" ${_VECOPS_COMM_DEFAULT})
+if(VECOPS_BUILD_COMMUNICATION AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "vecops::comm currently requires Linux")
+endif()
+option(VECOPS_BUILD_NUMA_LOADER "Build the optional Linux/glibc LD_AUDIT NUMA loader" OFF)
 option(VECOPS_BUILD_TESTING "Build Vecops tests" OFF)
 option(VECOPS_BUILD_BENCHMARKS "Build Vecops benchmarks" OFF)
 set(VECOPS_BUILD_MEMORY "AUTO" CACHE STRING
     "Build heterogeneous-memory support: AUTO, ON, or OFF")
 set_property(CACHE VECOPS_BUILD_MEMORY PROPERTY STRINGS AUTO ON OFF)
-option(VECOPS_BUILD_MEMORY_TOOLS "Build vecops-memory-info" ON)
+option(VECOPS_BUILD_MEMORY_TOOLS "Build memory inspection and measurement tools" ON)
 if(NOT VECOPS_BUILD_MEMORY MATCHES "^(AUTO|ON|OFF)$")
     message(FATAL_ERROR "VECOPS_BUILD_MEMORY must be AUTO, ON, or OFF")
 endif()
@@ -49,6 +59,10 @@ if(VECOPS_BUILD_COMPILER AND NOT UNIX)
     message(FATAL_ERROR
         "The initial vecops C++ compiler implementation requires a POSIX host; "
         "configure with VECOPS_BUILD_COMPILER=OFF on other platforms")
+endif()
+
+if(VECOPS_BUILD_NUMA_LOADER)
+    add_subdirectory(tools/numa-loader)
 endif()
 
 include(cmake/VecopsMultiarchTargets.cmake)
@@ -89,6 +103,10 @@ if(TARGET vecops::memory AND VECOPS_BUILD_MEMORY_TOOLS)
     target_link_libraries(vecops-memory-info PRIVATE vecops::memory)
     install(TARGETS vecops-memory-info
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+
+if(VECOPS_BUILD_MEMORY_TOOLS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_subdirectory(tools/memory)
 endif()
 
 if(VECOPS_BUILD_PYTHON)
@@ -138,6 +156,18 @@ if(VECOPS_BUILD_PYTHON)
     install(FILES LICENSE THIRD_PARTY_NOTICES.md
         DESTINATION vecops/_sdk/share/licenses/vecops
         COMPONENT python)
+    install(FILES src/comm/Communication.cpp
+        DESTINATION vecops/distributed RENAME _core.cpp COMPONENT python)
+    install(FILES src/comm/Copy.cpp
+        DESTINATION vecops/distributed RENAME _copy.cpp COMPONENT python)
+    install(FILES src/comm/CopyDispatch.cpp
+        DESTINATION vecops/distributed RENAME _copy_dispatch.cpp COMPONENT python)
+    install(DIRECTORY configs/platforms/
+        DESTINATION vecops/_sdk/share/vecops/platforms COMPONENT python)
+    if(TARGET vecops_comm)
+        install(FILES "$<TARGET_FILE:vecops_comm>"
+            DESTINATION vecops/_sdk/lib COMPONENT python)
+    endif()
     install(DIRECTORY LICENSES/
         DESTINATION vecops/_sdk/share/licenses/vecops/LICENSES
         COMPONENT python)
@@ -173,6 +203,8 @@ if(VECOPS_BUILD_BENCHMARKS)
 endif()
 
 # ------------------------------- Installation --------------------------------
+install(DIRECTORY configs/platforms/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vecops/platforms")
 install(FILES LICENSE THIRD_PARTY_NOTICES.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/vecops")
 install(DIRECTORY LICENSES/
@@ -188,6 +220,9 @@ if(TARGET vecops_threadpool_openmp)
 endif()
 if(TARGET vecops_memory)
     list(APPEND _VECOPS_INSTALL_TARGETS vecops_memory)
+endif()
+if(TARGET vecops_comm)
+    list(APPEND _VECOPS_INSTALL_TARGETS vecops_comm)
 endif()
 install(
     TARGETS ${_VECOPS_INSTALL_TARGETS}

@@ -1,0 +1,246 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>vecops CPU 通信框架设计提案 · 2026-10-30</title>
+<style>
+:root{color-scheme:light;--ink:#172837;--muted:#536779;--line:#d5e0e8;--accent:#176b73}
+body{max-width:1100px;margin:40px auto;padding:0 26px 70px;font:16px/1.8 system-ui,sans-serif;color:var(--ink);background:#fafcfd}
+h1{font-size:32px;line-height:1.35}h2{font-size:24px;margin-top:44px;border-top:1px solid var(--line);padding-top:22px}h3{font-size:19px;margin-top:26px}
+p,li{max-width:1000px}a{color:var(--accent)}.lead{font-size:19px}.note{border-left:4px solid var(--accent);padding:12px 18px;background:#edf6f6}.muted{color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:20px 0}th,td{border:1px solid var(--line);padding:10px 12px;vertical-align:top;text-align:left}th{background:#eaf0f4}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf1f5;padding:18px;border-radius:6px;font:13px/1.7 ui-monospace,monospace}code{font:0.88em ui-monospace,monospace}nav{display:flex;flex-wrap:wrap;gap:8px 20px}nav a{font-size:14px}
+@media print{body{margin:0;max-width:none;background:white}section{break-inside:auto}h2,h3{break-after:avoid}pre,table{font-size:11px}a{color:inherit}}
+</style></head><body>
+<header><p class="muted">设计提案 · 2026-10-30 · 尚未实现的新 API 均为示意</p>
+<h1>vecops CPU 通信框架：拓扑、共享存储与 graph 协同</h1>
+<p class="lead">建议建立独立于 Kutacc/KUPL 的 <code>vecops::comm</code>，以“通信语义 + 存储契约 + 任务依赖”为核心。标准 Torch 后端负责兼容；prepared graph 路径将通信、生产者和消费者一起规划，才能获得完整的零拷贝、一次 packing 和低派发成本。</p>
+<p class="note">首版聚焦同机、缓存一致的 Linux CPU 多进程推理。拓扑模型和传输接口预留多机、加速器，但不把 GPU 内存当成普通 CPU 共享内存。AF3 保留数学上的 shard/reshard/collective 声明；硬件节点、线程、协议、relay 和页映射均进入 vecops 与部署配置。</p>
+<p>策略细化见<a href="/home/renyz/project/vecops-neo/docs/CommunicationTopologyPolicy-2026-10-30.html">逐层共享/复制、分布式落点与带宽配置补充</a>：明确区分跨die策略与die内NUMA策略，补充无集中leader的均衡落点、任意深度Domain树和最小实用带宽模型。</p>
+<nav><a href="#evidence">测量依据</a><a href="#control">同步</a><a href="#topology">拓扑</a><a href="#storage">共享存储</a><a href="#gather">AllGather</a><a href="#alltoall">AllToAll</a><a href="#graph">Graph</a><a href="#policy">自动策略</a><a href="#api">API</a><a href="#asymmetry">非对称</a><a href="#af3">AF3迁移</a><a href="#stages">落地与验收</a></nav></header>
+
+<section id="evidence"><h2>1. 证据、收益方向和设计边界</h2>
+<p>本提案复用已完成的模型 profiling 与内存测量，没有新增模型 benchmark。模型使用 socket0，内存报告主体使用 socket1；跨 socket、工作集、页大小的数字只用于方向判断，不能直接当作同输入性能上限。</p>
+<table><thead><tr><th>实测事实</th><th>设计含义</th></tr></thead><tbody>
+<tr><td>740aa direct 81.22 s，die 内中继 75.60 s；Evoformer 54.54→48.90 s。</td><td>拓扑感知路径已有整模收益证据。先实现可复现的分层通信，再争取融合。</td></tr>
+<tr><td>740aa rank4 copy相关 10.53 s，其中提交至首次工作 0.70 s，完成收集 1.06 s；共19,108批copy。</td><td>通信需要复用native执行资源和批量任务，不能再建一个每批全唤醒、全停车的独立大池。</td></tr>
+<tr><td>socket1 四NUMA基础页HBM，148核stream只读：各组本地绑定1736.38 GB/s，页交织714.62 GB/s。</td><td>共享/交织并不等于更快。该实验每组仍是私有数组，不等同于提案A；但明确证明远端访问成本不能忽略。</td></tr>
+<tr><td>socket1 长流copy，源端push优于目标端pull；但socket0 18 MiB校准中方向排序可反转。</td><td>模型必须区分读、写、copy、消息大小和并发度，不能只有一个NUMA距离值。</td></tr>
+<tr><td>当前denoiser DP组大小1，没有每步跨rank collective；共享缓存约540 MiB落DDR并进入199次steady。</td><td>通信库优先改善Evoformer；不能承诺仅靠换库就大幅加速当前diffusion。统一内存预算也要覆盖图的持久缓存。</td></tr>
+</tbody></table>
+<p>核心独立构建为 <code>libvecops_comm</code>，不依赖 Torch/Kutacc/KUPL；Torch 适配单独构建并固定兼容版本。首版支持 AllGather/AllGatherV、AllToAll/AllToAllV、Broadcast、Barrier 和 FP32 SUM AllReduce；训练/autograd、稀疏collective及完整DDP兼容另列里程碑。纯搬运保持逐位语义；规约需声明确定性顺序，不能把不同树形浮点SUM称为逐位等价。</p>
+</section>
+
+<section id="control"><h2>2. 当前Kutacc怎么同步，新框架应改变什么</h2>
+<p>当前compact255归档实现已经是共享控制区上的原子协议。每rank有 published、validated、payload、relay、inbox_ready、completed 等sequence；发布使用release，等待使用acquire load。主路径依次等上一操作全局完成、发布描述符、等全员发布、校验、等全员校验，再搬运并发布完成。等待循环使用ARM <code>yield</code>/x86 <code>pause</code>，每1024轮调用线程yield并检查超时；失败状态还逐peer扫描。它不是依靠跨进程mutex完成每次握手。</p>
+<p>进程内队列和CopyPool仍有mutex/条件变量，SYNC由caller推进payload。因此“采用原子自旋”本身不是新收益；真正可改的是减少热期描述符构建、全员校验、全局前序完成依赖，以及小批次copy派发。</p>
+<h3>控制协议建议</h3>
+<ul>
+<li><strong>按region/slot/chunk建依赖</strong>：prepared计划一次核对schema、counts、布局、组成员与协议版本；replay只推进epoch和必要的ready/credit。上一操作完成约束改为实际冲突缓冲区的重用约束。不能在未证明生命周期前删除原屏障。</li>
+<li><strong>单写者sequence</strong>：优先每生产者独立ready、每消费者独立ack，或分层汇聚；不让所有rank对同一个跨die原子变量fetch_add。计数器按硬件破坏性共享粒度隔离，控制页与大payload分开。</li>
+<li><strong>短自旋、长等待可停车</strong>：独占核且短临界路径可active spin；其他情况采用时间预算和退避，必要时shared futex。64位epoch防ABA，32位doorbell负责停车/唤醒；采用检查—登记—复查协议避免丢唤醒，跨进程不能用FUTEX_PRIVATE。</li>
+<li><strong>明确架构契约</strong>：Linux一致性共享内存、自然对齐且真正lock-free的原子。使用受支持的原子ABI，检查不能悄悄降级为进程私有锁。普通payload stores经任务完成汇聚后release发布；NT stores由各worker执行所需drain/fence，再允许发布ready。</li>
+<li><strong>故障可终止</strong>：comm_generation、epoch和slot代号必须匹配；聚合错误状态与低频watchdog避免每次poll扫描全员。peer退出、超时、取消要唤醒等待者并终止相关计划。错误返回不代表另一进程已停止写，必须在quiesce或整个comm销毁后回收区域。</li>
+</ul>
+<p>Futex只作为长等待后备，不进入已就绪快路径。大规模组可采用树形/dissemination同步；8 rank也不应为了“层次化”无条件多加屏障，需比较控制延迟。</p>
+</section>
+
+<section id="topology"><h2>3. 拓扑是带共享资源约束的有向图，不是固定socket→die→NUMA树</h2>
+<p>复用现有 <code>memory::TopologySnapshot</code> 的CPU initiator、MemoryTarget、容量、带宽/延迟路径；增加带宽共享、存储可共享性和传输能力。物理包含关系可用树表达，但流量竞争必须用图及共享资源组表达。</p>
+<table><thead><tr><th>实体</th><th>关键字段</th><th>作用</th></tr></thead><tbody>
+<tr><td>ComputeDomain</td><td>CPU集合/设备标识、可用执行lane、绑定与allowed mask</td><td>选择实际发起搬运和计算的位置；rank只是映射到domain的逻辑端点。</td></tr>
+<tr><td>MemoryTarget</td><td>HBM/DDR/CXL等kind、容量、页粒度、export/import能力</td><td>“fast”相对initiator和访问模式，不是全局属性。</td></tr>
+<tr><td>AccessPath</td><td>initiator、source、destination、操作/stride/message bucket、worker数、实测成本</td><td>copy是发起位置+源+目标的三元成本；一张CPU→内存距离矩阵不够。</td></tr>
+<tr><td>SharedResource</td><td>DDR控制器、互联cut、HBM端口、NIC、执行核；方向/并发容量约束</td><td>四个NUMA共享DDR不能被规划器算成四份独立带宽；双向链路是否独立也不能猜。</td></tr>
+<tr><td>LocalityGroup</td><td>成员domain、父级、发现来源、置信度</td><td>生成复制域和relay候选；允许组大小不等，也允许缺失die信息。</td></tr>
+<tr><td>Capability</td><td>shared-mapping、coherent-load/store、remote-atomic、P2P/RDMA、完成/可见性规则</td><td>决定哪些算法正确，而不是只决定快慢。</td></tr>
+</tbody></table>
+<p>920f-4的每die共享DDR控制器、每NUMA HBM和跨die cut分别建模，不在代码里写rank/4、NUMA+16或固定128/150 GB/s。hwloc/sysfs提供候选关系，配置补充OS未报告的分组，离线校准提供并发路径曲线。当前机器die_id未知，不把距离相近直接当成硬件事实。</p>
+<p>Xeon Max flat/SNC配置可呈现CPU域与独立HBM target；cache模式的HBM通常不能作为可分配target，应当作硬件管理层。Blackwell MLOPart说明compute分区、物理GPU和内存/访问权限的关系也不总是一对一。GPU插件可复用拓扑和计划概念，但页映射、原子scope和完成协议必须使用设备API；MLOPart/P2P可寻址不等于CPU memfd可映射，也不等于跨进程raw pointer通用。</p>
+<p>配置应有schema_version、平台/allowed-resource匹配、测量来源和校准有效期。手写关系优先修正发现信息；容量和合法能力仍要实际验证。当前MemorySystem预算是进程内统计；共享区域必须新增job级物理owner账本，物理页只记一次，另统计每进程映射和lease，不能每rank重复计费或完全漏计。</p>
+</section>
+
+<section id="storage"><h2>4. 共享存储先成为一等资源</h2>
+<p>新增 <code>SharedRegion</code>、<code>RegionSlice</code>、<code>SlotLease</code>、<code>DistributedValue</code>。跨进程交换的是region ID、generation、offset、长度、访问权与布局；各进程在prepare建立自己的local base/pointer table，绝不交换可直接解引用的另一进程虚拟地址。物理别名身份用region+offset，不能只看本地Tensor storage或VA。</p>
+<p>同机后端可用memfd/shared mmap，私有Unix域rendezvous传递FD并校验job成员；Torch Store只承担bootstrap/计划协商，不参与每chunk热期。prepare完成分配、定长、export/import、页放置、prefault和地址绑定，replay不做mmap/munmap/mbind/动态注册。普通Tensor不具备export能力时，先走显式copy；无法把任意malloc Tensor无代价变成其他进程可见的共享存储。</p>
+<p>共享对象的NUMA放置取决于后端和内核，不可仅对任意MAP_SHARED调用一次mbind就宣称成功。由owner在目标domain和受控mempolicy下prefault，支持时用共享策略，再查询实际页驻留。对普通页、THP和HugeTLB分别验收；大页可能跨逻辑分段，不能把单个物理页拆到两个NUMA。残页归属是性能选择，正确性依靠互不重叠的字节写权限与ready同步。</p>
+<p>slot状态至少区分：可写、生产完成、搬运/远端读取中、消费者完成、可重用。<strong>通信ready、API Work完成、消费者lease释放是三个不同事件。</strong>借用源存储直到计算完成，往往比一次通信持续更久；容量规划要按这段真实live range计算。普通Torch输出必须遵守原有可写性与生命周期，内部borrowed value只能在证明只读/别名安全时消除物化；逃逸、外部未知调用或in-place消费者前必须物化。</p>
+<p>跨进程写不会自动更新Torch本地version counter。不能把一个会被其他rank改写的普通Tensor伪装成无别名新值，更不能依赖Tensor析构或Python GC来决定跨rank缓冲区复用。</p>
+<p>标准c10d的Work完成后，调用者可按约定重用发送缓冲区；因此标准后端不能暗中让后续消费者继续借用该输入。零拷贝要么已经输出到独立、稳定的共享最终存储，要么只在拥有完整依赖信息的graph内部延长lease。若gather源lease跨过一个又要复用同槽的AllToAll，会形成依赖环；规划器必须分配独立slot、先生成自有packed结果再释放，或退回物化。</p>
+</section>
+
+<section id="gather"><h2>5. AllGather：四种布局策略可以组合</h2>
+<table><thead><tr><th>策略</th><th>行为</th><th>适用条件/代价</th></tr></thead><tbody>
+<tr><td>MaterializeLocal</td><td>每消费者获得本地完整输出；push/pull按路径选择。</td><td>通用Torch输出、重复使用、未知消费者；需要复制和本地容量。</td></tr>
+<tr><td>BorrowOwnerPlaced（提案A）</td><td>所有rank映射同一逻辑完整张量，生产者拥有对应片段的物理页并直接写入。</td><td>只读、少次访问、生命周期明确。已有私有输入仍需发布copy；只有生产者也写共享区域才消掉这一copy。</td></tr>
+<tr><td>ReplicateByDomain</td><td>每片数据跨昂贵cut一次，在目的locality域保留副本，再共享读取或继续本地分发。</td><td>重复跨die需求大；增加域内流量和副本容量，relay必须分片多lane避免单leader瓶颈。</td></tr>
+<tr><td>ConsumeToOwnedLayout</td><td>直接从共享分片/域内副本生成消费者的packed RHS、转置布局或其他自有工作区。</td><td>消除完整gather中间量与后续pack；计算反复复用自有packed结果，source lease可尽早释放。</td></tr>
+</tbody></table>
+<p>提案A可行：分段页面放在对应生产者NUMA，所有进程本地VA不同也能形成逻辑连续Tensor。段边界未对齐时，一个物理页只能选一个target，按访问权重决定；多个生产者写同页不同字节在同步正确时可行，但边界cache line存在false sharing。ragged片段若为对齐添加padding，必须在内部布局中表达，不能把padding泄漏到普通Tensor逻辑元素。</p>
+<p>但“一次使用”不是充分条件。四个消费者直接读取同一片远端数据，仍可能重复跨die；此时域内复制再读可能优于全局单份借用。新页交织测量也说明，即使省了一次copy，消费者速度下降仍可能更大。</p>
+<pre>同一消费者，远端有效字节 M，实际读入次数 q：
+T_local  ≈ T_materialize + q*M / B_local + 消费者其他时间
+T_borrow ≈ q*M / B_remote + 地址/同步/布局额外成本 + 消费者其他时间
+
+只有 T_materialize > q*M*(1/B_remote - 1/B_local) + 额外成本，
+且容量/别名/生命周期合法时，borrow才是候选。
+实际q是数据供给次数，不是图中算子个数；缓存和packing复用需要建模/实测。
+最终比较“生产者+通信+消费者”的关键路径，而非只比较collective耗时。</pre>
+<p>均匀2域、每域4rank时，直接跨域逻辑请求可被每目的域只复制一次降为原来的1/4；这不等于物理线字节精确降低75%，缓存一致性可能复用。一般G个目的域，片段s大小b_s、源域有n_s个消费者时：direct逻辑跨域量为 Σ b_s(P−n_s)，每域一次复制为 Σ b_s(G−1)。域内分发和复制计划需另算。与其把每die所有数据集中到一个leader，不如对source/chunk分配多个relay lane，保留负载均衡。</p>
+</section>
+
+<section id="alltoall"><h2>6. AllToAll：页重排和直接目标写入</h2>
+<p>将逻辑交换块表示为 <code>X[source,destination]</code>：生产者视图按destination排列，接收者视图按source排列。两个视图映射相同物理块，就能在预先规划的布局下消除通信阶段的payload memcpy。</p>
+<table><thead><tr><th>块的物理归属</th><th>生产阶段</th><th>消费阶段</th></tr></thead><tbody>
+<tr><td>SourcePlaced</td><td>生产者本地写。</td><td>消费者远端读；适合后续一次消费或直接pack。</td></tr>
+<tr><td>DestinationPlaced（提案B的优先候选）</td><td>生产者直接写目的NUMA的共享块。</td><td>消费者本地读；把搬运并入生产写出，省掉中间读+copy。</td></tr>
+<tr><td>DomainPlaced</td><td>按昂贵cut分批发送到目的域。</td><td>域内共享/分发，折中复制量和读局部性。</td></tr>
+</tbody></table>
+<p><strong>映射只改变虚拟地址排列，不会移动物理数据。</strong>要获得本地读，必须先把块放在destination target；生产者随后做的是远端写。写队列可以隐藏部分延迟，但不能消除HBM/互联流量；所有worker的写完成/可见性必须在ready发布前成立。生产算子的SME输出、残差、BF16舍入和连续store效率也可能受目标布局影响，必须端到端比较。</p>
+<p>页重排要求文件offset、映射边界和虚拟拼接边界满足OS页粒度，且要保持原始逻辑顺序。完整块对齐时在prepare拼装视图，replay只写/读，不现场重映射。只在自己预留的VA范围内进行固定映射；不得覆盖外部分配器区域。显式2 MiB大页不适合任意4 KiB颗粒重排，适合时用大页内部、普通页边界的混合策略。</p>
+<p>AF3的740 outgoing某些channel/peer片段为147456 B=36×4 KiB，具有页拼接候选条件；incoming每行片段192 B，无法仅靠4 KiB页映射变为普通连续输出。后者优先选择直接目的布局写出、segmented/pointer-table消费者、或融合pack。不能为192 B片段每块填充到4 KiB而不计21倍以上容量及TLB成本。</p>
+<p>固定等长块最容易完成transpose式虚拟拼接；AllToAllV支持不等长counts，但ragged边界、页内碎片、VMA数量和HugeTLB破坏可能让普通copy更好。可仅copy不对齐边界、映射大块内部；不能保证拼接后仿射布局时，用内部segmented value或显式物化。已有私有输入且不可改生产布局时，标准AllToAll仍必须真正搬运。</p>
+</section>
+
+<section id="graph"><h2>7. Graph联动：通信编译进任务图，而不是重放ProcessGroup包装</h2>
+<p>在现有framework-neutral IR、KernelPlan/Grid和C++ replay基础上扩展资源事件。当前KernelPlan的grid之间是保守全team依赖，不能声称已经支持任意通信流水；首版先用同步通信阶段和有界任务批次，后续新增异步region/chunk依赖。</p>
+<table><thead><tr><th>阶段</th><th>工作</th></tr></thead><tbody>
+<tr><td>Capture</td><td>记录AllGather/Reshard等语义、shape/stride/counts、输入/输出别名、实际消费者、ready粒度与副作用。fake/meta阶段不读取peer指针、不运行collective。</td></tr>
+<tr><td>Distributed prepare</td><td>交换各rank的语义描述，验证counts互相匹配；选择共同算法及lane/route；规划共享区域、缓存、副本和slot；分配/映射/注册/prefault，建立本地地址表和不可变计划。所有rank确认同一计划指纹后才commit。</td></tr>
+<tr><td>Replay</td><td>更新epoch和已声明的输入绑定；执行生产、publish、copy/read/pack、consume和release。prepared路径不创建每次Work/Tensor ticket、描述符vector或临时allocator资源。</td></tr>
+</tbody></table>
+<p>核心实体建议为 <code>CollectiveSpec → PreparedCollectivePlan → CollectiveInstance</code>：Spec与Plan不可变；Instance独占运行态、credit和epoch。稳定形状/地址是快路径契约，动态shape使用预先编译的bucket和上界；guard失配在所有rank开始此次操作前统一拒绝/选择fallback，不能某rank现场replan而其他rank继续replay。非重入首版简单可靠；并发replay须显式独立Instance/slot资源。</p>
+<p>事件至少包括 Produce、Publish、Transfer、Await、Consume、Release、Abort，并携带region范围、读写版本、comm/group、epoch与远端完成依赖。同步不可作为“无返回值节点”被DCE；物理页重映射形成的别名也必须进入分析。loop内部和loop边界都需要lease闭合证明。</p>
+<p>算子侧另需通用的布局能力注册：每参数的read/write区域、是否可分段寻址、可接受的packed布局、输出store布局和panel-ready边界。现有只接受连续Tensor的C++ kernel不能自动解引用segmented value；lowering应选择受支持的kernel变体或插入物化。AF3的kernel可声明“接受某种RHS布局/输出分块”，但不接触comm、NUMA编号或peer地址生命周期；将来DSL可由编译器生成同样的能力描述。</p>
+<h3>执行资源与前进保证</h3>
+<ul>
+<li><strong>同步协作模式先落地</strong>：native team直接执行预编译copy/pack任务，阶段完成后继续下一个计算kernel，避免另外35个copy helper与36个native worker同核争用。</li>
+<li><strong>异步模式两种合法实现</strong>：独立、显式预留的progress核/资源；或同一执行器内可让出lane的协作调度。预算不能暗中增加线程。</li>
+<li><strong>禁止前进死锁</strong>：consumer不能占住全部resident lanes自旋等待一个尚未调度的producer/copy任务。Await应成为调度依赖，使未就绪任务不占工作lane；无法做到时在通信边界结束active region或使用有独立前进保证的progress执行器。</li>
+<li><strong>跨peer访问要批量和分片</strong>：同一collective多peer/chunk形成少数任务批次，按真实payload和带宽饱和点选lane数；短消息只唤醒参与lane。无需整图所有worker始终全局锁步，也无需每个任务都由主线程发起。</li>
+</ul>
+<p>纯Torch eager可保留普通Work对象和必要检查；Torch graph下也可通过通用c10d后端兼容。最高性能路径应由vecops graph识别本库collective后lower到原生PreparedPlan，避开c10d热期包装。外部Gloo/NCCL不具备同类lowering时，保留c10d launch/wait和原语义。</p>
+</section>
+
+<section id="policy"><h2>8. 自动选择：先证明合法，再预测收益，最后实测验收</h2>
+<p>严格区分正确性证明与性能证据。可以证明某条路径少一次copy、某个cut少重复逻辑需求；不能仅凭拓扑证明整模必然更快。把q次消费、cache/TLB、生产写出效率、共享控制器和计算干扰都纳入成本。</p>
+<pre>候选计划p的近似成本：
+T(p) = 调度DAG的关键路径时间
+约束：每个shared resource的各stage需求 / 并发有效容量；
+      每个target容量、slot live range、lane数、访问合法性。
+
+阶段下界可看 max(Σ资源字节/B资源, worker执行成本, 依赖延迟)，
+但串行阶段仍需相加；额外copy量不是跨die字节；逻辑字节不是线速流量。
+
+自动启用门槛：合法性guards全部满足；保守成本区间显著优于fallback；
+             对对应bucket的prepare期A/B或可信离线校准支持该结论。
+否则保持已验证基线，并在explain中记录原因。</pre>
+<p>输入特征包括bytes、dtype、stride/segment大小、consumer布局/重用、生产者布局能力、rank placement、并发流、页大小、HBM余量和图内重叠。校准覆盖多路同时搬运，而非把单路径带宽乘rank数；同时测控制延迟和payload。共享机器上prepare不擅自做长时间饱和测试，可以读离线profile，缺失时保守选择。</p>
+<p>只有证明无未跟踪别名、消费者只读或具备独占写、源lease有效、布局受支持，才能消除物化；用户的reuse hint只影响成本，不替代正确性证明。opaque消费者按未知重用和未知副作用处理。hint错误至多造成变慢，不能造成数据错误。</p>
+<p>策略在prepare固定。运行中仅记录轻量统计，不能各rank独立切算法。需要重调优时在协同安全点创建新Plan、共同commit；某个fast path已开始写后发生故障，必须abort，不可单rank转普通collective补救。</p>
+</section>
+
+<section id="api"><h2>9. Torch兼容、干净声明与人工覆盖</h2>
+<p>提供两层入口，但共用一个语义和计划核心。标准入口注册 <code>backend="vecops"</code>，经目标Torch版本对应的c10d Backend/ProcessGroup适配，实现Work/Future/超时/子组。Torch的版本间扩展接口存在变化，适配器按版本构建验证，不要求框架中立核心跟随内部ABI。</p>
+<p>业务侧可选轻量facade处理hint；不向torch.distributed原函数塞不认识的kwargs，也不全局monkey-patch。facade在Gloo/NCCL上消费并忽略vecops策略hint，调用正常通信；真正语义约束仍然必须被所有后端遵守。</p>
+<pre># 以下是拟议API，不是当前已实现符号。
+import torch.distributed as dist
+import vecops.distributed as vd
+
+# 只在部署/启动代码选择后端、读取配置。
+dist.init_process_group(backend="vecops", pg_options=vd.Options.from_file(config))
+group = vd.group(dist.group.WORLD)  # 也可包裹Gloo/NCCL组
+
+# AF3保留数学声明，默认无需hint。
+global_rhs = group.all_gather(rhs, dim=-2)
+exchanged = group.reshard(x, source_axis=-2, target_axis=-3)
+
+# 可选性能hint只表述使用意图，不出现die/NUMA/线程。
+global_rhs = group.all_gather(
+    rhs, dim=-2,
+    hints=vd.Hints(reuse="once", tag="triangle_rhs"))
+
+# 普通Torch路径仍成立，既有out具有明确物化语义。
+dist.all_gather_into_tensor(out, local, group=dist.group.WORLD)</pre>
+<p><code>reuse="once"</code>是估计；只读/允许别名/借用到哪个事件属于StorageContract，必须由graph分析或显式高级API保证。默认facade返回遵守普通输出契约的值；graph内部可把中间值变为DistributedValue，在逃逸和不受支持消费者处物化。默认不能仅凭hint把普通可写Tensor改成远端借用视图。</p>
+<pre># 拟议部署配置片段；拓扑文件来自发现+校准，业务代码无节点号。
+[communication]
+backend = "vecops"
+topology_profile = "platform-profile.json"
+policy = "auto"
+progress = "cooperative"
+wait = "adaptive"
+memory_budget = "shared-with-vecops-memory"
+
+[[communication.rules]]
+match.op = "all_gather"
+match.min_bytes = 1048576
+algorithm = "hierarchical"
+replication = "auto"             # 由拓扑成本选择复制域
+direction = "auto"               # push/pull
+output_layout = "auto"
+mode = "prefer"
+
+[[communication.rules]]
+match.tag = "triangle_rhs"
+consumer_layout = "packed"
+materialization = "consume_to_owned"
+mode = "prefer"
+
+# 调试可以单独覆盖 algorithm/direction/placement/lane_count/chunk_bytes，
+# 不把这些互相独立的维度塞进一个含义模糊的“零拷贝模式”。</pre>
+<p>覆盖分两种：<code>prefer</code>不合法则按计划统一fallback并解释；<code>require</code>不合法在prepare报错，绝不静默伪装成功。即使require也不能跳过别名、页对齐或capacity校验。建议优先级：合法性约束 &gt; 管理员资源上限 &gt; 显式require &gt; 按op/tag的部署规则 &gt; call-site性能hint &gt; 自动成本选择。相互矛盾的require应报错；不支持vecops hint的外部后端统一忽略性能偏好并可一次性diagnostic，语义要求不忽略。</p>
+<p>提供 <code>plan.explain()</code> / JSON：选了什么、排除了什么、源/目标/发起位置、复制域、lane、内存owner与容量、页布局、consumer契约、校准依据与预测成本。提供force-flat/force-copy开关用于同进程A/B，以及prepare后禁用分配/映射的审计模式。</p>
+</section>
+
+<section id="asymmetry"><h2>10. 非对称进程分布与动态组</h2>
+<p>算法基于rank到domain的实际映射，不能假设每die四rank。每个组记录有序rank列表、每rank bytes、可用lane和目标容量；以destination域为单位批量处理实际traffic matrix。跨域字节分片按带宽和lane预算分配，物理位置相同的多个rank也需共享执行和HBM容量。</p>
+<p>3+1、4+2、同域多个rank、单rank、零长度rank都不改变语义；可以生成不均匀的分层计划。AllGatherV输出仍按原rank顺序拼接，内部padding不得泄漏；AllToAllV要求每对send/recv counts一致。inactive rank不应被错误加入计算子组或热循环屏障。</p>
+<p>首版可以仅为规则、等长分组验收分层算法；不均匀情况统一使用已支持任意成员数的flat segmented copy/ring。fallback发生在全员计划commit之前，不因局部探测失败产生不同collective次序。empty rank参与必要协议但不派payload工作；可明确剔除的子组在prepare一次建立。将来多机，同样先按host再按locality组织，不把rank全局编号当物理拓扑。</p>
+</section>
+
+<section id="af3"><h2>11. AF3的优先应用与迁移边界</h2>
+<table><thead><tr><th>模式</th><th>优先策略</th><th>业务侧变化</th></tr></thead><tbody>
+<tr><td>Triangle RHS AllGather→SME packing</td><td>die级复制+直接生成自有packed RHS；比较源端pack一次后分发。复用packed结果时，不让矩阵乘反复读远端原始分片。</td><td>保留AllGather/消费者语义，vecops注册kernel输入布局能力；移除AF3中的Kutacc peer-source判断和lease调用。</td></tr>
+<tr><td>Grid方向变换/Reshard</td><td>生产者写目的拥有的共享块；ready按panel发布，直接融合目标布局及必要residual操作。</td><td>保留Reshard声明；原ready counter格式、epoch、cancel逻辑迁入comm/graph。</td></tr>
+<tr><td>MSA/Outer/Single的Gather</td><td>按后继使用重用次数选择local materialize、domain shared或consume-to-layout；合并同阶段多个小gather控制与派发。</td><td>最多标注使用意图；不再检查SHM_FEATURES位。</td></tr>
+<tr><td>Diffusion SP/TP</td><td>SP KV gather按重复使用选择布局；TP SUM提供确定性/数值策略，后续可实现分层reduce-scatter+allgather。</td><td>使用通用Group；当前DP=1不凭空增加collective。</td></tr>
+<tr><td>权重广播/结果汇集/P2P</td><td>广播支持64位分段容量；最后汇集区分等采样和等搬运；首版缺P2P则显式使用Gloo辅助组。</td><td>初始化与数据依赖保留，硬件限制从AF3后端分支移入库。</td></tr>
+</tbody></table>
+<p>逐步将AF3中的Kutacc特性探测、ready控制、peer-pack胶水及图通信桥归入vecops适配层；AF3专有的矩阵数学和projection/residual kernel保留在AF3，通过通用layout/producer/consumer契约参与规划。通用通信库不应写死Triangle、N768、C128或AF3张量名字。</p>
+<p>不把完整AF3数学分布式并行策略都“藏”到通信库：算法选DP/SP/TP、谁拥有哪段逻辑数据属于模型并行声明；通信库负责在指定语义下选择硬件执行。这样既能隐藏CPU结构，也保留可理解的数值与任务边界。</p>
+</section>
+
+<section id="network"><h2>12. 多机预留：复用计划语义，替换传输能力</h2>
+<p>Transport接口以Buffer/Region descriptor、send/recv片段、completion/visibility事件和能力查询为边界，不以“能读取remote pointer”作为统一假设。同机SharedMemory transport可直接load/store；多机先加入独立TCP实现，再按需要接UCX/libfabric/RDMA插件，这不引入Kutacc/KUPL依赖。</p>
+<p>多机AllGather按host内聚合、跨host一次交换、host内分发；AllToAll按源/目的host合并，NIC选择和注册内存进入SharedResource预算。NIC内存注册、QP/连接、固定缓冲区和远端key在prepare完成。RDMA local completion与remote visibility不同，远端原子也有能力限制；跨机发布/ready必须由transport定义，不能拿CPU release/acquire直接替代。</p>
+<p>零拷贝借用仅对具备能力的locality生效。跨机可能需要复制到目的host的shared arena，但生产者/消费者仍只看到同一通信语义。首版保留unsupported能力的清晰错误或配置指定的其他后端，不宣称已经支持多机。</p>
+</section>
+
+<section id="stages"><h2>13. 落地顺序、验收标准与收益范围</h2>
+<ol>
+<li><strong>底座与参考实现</strong>：framework-neutral comm/types、bootstrap、shared regions、group、epoch/abort、flat copy算法、Torch适配；先通过单机2/4/8rank和x86/ARM正确性。加入plan explain及精确成本计数。</li>
+<li><strong>Prepared通信和原生池</strong>：将固定collective lower到直接任务计划，不走每次ProcessGroup包装；复用native资源、批量多peer任务和有界等待；证明零热期分配/映射及错误回收。</li>
+<li><strong>拓扑分层</strong>：实现共享资源图、die/domain复制、push/pull/worker/chunk联合选择；以740已有75.60 s relay结果作为应达到的参考，而非拿81.22 s作为唯一成功标准。107同时验收固定成本不退化。</li>
+<li><strong>消费者和生产者协同</strong>：先consume-to-owned-packed，再destination-written exchange；之后借用共享完整Tensor和页重排。这个顺序可先取得收益，避免首版就被通用跨进程别名和逃逸问题拖住。</li>
+<li><strong>高级流水/多机</strong>：按panel/chunk调度、独立前进保证、离线自动校准；再添加网络transport和跨host分层。</li>
+</ol>
+<p>功能矩阵覆盖world=1、非2幂、不同每域rank数、B=0/1/变化、AllGatherV/AllToAllV、尾块、非连续输入/输出、dtype、页边界、容量不足、并发子组、重复replay、取消、peer退出和超时。搬运应完整逐位比较；规约按选定数值契约验证。共享alias、source早释放和环形slot重用需要专门压力测试，不能只看最终一份结果。</p>
+<p>性能必须测producer+communication+consumer，分别报告：模型关键路径、协议ready等待/等计算到达、提交/唤醒、实际搬运worker包络、join、pack/materialize、消费变慢、HBM/DDR驻留与峰值、slot占用、主线程CPU/worker占用和尾部。等待与copy重叠部分不重复相加；逻辑字节、读写总字节和物理链路计数分列。以107/740/959、真实stride和并发流验证；959重点检查每NUMA容量和大页回退。</p>
+<p>已有测量支持740约75.60 s的中继参考；进一步通信派发/布局优化的工程目标约72–75 s，结合经过验证的热缓存放置可争取约70–74 s。107基线约20.48 s，通信侧空间主要为数百毫秒到约1 s。新框架本身未实现/测量，不保证改库自动达到这些数字；归约、流水或共享消费的额外收益须单独A/B。</p>
+</section>
+
+<section id="references"><h2>14. 源码与一手资料</h2>
+<ul>
+<li><a href="/home/renyz/project/vecops-neo/include/vecops/memory/Types.h">现有memory拓扑与预算类型</a>；<a href="/home/renyz/project/vecops-neo/include/vecops/memory/MemorySystem.h">MemorySystem</a>；<a href="/home/renyz/project/vecops-neo/include/vecops/execution/KernelPlan.h">KernelPlan</a>；<a href="/home/renyz/project/vecops-neo/python/vecops/graph/ir.py">graph IR</a>。</li>
+<li><a href="/home/renyz/project/af3-torchneo/benchmark-results/critical-path-20261029/runtime/collectives.cpp">实际Kutacc compact255归档源码</a>：ControlHeader、wait_for_previous_completion、wait_for_sequence与CopyPool；作为行为分析依据，新框架不复制其实现。</li>
+<li><a href="/home/renyz/project/af3-torchneo/docs/920f4_communication_memory_2026-10-30.html">AF3通信与内存归因报告</a>；<a href="/home/renyz/project/vecops-neo/build/memory-bench/campaign-20261029/report/920f-4-socket1-report-zh.html">最新内存报告（含10月30日页交织补充）</a>。</li>
+<li><a href="https://docs.pytorch.org/docs/main/distributed/custom_backends.html">PyTorch custom backends</a>：注册、后端与Work适配；应以实际目标版本头文件和测试为准。</li>
+<li><a href="https://www.open-mpi.org/projects/hwloc/doc/v2.10.0/a00342.php">hwloc distances与memory attributes</a>：层次之外的距离、initiator/target属性。</li>
+<li><a href="https://docs.kernel.org/admin-guide/mm/numa_memory_policy.html">Linux NUMA memory policy</a>；<a href="https://man7.org/linux/man-pages/man2/memfd_create.2.html">memfd</a>；<a href="https://man7.org/linux/man-pages/man2/futex.2.html">shared futex</a>：放置与跨进程等待规则。</li>
+<li><a href="https://www.intel.com/content/www/us/en/developer/articles/technical/xeon-scalable-processor-max-series.html">Intel Xeon Max技术说明</a>：flat/cache/HBM-only与SNC配置。</li>
+<li><a href="https://docs.nvidia.com/deploy/mps/595/when-to-use-mps.html">NVIDIA MPS/MLOPart</a>；<a href="https://developer.nvidia.com/blog/boost-gpu-memory-performance-with-no-code-changes-using-nvidia-cuda-mps/">MLOPart locality与P2P说明</a>：设备局部性与共享能力必须分开建模。</li>
+</ul>
+</section>
+</body></html>

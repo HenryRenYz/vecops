@@ -18,3 +18,13 @@ set_target_properties(vecops::optimize_for_kernels PROPERTIES
     INTERFACE_COMPILE_OPTIONS
         "$<$<COMPILE_LANGUAGE:CXX>:-falign-functions=64>;$<$<COMPILE_LANGUAGE:CXX>:-falign-loops=64>;$<$<COMPILE_LANGUAGE:CXX>:-fno-math-errno>"
 )
+
+if(EXISTS "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops_comm@CMAKE_STATIC_LIBRARY_SUFFIX@")
+    find_package(Threads REQUIRED)
+    add_library(vecops::comm STATIC IMPORTED)
+    set_target_properties(vecops::comm PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops_comm@CMAKE_STATIC_LIBRARY_SUFFIX@"
+        INTERFACE_COMPILE_FEATURES "cxx_std_20"
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include"
+        INTERFACE_LINK_LIBRARIES "Threads::Threads;rt")
+endif()

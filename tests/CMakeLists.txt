@@ -66,6 +66,8 @@ vecops_add_test(NAME WorkspaceContextTest FILES execution/WorkspaceContextTest.c
     FOLDER execution/workspace_context ARCH Scalar)
 vecops_add_test(NAME WorkspaceTensorTest FILES execution/WorkspaceTensorTest.cpp
     FOLDER execution/workspace_tensor ARCH Scalar)
+vecops_add_test(NAME KernelPlanTest FILES execution/KernelPlanTest.cpp
+    FOLDER execution/kernel_plan ARCH Scalar)
 if(TARGET vecops::memory)
     vecops_add_test(NAME MemorySystemTest FILES memory/MemorySystemTest.cpp
         FOLDER memory/system ARCH Scalar LIBRARIES vecops::memory)
@@ -440,3 +442,16 @@ vecops_add_test(
     ARCH Native)
 vecops_add_test(NAME VecRequestTest FILES vec/RequestTest.cpp
     FOLDER vec/request ARCH ${VEC_BASE_ARCH} LABELS vec)
+
+# Framework-neutral transport and bounded shared/page-alias lifetime checks.
+if(TARGET vecops::comm)
+    add_executable(VecopsCommunicationTest comm/CommunicationTest.cpp)
+    target_compile_features(VecopsCommunicationTest PRIVATE cxx_std_20)
+    target_link_libraries(VecopsCommunicationTest PRIVATE vecops::comm)
+    if(TARGET vecops_comm_copy_avx2)
+        target_compile_definitions(VecopsCommunicationTest PRIVATE VECOPS_TEST_COMM_COPY_AVX2=1)
+    endif()
+    set_target_properties(VecopsCommunicationTest PROPERTIES
+        CXX_EXTENSIONS OFF FOLDER communication)
+    add_test(NAME VecopsCommunicationTest COMMAND VecopsCommunicationTest)
+endif()
