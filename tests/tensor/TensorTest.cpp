@@ -2123,3 +2123,24 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
+
+TEST_F(TensorTest, CountedRangePreservesExtentAtRuntimeOrigin) {
+  using namespace vecops;
+  using namespace vecops::tensor;
+  float data[80]{};
+  auto tensor = make_tensor(data, make_shape(cint<10>, cint<8>));
+  nint_t origin = 3;
+  auto fixed = tensor(range_n(origin, cint<4>), range_n(2, cint<3>));
+  static_assert(decltype(fixed.template size<0>())::is_const);
+  static_assert(decltype(fixed.template size<1>())::value == 3);
+  EXPECT_EQ(fixed.template size<0>(), 4);
+  EXPECT_EQ(fixed.data(), data + 26);
+  EXPECT_EQ(fixed.stride(0), 8);
+  using Rows = meta::Dynamic<1, 1, 4>;
+  auto tail = tensor(range_n(origin, Rows{2}), reserve);
+  static_assert(meta::upper_bound_v<decltype(tail.template size<0>())> == 4);
+  EXPECT_EQ(tail.size(0), 2);
+  auto pattern = unbind(tensor)(range_n(origin, cint<4>), reserve);
+  static_assert(decltype(pattern.template size<0>())::value == 4);
+  EXPECT_EQ(pattern.element_offset(), origin * 8);
+}

@@ -684,6 +684,54 @@ TEST(AttentionTest, SparseFlashSupportsDifferentBlocksAndTailBlocks) {
     EXPECT_NEAR(out[i], expected[i], 3.0e-2f) << "index=" << i;
 }
 
+TEST(AttentionTest, CachedSparsePackingPreservesMaskedTailsAndDuplicateOrder) {
+  ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
+  constexpr nint_t Lq = 33, Lkv = 69, Dqk = 24, Dv = 19;
+  using Plain = ops::AttentionConfig<ops::MatmulConfig<TestAtom>, 32, 32,
+      ops::AttentionCausalMode::none, ops::SDPAStrategy::automatic,
+      vec::Accuracy::Estimate, false>;
+  using Cached = ops::AttentionConfig<ops::MatmulConfig<TestAtom>, 32, 32,
+      ops::AttentionCausalMode::none, ops::SDPAStrategy::automatic,
+      vec::Accuracy::Estimate, true>;
+  std::vector<bfloat16_t> q(Lq * Dqk), k(Lkv * Dqk), v(Lkv * Dv);
+  std::vector<float> bias(Lq * Lkv), plain(Lq * Dv), cached(Lq * Dv);
+  std::vector<uint8_t> qm(Lq, 1), km(Lkv, 1);
+  for (nint_t i = 0; i < Lq * Dqk; ++i)
+    q[i] = bfloat16_t(float((i * 3) % 17 - 8) / 8);
+  for (nint_t i = 0; i < Lkv * Dqk; ++i)
+    k[i] = bfloat16_t(float((i * 5) % 19 - 9) / 8);
+  for (nint_t i = 0; i < Lkv * Dv; ++i)
+    v[i] = bfloat16_t(float((i * 7) % 23 - 11) / 16);
+  for (nint_t i = 0; i < Lq * Lkv; ++i)
+    bias[i] = float((i * 11) % 29 - 14) / 8;
+  for (nint_t i = 0; i < Lq; i += 7) qm[i] = 0;
+  for (nint_t i = 0; i < Lkv; i += 5) km[i] = 0;
+  std::array<int32_t, 8> indices{0, 2, 2, -1, 1, 0, 2, -1};
+  auto qt = tensor::make_tensor(q.data(), tensor::make_shape(meta::Any{Lq}, meta::Any{Dqk}));
+  auto kt = tensor::make_tensor(k.data(), tensor::make_shape(meta::Any{Lkv}, meta::Any{Dqk}));
+  auto vt = tensor::make_tensor(v.data(), tensor::make_shape(meta::Any{Lkv}, meta::Any{Dv}));
+  auto bt = tensor::make_tensor(bias.data(), tensor::make_shape(meta::Any{Lq}, meta::Any{Lkv}));
+  auto qmt = tensor::make_tensor(qm.data(), tensor::make_shape(meta::Any{Lq}));
+  auto kmt = tensor::make_tensor(km.data(), tensor::make_shape(meta::Any{Lkv}));
+  auto it = tensor::make_tensor(indices.data(), tensor::make_shape(meta::cint<2>, meta::cint<4>));
+  auto run = [&](auto config, auto& values) {
+    auto out = tensor::make_tensor(values.data(), tensor::make_shape(meta::Any{Lq}, meta::Any{Dv}));
+    auto op = ops::sparse_flash_attention(config);
+    kernel::Workspace storage(op.required_workspace(qt, kt, vt, it, qmt, kmt, tensor::nullopt, bt, out));
+    auto workspace = storage.view();
+    op(workspace, qt, kt, vt, it, qmt, kmt, tensor::nullopt, bt, out, 0.25f);
+  };
+  run(Plain{}, plain);
+  run(Cached{}, cached);
+  for (nint_t row = 0; row < Lq; ++row) {
+    for (nint_t d = 0; d < Dv; ++d) {
+      const nint_t i = row * Dv + d;
+      EXPECT_EQ(cached[i], plain[i]) << "row=" << row << ", d=" << d;
+      if (!qm[row]) EXPECT_EQ(cached[i], 0.0f);
+    }
+  }
+}
+
 TEST(AttentionTest, SparseFlashPreservesDuplicateBlockMultiplicity) {
   ASSERT_TRUE(vecops::test::matmul::MatmulTestArchTraits::enable());
   constexpr nint_t Lq = 4;
@@ -1059,3 +1107,45 @@ TEST(AttentionTest, BottomRightCausalModeSupportsKvCacheAlignment) {
 #endif
 
 } // namespace
+
+TEST(AttentionMetadataTest, CompleteBlocksAndStaticRemaindersRemainConst) {
+  using namespace vecops;
+  auto check = []<nint_t Expected>(meta::Const<Expected>) { return Expected; };
+  EXPECT_EQ(ops::attention_details::with_block_extent<32>(meta::cint<768>, 32, check), 32);
+  EXPECT_EQ(ops::attention_details::with_block_extent<32>(meta::cint<7>, 0, check), 7);
+  EXPECT_EQ(ops::attention_details::with_block_extent<32>(meta::cint<67>, 64, check), 3);
+  using Length = meta::Dynamic<1, 1, 128>;
+  bool full_is_const = false, tail_is_bounded = false;
+  auto inspect = [&](auto extent) {
+    using E = decltype(extent);
+    if constexpr (E::is_const) full_is_const = E::value == 32;
+    else {
+      static_assert(meta::upper_bound_v<E> == 32);
+      tail_is_bounded = extent == 3;
+    }
+  };
+  ops::attention_details::with_block_extent<32>(Length{67}, 0, inspect);
+  ops::attention_details::with_block_extent<32>(Length{67}, 64, inspect);
+  EXPECT_TRUE(full_is_const);
+  EXPECT_TRUE(tail_is_bounded);
+}
+
+TEST(AttentionMetadataTest, ScratchQueryVisitsDistinctExtentTypesOnly) {
+  using namespace vecops;
+  int calls = 0;
+  auto query = [&](auto extent) -> nint_t {
+    ++calls;
+    return extent;
+  };
+  EXPECT_EQ(ops::attention_details::block_workspace_bound<32>(meta::cint<768>, query), 32);
+  EXPECT_EQ(calls, 1);
+  calls = 0;
+  EXPECT_EQ(ops::attention_details::block_workspace_bound<32>(meta::cint<67>, query), 32);
+  EXPECT_EQ(calls, 2);
+  using ShortLength = meta::Dynamic<1, 1, 16>;
+  ops::attention_details::with_block_extent<32>(ShortLength{13}, 0, [](auto extent) {
+    using E = decltype(extent);
+    static_assert(!E::is_const && meta::upper_bound_v<E> == 16);
+    EXPECT_EQ(extent, 13);
+  });
+}

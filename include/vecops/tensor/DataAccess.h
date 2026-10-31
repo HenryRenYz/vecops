@@ -2599,7 +2599,7 @@ private:
  * `NoTransform` enables direct fused MemoryType-to-Compute conversion.
  */
 template <typename Compute, typename Tensor, typename... Facts>
-  requires ((details::is_operand_fact_v<Facts>) && ...)
+  requires (TensorLike<Tensor> && (details::is_operand_fact_v<Facts> && ...))
 VECOPS_INLINE auto input(Tensor tensor, Facts... facts) {
   (details::validate_operand_fact(tensor, facts), ...);
   using Projection = CoordinateProjection<Tensor::Ndim, Tensor::Ndim>;
@@ -2619,7 +2619,7 @@ VECOPS_INLINE auto input(Tensor tensor, Facts... facts) {
  */
 template <typename Compute, typename Tensor, typename Transform,
           typename... Facts>
-  requires (!details::is_operand_fact_v<Transform> &&
+  requires (TensorLike<Tensor> && !details::is_operand_fact_v<Transform> &&
             (details::is_operand_fact_v<Facts> && ...))
 VECOPS_INLINE auto input(
     Tensor tensor, Transform&& transform, Facts... facts) {
@@ -2640,7 +2640,7 @@ VECOPS_INLINE auto input(
  * @note `tensor` must be writable; a Tensor created from `const T*` is rejected.
  */
 template <typename Compute, typename Tensor, typename... Facts>
-  requires (!std::is_const_v<typename Tensor::ElementType> &&
+  requires (TensorLike<Tensor> && !std::is_const_v<typename Tensor::ElementType> &&
             (details::is_operand_fact_v<Facts> && ...))
 VECOPS_INLINE auto output(Tensor tensor, Facts... facts) {
   (details::validate_operand_fact(tensor, facts), ...);
@@ -2661,7 +2661,7 @@ VECOPS_INLINE auto output(Tensor tensor, Facts... facts) {
  */
 template <typename Compute, typename Tensor, typename Transform,
           typename... Facts>
-  requires (!std::is_const_v<typename Tensor::ElementType> &&
+  requires (TensorLike<Tensor> && !std::is_const_v<typename Tensor::ElementType> &&
             !details::is_operand_fact_v<Transform> &&
             (details::is_operand_fact_v<Facts> && ...))
 VECOPS_INLINE auto output(
@@ -2814,6 +2814,20 @@ VECOPS_INLINE auto unbind(
  * the base of a previously sliced Tensor. Use the pointer overload of `bind`
  * when the pattern's accumulated element offset must be applied.
  */
+/** Construct a transformed planning Spec from its transform type alone.
+ * No execution address or transform closure is needed to declare scratch.
+ */
+template <typename Compute, UnboundTensorLike Pattern, typename Transform>
+VECOPS_INLINE auto input(Pattern pattern, TypeOnlyPatternMetadata<Transform>) {
+  return InputSpec<Compute, Pattern, Transform>{std::move(pattern), TypeOnlyPatternMetadata<Transform>{},
+                                               identity_projection<Pattern::Ndim>()};
+}
+template <typename Compute, UnboundTensorLike Pattern, typename Transform>
+VECOPS_INLINE auto output(Pattern pattern, TypeOnlyPatternMetadata<Transform>) {
+  return OutputSpec<Compute, Pattern, Transform>{std::move(pattern), TypeOnlyPatternMetadata<Transform>{},
+                                                identity_projection<Pattern::Ndim>()};
+}
+
 template <UnboundInputSpecLike Pattern, BoundTensorLike Actual>
   requires (Pattern::InputTensor::Ndim == Actual::Ndim &&
             std::same_as<

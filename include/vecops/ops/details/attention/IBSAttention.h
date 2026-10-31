@@ -61,6 +61,20 @@ public:
       , workspace_bytes_(workspace_bytes) {
     }
 
+    /** Bind sampling values without preparing or allocating again. These
+     * fields do not change the selected-block capacity or scratch topology.
+     * Validation remains part of the bound operation's existing contract.
+     */
+    [[nodiscard]] VECOPS_INLINE auto with_sampling(nint_t random_blocks, Score static_probability,
+                                                   Score random_probability, Score minimum_probability) const {
+      auto config = config_;
+      config.random_blocks = random_blocks;
+      config.static_probability = static_probability;
+      config.random_probability = random_probability;
+      config.minimum_probability = minimum_probability;
+      return PatternPrepared{std::move(config), scratch_, workspace_bytes_};
+    }
+
     template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K, tensor::OptionalInputOperandOf<1> QueryMask,
               tensor::OptionalInputOperandOf<1> KeyMask, tensor::OptionalInputOperandOf<2> AttentionMask,
               tensor::OptionalInputOperandOf<2> Bias, tensor::WritableTensorOf<int32_t, 2> IndexOutput,
@@ -93,9 +107,10 @@ public:
              (tensor::is_nullopt_v<QueryMask> || tensor::is_unbound_tensor_view_v<QueryMask>) &&
              (tensor::is_nullopt_v<KeyMask> || tensor::is_unbound_tensor_view_v<KeyMask>) &&
              (tensor::is_nullopt_v<AttentionMask> || tensor::is_unbound_tensor_view_v<AttentionMask>) &&
-             (tensor::is_nullopt_v<Bias> || tensor::is_unbound_tensor_view_v<Bias>) && IndexOutput::Ndim == 2 &&
-             WeightOutput::Ndim == 2 && std::same_as<typename IndexOutput::ElementType, int32_t> &&
-             std::same_as<typename WeightOutput::ElementType, Score>)
+             (tensor::is_nullopt_v<Bias> || tensor::is_unbound_tensor_view_v<Bias>) &&
+             std::remove_cvref_t<IndexOutput>::Ndim == 2 && std::remove_cvref_t<WeightOutput>::Ndim == 2 &&
+             std::same_as<typename std::remove_cvref_t<IndexOutput>::ElementType, int32_t> &&
+             std::same_as<typename std::remove_cvref_t<WeightOutput>::ElementType, Score>)
   VECOPS_INLINE auto prepare(WorkspaceAuthority& workspace, std::string_view site_name, Q&& q, K&& k,
                              QueryMask&& query_mask, KeyMask&& key_mask, AttentionMask&& attention_mask, Bias&& bias,
                              IndexOutput&& index_out, WeightOutput&& weight_out) const {
@@ -428,9 +443,8 @@ private:
               [&](auto block_tag, nint_t kj, auto active, auto& normalizer_v, const auto& maximum_v,
                   const auto& negative_infinity) VECOPS_INLINE_LAMBDA {
                 auto value = vec::load(block_tag, coarse + qi * tkv + kj, active, vec::opt::merge(negative_infinity));
-                auto probability = vec::exp_neg(
-                    block_tag, vec::sub(block_tag, value, maximum_v),
-                    vec::opt::math::accuracy<Config::exp_accuracy>, active, vec::opt::zero);
+                auto probability = vec::exp_neg(block_tag, vec::sub(block_tag, value, maximum_v),
+                                                vec::opt::math::accuracy<Config::exp_accuracy>, active, vec::opt::zero);
                 normalizer_v = vec::add(normalizer_v, probability);
                 vec::store(block_tag, coarse + qi * tkv + kj, probability, active);
               },
@@ -531,6 +545,19 @@ public:
       : config_(std::move(config))
       , scratch_(std::move(scratch))
       , workspace_bytes_(workspace_bytes) {
+    }
+
+    /** Change only sampling payloads; selected-block and scratch capacity stay
+     * fixed. The returned value borrows the same instance-owned worker scratch.
+     */
+    [[nodiscard]] VECOPS_INLINE auto with_sampling(nint_t random_blocks, Score static_probability,
+                                                   Score random_probability, Score minimum_probability) const {
+      auto config = config_;
+      config.random_blocks = random_blocks;
+      config.static_probability = static_probability;
+      config.random_probability = random_probability;
+      config.minimum_probability = minimum_probability;
+      return PatternPrepared{std::move(config), scratch_, workspace_bytes_};
     }
 
     template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K, tensor::InputOperandOf<2> V,

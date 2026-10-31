@@ -30,6 +30,62 @@ enum class CausalMode {
   bottom_right,
 };
 
+/** Invoke a block consumer with the strongest valid extent type.
+ * Complete blocks are Const<Block>, including runtime sequence lengths.
+ * Statically known single short blocks and remainders are Const as well;
+ * only runtime tails retain a bounded Dynamic. Workspace planners must visit
+ * both the first and last block so their type-dependent packing agrees with
+ * execution (a Dynamic query is not a capacity proof for a Const execution).
+ */
+template <nint_t Block, meta::ValueType Length, typename Fn>
+VECOPS_INLINE decltype(auto) with_block_extent(Length length, nint_t offset, Fn&& fn) {
+  static_assert(Block > 0);
+  VECOPS_ASSERT(offset >= 0 && offset < length && offset % Block == 0,
+                "attention block origin is out of bounds or unaligned");
+  using L = std::remove_cvref_t<Length>;
+  if constexpr (meta::is_singleton_v<L>) {
+    constexpr nint_t Size = meta::singleton_value_v<L>;
+    if constexpr (Size <= Block) {
+      return std::forward<Fn>(fn)(meta::Const<Size>{});
+    } else if constexpr (Size % Block == 0) {
+      return std::forward<Fn>(fn)(meta::Const<Block>{});
+    } else {
+      if (length - offset >= Block)
+        return std::forward<Fn>(fn)(meta::Const<Block>{});
+      return std::forward<Fn>(fn)(meta::Const<Size % Block>{});
+    }
+  } else {
+    const nint_t count = std::min<nint_t>(Block, length - offset);
+    constexpr nint_t Bound = [] {
+      if constexpr (meta::has_upper_bound_v<L>)
+        return std::min(Block, meta::upper_bound_v<L>);
+      else
+        return Block;
+    }();
+    if constexpr (Bound >= Block) {
+      if (count == Block)
+        return std::forward<Fn>(fn)(meta::Const<Block>{});
+    }
+    return std::forward<Fn>(fn)(meta::dyn<1, 1, Bound>(count));
+  }
+}
+
+/** Query each distinct full/tail extent without duplicating aligned work. */
+template <nint_t Block, meta::ValueType Length, typename Fn>
+VECOPS_INLINE nint_t block_workspace_bound(Length length, Fn&& fn) {
+  const nint_t first = with_block_extent<Block>(length, 0, fn);
+  using L = std::remove_cvref_t<Length>;
+  if constexpr (meta::is_singleton_v<L>) {
+    constexpr nint_t Size = meta::singleton_value_v<L>;
+    if constexpr (Size <= Block || Size % Block == 0)
+      return first;
+  }
+  if (length <= Block || length % Block == 0)
+    return first;
+  const nint_t last = (static_cast<nint_t>(length) - 1) / Block * Block;
+  return std::max(first, with_block_extent<Block>(length, last, fn));
+}
+
 template <typename Element, int Rank,
           tensor::TensorOf<Element, Rank> Buffer>
 VECOPS_INLINE void validate_contiguous_buffer(

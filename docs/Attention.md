@@ -47,6 +47,26 @@ semantics, subject only to floating-point reassociation.
 `[ceil_div(Lq,Bq), S]`. It owns neither IBS base maps nor weighted sampling;
 it simply applies the online-softmax recurrence to the selected K/V blocks.
 
+The final `AttentionConfig` template parameter, `CacheSparsePacks` (default
+`false`), enables reusable sparse operand packing. Q is packed once per query
+tile; K and transposed V panels are packed once per logical-head invocation.
+This avoids repacking the same operands for every selected block. The flag
+applies only to Sparse FlashAttention and streaming SDPA; materialized SDPA is
+unchanged. `required_workspace()` includes the Q tile, all K/V panels, and pack
+scratch. All buffers remain private to the invocation/lane, including shortened
+last query/key tiles. Probability rounding and selected-block order are preserved.
+Inputs and their access transforms must remain invariant during the invocation;
+the cached mode does not support transforms with per-query mutable side effects.
+Enable it where selected blocks are reused enough to offset initial packing and
+additional cache pressure.
+
+For 32×32 sparse tiles, score decoration completes before evaluating all row
+rescaling factors with vector `vec::exp_neg` calls. This removes one broadcast
+exponential per rescaled row. Selected-block order, each row's maximum/sum
+reduction order and BF16 probability conversion remain unchanged. Fully masked
+rows keep zero probabilities and a neutral output rescale; partial tiles retain
+the same bounds. Other block sizes use the general traversal.
+
 IBS Attention follows the two major phases in the SparseFold algorithm:
 
 1. `IBSAttentionIndexer` performs base index computation. It average-pools Q/K
@@ -142,3 +162,26 @@ The online recurrence follows
 [FlashAttention](https://arxiv.org/abs/2205.14135). Boolean keep masks and
 causal alignment follow
 [PyTorch SDPA](https://docs.pytorch.org/docs/main/generated/torch.nn.functional.scaled_dot_product_attention.html).
+
+### Attention block metadata and scratch planning
+
+Materialized SDPA and sparse/streaming attention dispatch complete blocks with
+`Const<Block>` extents. Static short sequences and static remainder blocks also
+retain Const extents. Runtime tails keep bounded Dynamic extents; selected sparse
+block counts and mask values remain runtime data. Q/K/V head widths retain their
+input layout metadata through packing and both matrix multiplications.
+
+Workspace sizing evaluates first and last blocks on both axes, including every
+full/tail type combination and cached-packing scratch. This is required because
+packing and workspace policies may differ between Const and Dynamic shapes.
+The change preserves traversal, duplicate-block order, optional transforms, and
+probability/accumulator rounding boundaries.
+
+For recordable C++ kernels, the pattern-prepared IBS indexer and attention
+objects expose `with_sampling(random_blocks, static_probability,
+random_probability, minimum_probability)`. It returns a lightweight bound
+configuration borrowing the instance's existing worker scratch. Sampling
+values may therefore change on every replay without preparing or allocating
+again. `selected_blocks` remains the fixed map/scratch capacity and cannot be
+changed through this method; its existing validity checks still apply.
+The returned object must not outlive the instance owning that scratch.

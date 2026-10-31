@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "vecops/ops/details/attention/SDPA.h"
+#include "vecops/ops/MatmulPack.h"
 
 namespace vecops::ops {
 
@@ -28,6 +29,16 @@ namespace vecops::ops {
  * CPU Matmul tiles and caller-owned workspace.
  * Both vector probabilities and scalar row-rescaling factors use vec::exp_neg
  * with Config::exp_accuracy and the vec module's subnormal-output policy.
+ * Config::cache_sparse_packs optionally packs Q once per query block and K/V
+ * once per invocation (one logical head). Scratch ownership is unchanged;
+ * packed tails keep their logical extents, and selected-block traversal and
+ * BF16 probability conversion points remain unchanged. required_workspace()
+ * includes all packed buffers and packing scratch. Disabled by default.
+ * For 32-by-32 blocks, independent row rescaling factors are evaluated in
+ * vectors after decorating the score tile. Selected-block order, row reduction
+ * order and probability conversion points remain unchanged; partial and fully
+ * masked rows follow the same recurrence. Other block sizes keep the scalar
+ * row-factor traversal.
  * The final selected-index map is an internal buffer: callers pass a
  * contiguous rank-two `tensor::Tensor` directly. InputSpec transforms and
  * DataAccess materialization are intentionally not accepted. IBS Attention
@@ -41,6 +52,10 @@ class SparseFlashAttention {
   using Atom = typename Config::Atom;
   using Score = typename Config::ScoreType;
   using Probability = typename Config::ProbabilityType;
+  static constexpr bool CacheSparsePacks = [] {
+    if constexpr (requires { Config::cache_sparse_packs; }) return Config::cache_sparse_packs;
+    else return false;
+  }();
   using MaskPolicy = tensor::InputAccessPolicy<
       0, 1, tensor::AccessPlan::direct>;
   using MatrixPolicy = tensor::InputAccessPolicy<
@@ -214,11 +229,7 @@ private:
     const auto lq = tensor::size<0>(q.input_layout());
     const auto lkv = tensor::size<0>(k.input_layout());
     const auto dv = tensor::size<1>(v.input_layout());
-    const nint_t rows = std::min<nint_t>(Config::query_block, lq);
-    const nint_t columns = std::min<nint_t>(Config::key_value_block, lkv);
-    const auto row_extent = meta::dyn<1, 1, Config::query_block>(rows);
-    const auto column_extent =
-        meta::dyn<1, 1, Config::key_value_block>(columns);
+    auto block_workspace = [&](auto row_extent, auto column_extent) -> nint_t {
     const auto dqk_extent = tensor::size<1>(q.input_layout());
     const auto dv_extent = tensor::size<1>(v.input_layout());
     auto q_block = tensor::narrow_view<0>(q, 0, row_extent);
@@ -257,7 +268,38 @@ private:
         tensor::required_workspace(
             bias, MatrixPolicy{}) +
         tensor::required_workspace(out, OutputPolicy{});
-    return persistent + std::max(qk_bytes, pv_bytes);
+    if constexpr (CacheSparsePacks) {
+      const auto q_layout = matmul::packed_layout<Atom, matmul::Operand::A>(
+          tensor::make_layout(tensor::make_shape(Config::query_block_extent, dqk_extent)));
+      const auto k_layout = matmul::packed_layout<Atom, matmul::Operand::B>(
+          tensor::make_layout(tensor::make_shape(Config::key_value_block_extent, dqk_extent)));
+      const auto v_layout = matmul::packed_layout<Atom, matmul::Operand::B>(
+          tensor::make_layout(tensor::make_shape(dv_extent, Config::key_value_block_extent)));
+      const nint_t blocks = ceil_div(lkv, static_cast<nint_t>(Config::key_value_block));
+      const nint_t cached = kernel::WorkspaceView::allocation_bytes<typename Atom::TA>(tensor::numel(q_layout))
+          + kernel::WorkspaceView::allocation_bytes<typename Atom::TB>(blocks * tensor::numel(k_layout))
+          + kernel::WorkspaceView::allocation_bytes<typename Atom::TB>(blocks * tensor::numel(v_layout));
+      auto q_packed = tensor::make_tensor(static_cast<typename Atom::TA*>(nullptr),
+          matmul::packed_layout<Atom, matmul::Operand::A>(q_block.input_layout()));
+      auto k_packed = tensor::make_tensor(static_cast<typename Atom::TB*>(nullptr),
+          matmul::packed_layout<Atom, matmul::Operand::B>(k_block.input_layout()));
+      auto v_packed = tensor::make_tensor(static_cast<typename Atom::TB*>(nullptr),
+          matmul::packed_layout<Atom, matmul::Operand::B>(v_transposed.input_layout()));
+      const auto pack_a = ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::A>{});
+      const auto pack_b = ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::B>{});
+      return persistent + cached + std::max({qk_bytes, pv_bytes,
+          pack_a.required_workspace(q_block, q_packed),
+          pack_b.required_workspace(k_block, k_packed),
+          pack_b.required_workspace(v_transposed, v_packed)});
+    } else return persistent + std::max(qk_bytes, pv_bytes);
+    };
+    return attention_details::block_workspace_bound<Config::query_block>(
+        lq, [&](auto row_extent) {
+          return attention_details::block_workspace_bound<Config::key_value_block>(
+              lkv, [&](auto column_extent) {
+                return block_workspace(row_extent, column_extent);
+              });
+        });
   }
 
   template <execution::ExecutionScope Scope,
@@ -311,6 +353,37 @@ private:
         bias, MatrixPolicy{}, workspace);
     auto output_access = tensor::bind(out, OutputPolicy{}, workspace);
 
+    typename Atom::TA* cached_q = nullptr;
+    typename Atom::TB* cached_k = nullptr;
+    typename Atom::TB* cached_v = nullptr;
+    nint_t k_capacity = 0, v_capacity = 0;
+    if constexpr (CacheSparsePacks) {
+      const auto q_layout = matmul::packed_layout<Atom, matmul::Operand::A>(
+          tensor::make_layout(tensor::make_shape(Config::query_block_extent, dqk)));
+      const auto k_layout = matmul::packed_layout<Atom, matmul::Operand::B>(
+          tensor::make_layout(tensor::make_shape(Config::key_value_block_extent, dqk)));
+      const auto v_layout = matmul::packed_layout<Atom, matmul::Operand::B>(
+          tensor::make_layout(tensor::make_shape(dv, Config::key_value_block_extent)));
+      k_capacity = tensor::numel(k_layout); v_capacity = tensor::numel(v_layout);
+      const nint_t blocks = ceil_div(lkv, static_cast<nint_t>(Config::key_value_block));
+      cached_q = workspace.template allocate_tensor<typename Atom::TA>(tensor::make_shape(meta::Any{tensor::numel(q_layout)})).data();
+      cached_k = workspace.template allocate_tensor<typename Atom::TB>(tensor::make_shape(meta::Any{blocks * k_capacity})).data();
+      cached_v = workspace.template allocate_tensor<typename Atom::TB>(tensor::make_shape(meta::Any{blocks * v_capacity})).data();
+      const auto pack_b = ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::B>{});
+      for (nint_t block = 0; block < blocks; ++block) {
+        const nint_t begin = block * Config::key_value_block;
+        attention_details::with_block_extent<Config::key_value_block>(
+            lkv, begin, [&](auto width) {
+        const auto kb = tensor::narrow_view<0>(k, begin, width);
+        const auto vb = tensor::transpose_view<0,1>(tensor::narrow_view<0>(v, begin, width));
+        auto kp = tensor::make_tensor(cached_k + block * k_capacity,
+            matmul::packed_layout<Atom, matmul::Operand::B>(kb.input_layout()));
+        auto vp = tensor::make_tensor(cached_v + block * v_capacity,
+            matmul::packed_layout<Atom, matmul::Operand::B>(vb.input_layout()));
+        pack_b(scope, kb, kp); pack_b(scope, vb, vp);
+        });
+      }
+    }
     const int32_t* index_data = index.data();
     tensor::with_optional_unordered_access(
           [&](auto uqm, auto ukm, auto uam, auto ubias) {
@@ -322,10 +395,19 @@ private:
                      ++block_row, begin += Config::query_block) {
                   const nint_t rows = std::min<nint_t>(
                       Config::query_block, lq - begin);
-                  const auto row_extent =
-                      meta::dyn<1, 1, Config::query_block>(rows);
+                  attention_details::with_block_extent<Config::query_block>(
+                      lq, begin, [&](auto row_extent) {
                   auto q_block = tensor::narrow_view<0>(
                       q, begin, row_extent);
+                  auto q_operand = [&] {
+                    if constexpr (CacheSparsePacks) {
+                      auto qp = tensor::make_tensor(cached_q,
+                          matmul::packed_layout<Atom, matmul::Operand::A>(q_block.input_layout()));
+                      auto pack_a = ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::A>{});
+                      pack_a(scope, q_block, qp);
+                      return qp;
+                    } else return q_block;
+                  }();
                   std::fill(output_acc, output_acc + rows * dv, Score{});
                   std::fill(row_max, row_max + rows,
                             -std::numeric_limits<Score>::infinity());
@@ -349,8 +431,8 @@ private:
                                   "sparse-attention block index out of range");
                     const nint_t columns = std::min<nint_t>(
                         Config::key_value_block, lkv - key_begin);
-                    const auto column_extent =
-                        meta::dyn<1, 1, Config::key_value_block>(columns);
+                    attention_details::with_block_extent<Config::key_value_block>(
+                        lkv, key_begin, [&](auto column_extent) {
                     auto k_block = tensor::narrow_view<0>(
                         k, key_begin, column_extent);
                     auto v_block = tensor::narrow_view<0>(
@@ -359,54 +441,94 @@ private:
                     auto score_tensor = tensor::make_tensor(
                         scores,
                         tensor::make_shape(row_extent, column_extent));
+                    auto k_operand = [&] {
+                      if constexpr (CacheSparsePacks) return tensor::make_tensor(cached_k + block_index * k_capacity,
+                          matmul::packed_layout<Atom, matmul::Operand::B>(k_block.input_layout()));
+                      else return k_block;
+                    }();
+                    auto v_operand = [&] {
+                      if constexpr (CacheSparsePacks) return tensor::make_tensor(cached_v + block_index * v_capacity,
+                          matmul::packed_layout<Atom, matmul::Operand::B>(v_transposed.input_layout()));
+                      else return v_transposed;
+                    }();
                     matmul_op(
                         scope, row_extent, column_extent, dqk,
-                        q_block, k_block, score_tensor);
+                        q_operand, k_operand, score_tensor);
 
+                    std::array<bool, static_cast<std::size_t>(Config::query_block)> valid_rows{};
+                    if constexpr (Config::query_block == 32 && Config::key_value_block == 32) {
+                      for (nint_t row = 0; row < rows; ++row) {
+                        const auto stats = attention_details::decorate_score_row<Config::causal_mode>(
+                          scores + row * columns, columns,
+                          tensor::is_nullopt_v<decltype(uqm)> || query_active[row] != Score{}, begin + row, key_begin,
+                          lq, lkv, scale, ukm, uam, ubias);
+                        const Score old_max = row_max[row];
+                        const Score next_max = std::max(old_max, stats.maximum);
+                        const bool valid = stats.any && next_max != -std::numeric_limits<Score>::infinity();
+                        valid_rows[row] = valid;
+                        row_scale[row] = !valid ? Score{}
+                                         : old_max == -std::numeric_limits<Score>::infinity()
+                                           ? -std::numeric_limits<Score>::infinity()
+                                         : stats.maximum > old_max ? old_max - stats.maximum
+                                                                   : Score{};
+                        if (valid)
+                          row_max[row] = next_max;
+                      }
+                      using RescaleTag = vec::ScalableTag<Score, 0>;
+                      const RescaleTag rescale_tag{};
+                      for (nint_t row = 0; row < rows; row += vec::size(rescale_tag)) {
+                        const auto active = vec::opt::first(rows - row);
+                        const auto delta = vec::load(rescale_tag, row_scale + row, active, vec::opt::zero);
+                        const auto alpha = vec::exp_neg(
+                          rescale_tag, delta, vec::opt::math::accuracy<Config::exp_accuracy>, active, vec::opt::zero);
+                        vec::store(rescale_tag, row_scale + row, alpha, active);
+                      }
+                    }
                     for (nint_t row = 0; row < rows; ++row) {
-                      const nint_t q_index = begin + row;
-                      const auto stats =
-                          attention_details::decorate_score_row<
-                              Config::causal_mode>(
-                              scores + row * columns, columns,
-                              tensor::is_nullopt_v<decltype(uqm)> ||
-                                  query_active[static_cast<std::size_t>(row)] !=
-                                      Score{},
-                              q_index, key_begin,
-                              lq, lkv, scale, ukm, uam, ubias);
-                      const Score block_max = stats.maximum;
-                      const bool block_valid = stats.any;
-                      const Score next_max = std::max(row_max[row], block_max);
-                      if (!block_valid ||
-                          next_max == -std::numeric_limits<Score>::infinity()) {
-                        row_scale[row] = Score{1};
-                        std::fill(
-                            probabilities + row * columns,
-                            probabilities + (row + 1) * columns,
-                            Probability{});
-                        continue;
+                      Score next_max{}, alpha{};
+                      if constexpr (Config::query_block == 32 && Config::key_value_block == 32) {
+                        if (!valid_rows[row]) {
+                          row_scale[row] = Score{1};
+                          std::fill(probabilities + row * columns, probabilities + (row + 1) * columns, Probability{});
+                          continue;
+                        }
+                        next_max = row_max[row];
+                        alpha = row_scale[row];
+                      } else {
+                        const nint_t q_index = begin + row;
+                        const auto stats = attention_details::decorate_score_row<Config::causal_mode>(
+                          scores + row * columns, columns,
+                          tensor::is_nullopt_v<decltype(uqm)> || query_active[static_cast<std::size_t>(row)] != Score{},
+                          q_index, key_begin, lq, lkv, scale, ukm, uam, ubias);
+                        const Score block_max = stats.maximum;
+                        const bool block_valid = stats.any;
+                        next_max = std::max(row_max[row], block_max);
+                        if (!block_valid || next_max == -std::numeric_limits<Score>::infinity()) {
+                          row_scale[row] = Score{1};
+                          std::fill(probabilities + row * columns, probabilities + (row + 1) * columns, Probability{});
+                          continue;
+                        }
+                        alpha = Score{1};
+                        if (row_max[row] == -std::numeric_limits<Score>::infinity()) {
+                          alpha = Score{};
+                        } else if (block_max > row_max[row]) {
+                          using RescaleTag = vec::ScalableTag<Score, 0>;
+                          const RescaleTag tag{};
+                          alpha = vec::get(tag,
+                                           vec::exp_neg(tag, vec::fill(tag, row_max[row] - block_max),
+                                                        vec::opt::math::accuracy<Config::exp_accuracy>),
+                                           0);
+                        }
+                        row_scale[row] = alpha;
                       }
-                      Score alpha = Score{1};
-                      if (row_max[row] ==
-                          -std::numeric_limits<Score>::infinity()) {
-                        alpha = Score{};
-                      } else if (block_max > row_max[row]) {
-                        using RescaleTag = vec::ScalableTag<Score, 0>;
-                        const RescaleTag tag{};
-                        alpha = vec::get(tag, vec::exp_neg(
-                            tag, vec::fill(tag, row_max[row] - block_max),
-                            vec::opt::math::accuracy<Config::exp_accuracy>), 0);
-                      }
-                      row_scale[row] = alpha;
                       Score block_sum{};
                       using ScoreTag = vec::ScalableTag<Score, 0>;
                       ScoreTag score_tag{};
                       kernel::loop::fold<4, 1>(
-                          score_tag, columns,
-                          [&](auto block_tag, nint_t column, auto active,
-                              auto& block_sum_v, const auto& next_max_v,
-                              const auto& negative_infinity)
-                              VECOPS_INLINE_LAMBDA {
+                        score_tag, columns,
+                        [&](auto block_tag, nint_t column, auto active, auto& block_sum_v, const auto& next_max_v,
+                            const auto& negative_infinity)
+                          VECOPS_INLINE_LAMBDA {
                             auto score_v = vec::load(
                                 block_tag,
                                 scores + row * columns + column, active,
@@ -421,10 +543,8 @@ private:
                                 probabilities + row * columns + column,
                                 probability_v, active);
                           },
-                          kernel::loop::reduce_add(block_sum),
-                          kernel::loop::invariant(next_max),
-                          kernel::loop::invariant(
-                              -std::numeric_limits<Score>::infinity()));
+                        kernel::loop::reduce_add(block_sum), kernel::loop::invariant(next_max),
+                        kernel::loop::invariant(-std::numeric_limits<Score>::infinity()));
                       row_sum[row] = alpha * row_sum[row] + block_sum;
                       row_max[row] = next_max;
                     }
@@ -463,17 +583,18 @@ private:
                       matmul_op(
                           scope, row_extent,
                           tensor::size<1>(v.input_layout()),
-                          column_extent, probability_tensor, v_transposed,
+                          column_extent, probability_tensor, v_operand,
                           tensor::input<Score>(output_tensor),
                           tensor::output<Score>(output_tensor));
                     } else {
                       matmul_op(
                           scope, row_extent,
                           tensor::size<1>(v.input_layout()),
-                          column_extent, probability_tensor, v_transposed,
+                          column_extent, probability_tensor, v_operand,
                           output_tensor);
                     }
                     accumulated = true;
+                    });
                   }
 
                   using Tag = vec::ScalableTag<Score, 0>;
@@ -499,6 +620,7 @@ private:
                         },
                         kernel::loop::invariant(reciprocal));
                   }
+                  });
                 }
                 uout.commit();
               });

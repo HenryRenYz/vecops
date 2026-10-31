@@ -614,3 +614,14 @@ SME alternatives own SM/ZA through the public execution API and only accept
 simple loads with legal layouts; throwing checks and scratch allocation stay
 outside streaming mode. Explicit regions reject unsupported alias layouts.
 No vector arrays or opaque `ops::Transpose` calls hide the DSL permutation.
+
+### Counted slices
+
+`range_n(start, count)` selects a nonempty unit-step interval and retains the
+meta type of `count`, even if `start` is a runtime integer. Use
+`range_n(start, cint<32>)` for a known complete tile and a bounded Dynamic
+count for a runtime tail. `range(start, start + count)` cannot recover this
+correlation after integer arithmetic. Bound and unbound views preserve strides
+and the corresponding pointer/element displacement. Plain `range(0, end)`
+uses the integer overload when either endpoint is an integer; use
+`range(cint<0>, end)` when `end` carries meta constraints.

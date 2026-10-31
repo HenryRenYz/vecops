@@ -36,7 +36,8 @@ template <typename MatmulConfigT, int QueryBlock = 32,
           int KeyValueBlock = 32,
           AttentionCausalMode Causal = AttentionCausalMode::none,
           SDPAStrategy Strategy = SDPAStrategy::automatic,
-          vec::Accuracy ExpAccuracy = vec::Accuracy::Fast>
+          vec::Accuracy ExpAccuracy = vec::Accuracy::Fast,
+          bool CacheSparsePacks = false>
 struct AttentionConfig {
   static_assert(QueryBlock > 0 && KeyValueBlock > 0);
   using MatmulConfig = MatmulConfigT;
@@ -57,6 +58,8 @@ struct AttentionConfig {
   static constexpr AttentionCausalMode causal_mode = Causal;
   static constexpr SDPAStrategy strategy = Strategy;
   static constexpr vec::Accuracy exp_accuracy = ExpAccuracy;
+  // Sparse/streaming path only: private packing scratch is per invocation.
+  static constexpr bool cache_sparse_packs = CacheSparsePacks;
 
   [[no_unique_address]] MatmulConfig matmul{};
   nint_t selected_blocks = 1;
@@ -243,39 +246,28 @@ private:
         q, k, v, query_mask, key_mask, attention_mask, bias, out);
     const auto lq = tensor::size<0>(q.input_layout());
     const auto lkv = tensor::size<0>(k.input_layout());
-    const nint_t block = std::min<nint_t>(Config::query_block, lq);
-    const auto block_extent = meta::dyn<1, 1, Config::query_block>(block);
-    const auto lkv_extent = tensor::size<0>(k.input_layout());
-    const auto dqk_extent = tensor::size<1>(q.input_layout());
-    const auto dv_extent = tensor::size<1>(v.input_layout());
-    auto q_block = tensor::narrow_view<0>(q, 0, block_extent);
-    auto out_block = tensor::narrow_view<0>(out, 0, block_extent);
-    auto score_tensor = tensor::make_unbound_tensor<Score>(
-        tensor::make_shape(block_extent, lkv_extent));
-    auto probability_tensor = tensor::make_unbound_tensor<Probability>(
-        tensor::make_shape(block_extent, lkv_extent));
-    auto v_transposed = tensor::transpose_view<0, 1>(v);
-    MatmulOp matmul_op{config.matmul};
-    const nint_t qk_bytes = matmul_op.required_workspace(
-        block_extent, lkv_extent, dqk_extent,
-        q_block, k, score_tensor);
-    const nint_t pv_bytes = matmul_op.required_workspace(
-        block_extent, dv_extent, lkv_extent,
-        probability_tensor, v_transposed, out_block);
-    const nint_t persistent =
-        kernel::WorkspaceView::allocation_bytes<Score>(
-            Config::query_block * lkv) +
-        kernel::WorkspaceView::allocation_bytes<Probability>(
-            Config::query_block * lkv) +
-        tensor::required_workspace(
-            query_mask, MaskPolicy{}) +
-        tensor::required_workspace(
-            key_mask, MaskPolicy{}) +
-        tensor::required_workspace(
-            attention_mask, MatrixPolicy{}) +
-        tensor::required_workspace(
-            bias, MatrixPolicy{});
-    return persistent + std::max(qk_bytes, pv_bytes);
+    auto block_workspace = [&](auto block_extent) -> nint_t {
+      const auto lkv_extent = tensor::size<0>(k.input_layout());
+      const auto dqk_extent = tensor::size<1>(q.input_layout());
+      const auto dv_extent = tensor::size<1>(v.input_layout());
+      auto q_block = tensor::narrow_view<0>(q, 0, block_extent);
+      auto out_block = tensor::narrow_view<0>(out, 0, block_extent);
+      auto score_tensor = tensor::make_unbound_tensor<Score>(tensor::make_shape(block_extent, lkv_extent));
+      auto probability_tensor = tensor::make_unbound_tensor<Probability>(tensor::make_shape(block_extent, lkv_extent));
+      auto v_transposed = tensor::transpose_view<0, 1>(v);
+      MatmulOp matmul_op{config.matmul};
+      const nint_t qk_bytes =
+        matmul_op.required_workspace(block_extent, lkv_extent, dqk_extent, q_block, k, score_tensor);
+      const nint_t pv_bytes =
+        matmul_op.required_workspace(block_extent, dv_extent, lkv_extent, probability_tensor, v_transposed, out_block);
+      const nint_t persistent =
+        kernel::WorkspaceView::allocation_bytes<Score>(Config::query_block * lkv) +
+        kernel::WorkspaceView::allocation_bytes<Probability>(Config::query_block * lkv) +
+        tensor::required_workspace(query_mask, MaskPolicy{}) + tensor::required_workspace(key_mask, MaskPolicy{}) +
+        tensor::required_workspace(attention_mask, MatrixPolicy{}) + tensor::required_workspace(bias, MatrixPolicy{});
+      return persistent + std::max(qk_bytes, pv_bytes);
+    };
+    return attention_details::block_workspace_bound<Config::query_block>(lq, block_workspace);
   }
 
   template <typename QSpec, typename KSpec, typename VSpec,
@@ -345,46 +337,28 @@ private:
                  begin += Config::query_block) {
               const nint_t rows = std::min<nint_t>(
                   Config::query_block, lq - begin);
-              const auto row_extent =
-                  meta::dyn<1, 1, Config::query_block>(rows);
-              auto q_block = tensor::narrow_view<0>(
-                  q, begin, row_extent);
-              auto out_block = tensor::narrow_view<0>(
-                  out, begin, row_extent);
-              auto score_tensor = tensor::make_tensor(
-                  scores, tensor::make_shape(row_extent, lkv_extent));
-              auto probability_tensor = tensor::make_tensor(
-                  probabilities,
-                  tensor::make_shape(row_extent, lkv_extent));
-              matmul_op(
-                  scope, row_extent, lkv_extent, dqk_extent,
-                  q_block, k, score_tensor);
+              attention_details::with_block_extent<Config::query_block>(lq, begin, [&](auto row_extent) {
+                auto q_block = tensor::narrow_view<0>(q, begin, row_extent);
+                auto out_block = tensor::narrow_view<0>(out, begin, row_extent);
+                auto score_tensor = tensor::make_tensor(scores, tensor::make_shape(row_extent, lkv_extent));
+                auto probability_tensor =
+                  tensor::make_tensor(probabilities, tensor::make_shape(row_extent, lkv_extent));
+                matmul_op(scope, row_extent, lkv_extent, dqk_extent, q_block, k, score_tensor);
 
-              std::array<
-                  Score,
-                  static_cast<std::size_t>(Config::query_block)>
-                  query_activity{};
-              attention_details::load_activity_segment<Score>(
-                  uqm, begin, rows, query_activity.data());
-              for (nint_t row = 0; row < rows; ++row) {
-                const nint_t q_index = begin + row;
-                const bool query_active =
-                    tensor::is_nullopt_v<decltype(uqm)> ||
-                    query_activity[static_cast<std::size_t>(row)] != Score{};
-                const auto stats = attention_details::decorate_score_row<
-                    Config::causal_mode>(
-                    scores + row * lkv, lkv, query_active,
-                    q_index, 0, lq, lkv, scale, ukm, uam, ubias);
-                attention_details::softmax_row<
-                    Score, Probability, Config::exp_accuracy>(
-                    scores + row * lkv,
-                    probabilities + row * lkv, lkv,
-                    stats.any, stats.maximum);
-              }
+                std::array<Score, static_cast<std::size_t>(Config::query_block)> query_activity{};
+                attention_details::load_activity_segment<Score>(uqm, begin, rows, query_activity.data());
+                for (nint_t row = 0; row < rows; ++row) {
+                  const nint_t q_index = begin + row;
+                  const bool query_active =
+                    tensor::is_nullopt_v<decltype(uqm)> || query_activity[static_cast<std::size_t>(row)] != Score{};
+                  const auto stats = attention_details::decorate_score_row<Config::causal_mode>(
+                    scores + row * lkv, lkv, query_active, q_index, 0, lq, lkv, scale, ukm, uam, ubias);
+                  attention_details::softmax_row<Score, Probability, Config::exp_accuracy>(
+                    scores + row * lkv, probabilities + row * lkv, lkv, stats.any, stats.maximum);
+                }
 
-              matmul_op(
-                  scope, row_extent, dv_extent, lkv_extent,
-                  probability_tensor, v_transposed, out_block);
+                matmul_op(scope, row_extent, dv_extent, lkv_extent, probability_tensor, v_transposed, out_block);
+              });
             }
         },
         qm, km, am, b);

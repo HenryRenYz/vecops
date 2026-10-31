@@ -138,7 +138,7 @@ struct NewAxis {
  *
  * @see range()
  */
-template <typename Start = Any, typename End = Any, typename Step = Any>
+template <typename Start = Any, typename End = Any, typename Step = Any, typename Extent = void>
 struct Range {
   static_assert(std::is_base_of_v<Value, Start>, "Range start must be a Value type");
   static_assert(std::is_base_of_v<Value, End>, "Range end must be a Value type");
@@ -267,6 +267,24 @@ static constexpr auto range(nint_t start, nint_t end, nint_t step) {
 }
 
 /**
+ * @brief Unit-step slice with an offset and a typed element count.
+ *
+ * Unlike range(start, start + count), the result retains count's Const or
+ * bounded Dynamic type even when start is a runtime integer. The interval
+ * must be nonempty and inside the source dimension, as with range().
+ * Bound and unbound Tensor views preserve the original strides and binding.
+ */
+template <ValueType Extent>
+static constexpr auto range_n(nint_t start, Extent count) {
+  return details::Range<Any, Any, Const<1>, std::decay_t<Extent>>{start, start + static_cast<nint_t>(count), 1};
+}
+
+/** @brief Runtime-count counterpart; the count has no static constraints. */
+static constexpr auto range_n(nint_t start, nint_t count) {
+  return range_n(start, Any{count});
+}
+
+/**
  * @brief Slicing marker: ellipsis — fills all remaining source dimensions
  *        with `reserve`.
  *
@@ -389,15 +407,13 @@ template <ValueType S, ValueType E, ValueType T>
 using RangeSize = typename decltype(range_size_type<S, E, T>())::type;
 
 /// Range: modifies one dimension.
-template <
-    typename S, typename E, typename T, typename S0, typename... Ss,
-    typename T0, typename... Ts, typename... Is
->
-struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, Range<S, E, T>, Is...> {
+template <typename S, typename E, typename T, typename Extent, typename S0, typename... Ss, typename T0, typename... Ts,
+          typename... Is>
+struct SlicedTraitsImpl<Shape<S0, Ss...>, Strides<T0, Ts...>, Range<S, E, T, Extent>, Is...> {
   using Next = SlicedTraitsImpl<Shape<Ss...>, Strides<Ts...>, Is...>;
 
   /// Preserve range-size constraints whenever the step sign is statically known.
-  using new_sz = RangeSize<S, E, T>;
+  using new_sz = std::conditional_t<std::is_void_v<Extent>, RangeSize<S, E, T>, Extent>;
 
   /// Stride is scaled by the Range step type T.
   using new_stride = decltype(std::declval<T0>() * std::declval<T>());
@@ -420,8 +436,8 @@ constexpr int count_ellipsis_v = ((std::is_same_v<std::decay_t<Ts>, Ellipsis> ? 
 /// Trait to detect Range<S, E, T> types.
 template <typename T>
 struct IsRange : std::false_type {};
-template <typename S, typename E, typename T>
-struct IsRange<Range<S, E, T>> : std::true_type {};
+template <typename S, typename E, typename T, typename Extent>
+struct IsRange<Range<S, E, T, Extent>> : std::true_type {};
 template <typename T>
 constexpr bool is_range_v = IsRange<std::decay_t<T>>::value;
 
@@ -474,7 +490,7 @@ struct PointerBinding {
   T* pointer;
 
   VECOPS_ALWAYS_INLINE constexpr PointerBinding advanced(nint_t offset) const {
-    return PointerBinding{pointer + offset};
+    return PointerBinding{offset ? pointer + offset : pointer};
   }
 };
 
@@ -1023,15 +1039,10 @@ private:
    * Range in `_slice_make_meta_impl`: computes sliced size and stride,
    * contributes `start * stride(D)` to offset.
    */
-  template <
-      typename NewShape, typename NewStrides, int D, int OutD,
-      typename S, typename E, typename TStep, typename... Is
-  >
-  auto _slice_make_meta_impl(
-      std::array<nint_t, NewShape::Ndim>& ns_arr,
-      std::array<nint_t, NewStrides::Ndim>& nt_arr,
-      details::Range<S, E, TStep> r, Is... rest
-  ) const -> nint_t {
+  template <typename NewShape, typename NewStrides, int D, int OutD, typename S, typename E, typename TStep,
+            typename Extent, typename... Is>
+  auto _slice_make_meta_impl(std::array<nint_t, NewShape::Ndim>& ns_arr, std::array<nint_t, NewStrides::Ndim>& nt_arr,
+                             details::Range<S, E, TStep, Extent> r, Is... rest) const -> nint_t {
     VECOPS_ASSERT(0 <= r.start && r.start < size(D), "range start out of range");
     VECOPS_ASSERT(0 <= r.end && r.end <= size(D), "range end out of range");
     if (r.step > 0) {
@@ -1313,7 +1324,8 @@ constexpr auto bind(
     const TensorPattern<T, TShape, TStrides>& pattern,
     T* base
 ) {
-  return make_tensor(base + pattern.element_offset(), pattern.layout());
+  const auto offset = pattern.element_offset();
+  return make_tensor(offset ? base + offset : base, pattern.layout());
 }
 
 /** @brief Keep the first N dimensions at the zero coordinate of trailing axes. */
