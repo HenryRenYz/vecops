@@ -35,7 +35,20 @@ for(unsigned i=0;i<r.np;++i)fprintf(f,"%s[%u,%llu,%llu]",i?",":"",r.points[i].la
 fputs("],\"copies\":[",f);for(unsigned i=0;i<r.nc;++i){auto& c=r.copies[i];fprintf(f,"%s[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]",i?",":"",c.begin,c.end,c.bytes,c.strided,c.rows,c.minrun,c.maxrun,c.tasks,c.lanes,c.kind);}fputs("]}",f);}fputs("]\n",f);fclose(f);}
 '''
 
-def instrument(text):
+SNAPSHOT_HEADER = r'''
+// Diagnostic-only raw bindings. The group/plans/input tensors must outlive use;
+// one caller per process, contiguous equal-sized AllToAll only.
+namespace {
+struct DSnap {const void* sources[128]{};void* destinations[128]{};size_t bytes[128]{};size_t count=0;} dsnapshot;
+}
+extern "C" size_t comm_diag_snapshot(const void** sources,void** destinations,size_t* bytes,size_t capacity) {
+  if(capacity<dsnapshot.count)return 0;
+  for(size_t i=0;i<dsnapshot.count;++i){sources[i]=dsnapshot.sources[i];destinations[i]=dsnapshot.destinations[i];bytes[i]=dsnapshot.bytes[i];}
+  return dsnapshot.count;
+}
+'''
+
+def instrument(text, snapshot_addresses=False):
   def replace(old,new,count=1):
     nonlocal text
     if text.count(old)!=count:raise ValueError(f'instrumentation anchor changed ({text.count(old)} != {count}): {old[:90]!r}')
@@ -67,13 +80,24 @@ def instrument(text):
   replace('    p.jobs.clear();\n    if(op==Operation::AllGather)','    dp(200);p.jobs.clear();\n    if(op==Operation::AllGather)')
   replace('    if(consumer) (*consumer)(p.borrowed.data(),p.borrowed.size());','    dp(201);if(consumer) (*consumer)(p.borrowed.data(),p.borrowed.size());dp(202);')
   replace('    store(&own->done,epoch);++c.stats.calls;','    store(&own->done,epoch);++c.stats.calls;dp(203);')
+  if snapshot_addresses:
+    replace('namespace vecops::comm {',SNAPSHOT_HEADER+'\nnamespace vecops::comm {')
+    replace('    c.batch(p.jobs);store(&own->ready,epoch);dp(6);', '''    if(op==Operation::AllToAll) {
+      dsnapshot.count=0;
+      bool contiguous=p.jobs.size()<=128;
+      for(const auto& j:p.jobs)contiguous &= j.shape->offsets.size()==1;
+      if(contiguous)for(const auto& j:p.jobs) {
+        auto i=dsnapshot.count++;dsnapshot.sources[i]=j.source;dsnapshot.destinations[i]=j.destination;dsnapshot.bytes[i]=j.shape->bytes;
+      }
+    }
+    c.batch(p.jobs);store(&own->ready,epoch);dp(6);''')
   return text
 
 def main():
-  p=argparse.ArgumentParser();p.add_argument('--source-checkout',type=Path,required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+  p=argparse.ArgumentParser();p.add_argument('--source-checkout',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--snapshot-addresses',action='store_true',help='diagnostic raw contiguous AllToAll bindings; retained owners required');a=p.parse_args()
   if a.output.exists():raise FileExistsError(a.output)
   for part in ('include','src/comm','python/vecops/distributed','tests/comm'):
     shutil.copytree(a.source_checkout/part,a.output/part,ignore=shutil.ignore_patterns('__pycache__'))
-  f=a.output/'src/comm/Communication.cpp';f.write_text(instrument(f.read_text()))
+  f=a.output/'src/comm/Communication.cpp';f.write_text(instrument(f.read_text(),a.snapshot_addresses))
   print(a.output)
 if __name__=='__main__':main()

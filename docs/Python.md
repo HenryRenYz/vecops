@@ -3376,3 +3376,32 @@ misses, capacity growth, capacity-equal mapping checks, and actual payload mmap
 calls. Consumer execution remains a separate nested interval. These hooks are
 absent from production builds. Copy submission wall includes worker dispatch
 and completion; it is not a measurement of pure vector instruction time.
+
+`benchmarks/comm/ScatterCopyLatency.cpp` and its Python driver isolate the
+18 MiB / 72-task / 36-worker contiguous AllToAll payload on 920f-4. Link the
+probe to the same communication copy dispatcher/ISA objects as the backend.
+The default mode uses private destination slices explicitly allocated on each
+peer's HBM, with no communicator or shared mapping. `--shared-buffer` instead
+requires an isolated `instrument_protocol.py --snapshot-addresses` build and
+an explicit local-HBM `VECOPS_COMM_CONFIG`: it borrows the exact prepared
+AllToAll source/destination addresses and runs the same payload without the
+transport protocol. Additional blocks precede each copy with an untimed full
+collective. All group/plan/input owners must remain alive through these probes;
+the raw-address diagnostic is not a production API.
+
+Select `--socket 0|1`; this benchmark intentionally uses 920f-4 OS numbering.
+`--exec-workers` binds before exec, making `LD_AUDIT` group selection effective;
+ordinary multiprocessing import/binding order cannot establish that guarantee.
+`--placement` queries every source/destination page before/after each block,
+records actual copy-code pages and `/proc/self/numa_maps`, without migrating
+pages. `--pmu` adds per-thread user cycles/instructions; check nonzero PMU
+running/enabled deltas before interpreting them. It also records per-thread
+user/system CPU and voluntary/involuntary switch deltas. CPU accounting is not
+an instruction-retirement clock: neither it nor user-only PMU counters alone
+can distinguish every kernel/firmware/platform pause. PMU/accounting reads, page queries,
+admission, allocation and full-output checks are outside the callback clocks.
+Thread CPU clocks and per-lane record stores remain diagnostic overhead.
+Executions may receive different physical pages: a reduction in rare tails
+between fresh runs alone does not prove that a loader/placement change caused
+it. The independently exec'd workers' file-backed atomic admission is solely
+benchmark control, not the production collective barrier algorithm.
