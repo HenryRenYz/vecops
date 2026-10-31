@@ -1,5 +1,16 @@
 # Heterogeneous CPU memory
 
+The Linux `vecops-memory-bench` tool measures FP32 scalar/Vec bandwidth,
+NUMA route aggregates, dependent pointer-load latency, latency under load,
+and coherent handoff round trips. It provides readable terminal summaries
+and raw CSV/JSON Lines exports. See [the memory tool guide](../tools/memory/README.md)
+for build instructions, placement/CPU syntax, timing and byte-count semantics,
+and socket-1 examples for 920f-4. The tool performs strict OS binding and
+page-residence checks independently of the optional hwloc backend. Its optional
+`--interleave` mode cycles each private array over the selected memory nodes
+at an explicit base-page or 2 MiB hugetlb-page granularity, with separate
+source/destination pools and exact per-page sequence verification.
+
 `vecops::memory` is the framework-neutral physical-memory layer used to place
 CPU buffers on heterogeneous NUMA targets. It discovers an immutable topology,
 ranks initiator-to-target paths, performs explicit direct allocations, and
@@ -141,8 +152,186 @@ stays in the explicit session and ends at `close()`.
 
 ## Lifetime and threading
 
+In eager Torch execution, `planner.PlanSession(..., enable_dynamic_factories=True)` uses the remaining
+fast-tier budget (machine capacity minus the statically reserved arena) for
+`planner.empty` and `planner.empty_like`. Dynamic factories and static factory
+replay may be enabled together. Static sites take priority; unselected sites,
+retained objects and escaping outputs continue to use storage-owned leases.
+Suballocations are leased to Torch Storage through an owning buffer: aliases,
+cached tensors, and asynchronous collectives keep their slots alive. Allocation
+misses spill to the normal allocator; live objects are never evicted or reused.
+The pool creates one byte memoryview over its arena and leases slices directly
+to Torch, without constructing a NumPy array for each request. Returned ranges
+are inserted in address order and coalesced with their immediate neighbours.
+Escaping tensors retain their arena after session close. `dynamic_reserved_bytes`,
+`dynamic_peak_bytes`, `dynamic_allocations`, and `dynamic_misses` distinguish the
+physical reservation, peak live slots, successful requests, and capacity misses.
+`planner.contiguous(tensor)` also uses this pool for layout materialization;
+already-contiguous tensors preserve their storage and aliasing.
+Pooled tensors have fixed, non-resizable storage; allocate a new tensor when
+changing capacity.
+This mode requires no lifetime prediction from a FakeTensor capture. General
+ATen-internal allocations are unaffected unless their caller uses the factories.
+
+For scoped eager replay, set `PlannerConfig(temporary_scope="diffusion",
+only_explicit_factory_temporaries=True, require_replayable_temporaries=True)`.
+The scope matches one named component of the captured allocation scope. Only
+explicit planner factories in that scope may become static temporaries; this
+does not redirect arbitrary ATen-internal allocations. Any retained or escaping
+storage alias excludes the entire storage from temporary replay. Call ordinals
+include excluded allocations, so a persistent call cannot take a neighbouring
+temporary's slot.
+
+Sampled loops require special liveness handling: a value allocated before a
+steady sample and read by that sample remains live through the whole loop.
+Its last observed read in a two-iteration trace does not imply that later real
+iterations stop using it. The planner widens these invariant lifetimes to the
+loop exit, and validation rejects cached plans that release them earlier.
+
+Decorated `graph.wrap_region` callables mirror their captured lexical scopes
+automatically in a factory-replay session, so a nested region cannot accidentally
+consume a parent scope's allocation slot. Dynamic-only sessions keep their
+normal scope behavior.
+
+When entering a replay session, eligible Tensor views, shapes and strides are
+materialized once. Runtime factories return these cached views after checking
+metadata; loop iteration cursors are released at each iteration boundary.
+`strict_factory_replay=True` rejects incompatible metadata or extra invocations
+at selected sites. Expected dynamic allocations at unselected sites do not count
+as replay failures. A capture must faithfully record cache retention and async
+lifetimes; asynchronous buffers must not be admitted as synchronous temporary
+slots. Validate complete outputs and elapsed inference without profiling before
+turning this optimization on for a new workload.
+
+Keyword-free `empty_like` requests from ordinary CPU strided Torch tensors cache parsed
+metadata within the session (up to 256 signatures). The signature includes
+shape, strides, dtype and device; it stores no Tensor objects or storage
+references. Keyword overrides, Tensor subclasses, other layouts and non-CPU tensors
+retain the general validation path. Every request still selects its current scope/source and
+loop epoch, advances its allocation ordinal and checks the selected slot's
+strides. This cache does not authorize retained or escaping slots for static
+replay. `stats()` reports `factory_metadata_cache_hits` and
+`factory_metadata_cache_misses`; each new session starts with an empty cache.
+
 Topology is immutable. Target counters are atomic and budget admission is
 race-safe within one `MemorySystem` state. `os_free_bytes` is an instantaneous
 kernel observation, while `managed_bytes` counts only live allocations made by
 that state. Physical page placement should be validated after touching pages,
 for example with `hwloc_get_area_memlocation()` or `/proc/self/numa_maps`.
+`PlanSession.stats()["fast_target_verified"]` compares the allocation owner's
+reported target with the topology ranking; it is not an exhaustive physical-page
+query. On Linux, a read-only `get_mempolicy(NODE|ADDR)` query of an unwritten
+anonymous tail can report the shared zero page's node. Inspect the VMA binding
+and query pages after the workload has actually written them before diagnosing
+a remote allocation.
+
+## Native graph replay arena ownership
+
+The executable extension of the existing `GraphCapture` uses the same capture
+IR as the offline planner. `capture_torch` executes real kernels;
+`compile_torch(memory_plan=...)` can materialize an exact plan's internal,
+non-escaping empty-factory slots in a graph-private arena. Functional ATen
+outputs still allocate through ATen; the executable reports unapplied slow
+placements rather than claiming that all allocation is eliminated.
+
+A graph captured inside an existing `PlanSession` cannot borrow that session's
+mutable slots for independent execution. By default compilation copies its observed bound
+view components into separately owned compact allocations with the same memory placement
+and domain request. Original session reuse/close and outstanding old aliases
+do not free or overwrite the graph arena. Relative view geometry within each
+connected accessed component is preserved; gaps between components are removed;
+absolute storage-offset introspection on isolated aliases is unsupported.
+`replay.allocator_policy` records copy bytes, capacity, requested domain and
+allocation target metadata. Validate physical placement after pages are touched
+as for ordinary planner arenas. Captured arena weights are private snapshots by
+default. The explicit immutable-state lease below can pin dedicated state slots;
+non-arena bound weights retain live in-place content semantics.
+
+Returned tensors may alias static graph slots or inputs. Such outputs are
+borrowed and can be overwritten on the next call; clone them when a previous
+state must survive. Distinct graph compilations own independent arenas.
+Capturing an input that overlaps a borrowed planner arena requires an explicit
+staging integration and currently raises instead of silently breaking aliases.
+Capture and compile cost, copying, live storage and process/HBM peak allocation
+must be measured separately from steady replay performance.
+
+### Executable graph state leases
+
+Executable GraphCapture defaults to private copies of captured planner storage.
+Compaction removes gaps between disconnected accessed byte components while
+preserving strides, overlapping aliases and original storage identity groups.
+It does not compact holes inside a strided Tensor's accessed span. Ordinary
+functional ATen allocations remain native ATen allocations.
+
+The optional `borrow_readonly_state=True` compile policy pins only dedicated,
+actually copied immutable parameter/buffer slots validated against the source
+plan. Those slots cannot overlap another placement at any epoch. Their contents
+must remain immutable for the graph lifetime; source session close may restore
+module `.data`, but the fixed bound view and owner stay alive. All other arena
+bindings remain isolated, and writes through aliases of borrowed state fail.
+This avoids duplicating a model's HBM weight replicas while keeping temporary
+buffers private. There is no implicit DDR fallback or weakening of free-memory
+headroom. Inspect `captured_arena_borrowed_state_bytes`,
+`captured_arena_copy_bytes` and `captured_arena_regions` for the actual policy.
+
+### Persistent plan activation for prepared executables
+
+`PlanSession.activation()` activates the same arena and module-state bindings
+for sequential synchronous calls. Its first activation allocates the arena;
+later activations reuse it. Unlike `with PlanSession(...)`, leaving an
+activation does not restore module data or release storage. It only disables
+context-local factory routing. This lets graph preparation and subsequent
+replays share one HBM reservation rather than retaining the preparation arena
+and allocating a second one for each inference.
+
+Activations cannot overlap or nest. The owner must release graph executables,
+finish outstanding communication, and then call `session.close()` to restore
+module data and release session-owned resources. Storage-owned escaping Tensor
+leases remain valid after close. Changing model state or the memory plan
+requires a new session and new prepared executables.
+
+Use `with vecops.planner.executable_factories():` around executable capture when
+its temporaries should be planned by the executable. Within that scope,
+`planner.empty` and `planner.empty_like` emit actual Torch factory operations
+for the capture tape, rather than returning views of the active eager plan.
+This avoids freezing a large sequence's intermediate buffers into external
+arena snapshots. The scope has no effect on metadata-only precompile captures
+or on ordinary eager allocation outside executable capture. Capture-time
+buffers are temporary; compiled replay owns the resulting storage plan.
+
+`GraphCapture.compile_torch(scratch_allocator=allocate)` requests its
+nonescaping static scratch from `allocate(required_bytes)` during preparation.
+The result must be a contiguous one-dimensional CPU uint8 Tensor at storage
+offset zero with sufficient capacity. The executable retains the Tensor and
+never calls the allocator during replay. `static_scratch_required_bytes`
+reports the liveness-planned size separately from the supplied arena capacity.
+Sharing a buffer across executables is valid only when their entire calls are
+serialized and no asynchronous use escapes a call. Outputs and persistent
+state retain separate ownership; the shared scratch never contains them.
+
+The explicit `compile_torch(native_pointwise=True, borrow_outputs=True)` policy
+also preallocates supported escaping factories and floating pointwise outputs
+in a separate executable-owned arena. Its capacity and tensor count appear as
+`retained_output_arena_bytes` and `retained_output_tensor_count`. The shared
+scratch allocator never owns these outputs. Returned views preserve aliases,
+but their values may change on the next replay; clone values that must survive.
+Passing an output back as input must satisfy the original metadata/alias guards
+and can be rejected. Unsupported functional ATen operators still allocate;
+this flag does not claim to make arbitrary graphs allocation-free. The default
+functional output semantics are unchanged.
+
+An initializer feeding a steady graph must prepare that steady graph using the
+initializer's actual returned buffers, including their capacities and aliases.
+Ordinary eager prototypes can have different storage topology and are not a
+valid substitute for those persistent output slots.
+
+### Direct SDMA measurements
+
+The memory benchmark has an optional `--engine sdma` copy backend using the
+installed sdma-dk SDK, with explicit device selection independent of memory NUMA
+and controller CPU placement. Device topology is discovered rather than inferred
+from NUMA numbering; unknown physical engine count/locality stays unknown.
+Bounded async request queues count completed bytes and include final draining in
+the shared elapsed envelope. Payload counts bytes once; application read+write
+counts twice. Generation/sentinel verification, page-residence checks, pin/setup
+exclusion and per-worker CPU time are documented in `tools/memory/README.md`.
