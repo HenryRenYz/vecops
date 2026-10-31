@@ -3237,6 +3237,14 @@ deploy the resulting profile with that same file. Otherwise candidates below
 the threshold all execute direct sharing; their timing cannot establish a copy
 route benefit. A copy-level hint does not override this separate size policy.
 
+`benchmarks/comm/ResidentGranularity.py` compares materialized AllGather and
+AllToAll graph replay across chunk sizes, using the configured memory pool,
+rotated order and maximum-rank medians. It retains the same physical native
+pool for every policy; allocation, capture and warmup are outside the clocks.
+Bind each child **before Python/library startup** when studying code/data NUMA
+placement. This probe measures collective replay, not complete inference or
+pure copy instructions, and its winning chunk still needs model validation.
+
 The profile only covers measured layouts. `SharedExchange.py` separately
 compares the joint producer + AllToAll + consumer cost for private, source-placed
 and destination-placed outputs under native graph replay, including reuse=1/4.
