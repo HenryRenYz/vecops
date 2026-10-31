@@ -422,3 +422,15 @@ unnotified active submission. Never extend an active region across ATen or
 communication copy work on the same cores. Compare both policies with realistic
 payloads and full inference before selecting a platform default; empty dispatch
 latency alone does not establish model throughput.
+
+
+`benchmarks/execution/CopyPoolLatency.cpp` and its Python driver benchmark real
+contiguous and peer-interleaved vec payloads through the **loaded** native
+provider ABI. Build the probe with the communication copy variants/dispatcher;
+pass the resulting shared library with `--library`. Pin the process and set
+`VECOPS_THREAD_POOL_CPU_LIST` plus its NUMA policy before startup. Each payload
+uses parked/active/active/parked blocks with a 100 us requested producer gap;
+allocation, full-output/canary verification and producer gaps are outside the
+copy clocks. Compare wake policies in separate processes. The active blocks
+contain no ATen/OpenMP work. This is a local scheduling/transport diagnostic,
+not a measurement of cross-domain bandwidth or a substitute for model timing.
