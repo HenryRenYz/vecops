@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "vecops/comm/Communication.h"
 #include "vecops/comm/Copy.h"
+#include "vecops/comm/details/ReplicaRouting.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -314,6 +315,7 @@ struct Plan::State {
   uint64_t team_epoch=0;
   bool team_rows=false;
   std::vector<int> copy_levels;
+  std::vector<std::vector<int>> relay_targets;
   explicit State(std::shared_ptr<Communicator> comm, Specification value):owner(std::move(comm)),spec(std::move(value)) {
     copy_levels=spec.copy_levels.empty()?owner->state_->options.copy_levels:spec.copy_levels;
     for(const auto& l:spec.inputs) inputs.emplace_back(l);
@@ -343,6 +345,16 @@ struct Plan::State {
     for(size_t i=0;i<outputs.size();++i){receive_offsets[i]=receive;receive=add(receive,outputs[i].bytes);largest=std::max(largest,outputs[i].bytes);}
     required=std::max(send,spec.operation==Operation::AllToAll?receive:size_t(0));
     if(spec.operation==Operation::AllGather)required=std::max(required,largest);
+    // Immutable for every lane: it must not depend on a leader publication
+    // between ready and the following copy-preparation barrier.
+    relay=spec.operation==Operation::AllGather && owner->state_->options.relay &&
+          largest>=owner->state_->options.relay_threshold;
+    if(relay) {
+      std::vector<uint64_t> bytes;bytes.reserve(outputs.size());
+      for(const auto& output:outputs)bytes.push_back(output.bytes);
+      for(const auto& partition:owner->state_->options.replica_levels)
+        relay_targets.push_back(detail::balanced_relay_targets(partition,owner->rank(),bytes));
+    }
   }
 };
 Communicator::Communicator(std::unique_ptr<State> state):state_(std::move(state)) {}
@@ -486,6 +498,7 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
   const uint32_t lane=team?team->worker_id:0;
   const bool borrowed=consumer || team_consumer;
   const auto op=p.spec.operation; const int rank=c.rank,size=c.size;
+  const bool early_snapshot=c.options.early_snapshot && op==Operation::AllGather;
   auto* own=c.peers[rank].header;
   std::unique_lock lock(c.mutex,std::defer_lock);
   auto sync=[&] {
@@ -504,18 +517,11 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
     if(lane<lanes){Batch b{&p.jobs,p.team_tasks,c.copy};Batch::work(&b,lane,lanes);}
     sync();
   };
-  try {
-    control([&] {
-      lock.lock();
-      if(load(&own->aborted)) throw std::runtime_error("vecops communicator is aborted");
-      c.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(c.options.timeout_ms);
-      p.team_epoch=++c.epoch;
-      for(auto& peer:c.peers)c.wait(&peer.header->done,p.team_epoch-1);
-      c.reserve(p.required);
-      const auto* local=descriptor(own,p.descriptor_id);
-      own->descriptor=p.descriptor_id;
-      store(&own->arrived,p.team_epoch);
-      for(auto& peer:c.peers)c.wait(&peer.header->arrived,p.team_epoch);
+  // AllGather's source snapshot touches only its own private publication
+  // slot. It can precede peer arrival; remote maps/descriptor checks must
+  // complete after ready acquires and before any consumer/output access.
+  auto validate_and_map=[&] {
+    const auto* local=descriptor(own,p.descriptor_id);
       for(int peer=0;peer<size;++peer) {
         const auto* h=c.peers[peer].header;
         if(p.validated_descriptors[peer]!=h->descriptor) {
@@ -528,6 +534,21 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
         }
         c.peers[peer].map_data(mul(load(&h->capacity),size+1));
       }
+  };
+  try {
+    control([&] {
+      lock.lock();
+      if(load(&own->aborted)) throw std::runtime_error("vecops communicator is aborted");
+      c.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(c.options.timeout_ms);
+      p.team_epoch=++c.epoch;
+      for(auto& peer:c.peers)c.wait(&peer.header->done,p.team_epoch-1);
+      c.reserve(p.required);
+      own->descriptor=p.descriptor_id;
+      store(&own->arrived,p.team_epoch);
+      if(!early_snapshot) {
+      for(auto& peer:c.peers)c.wait(&peer.header->arrived,p.team_epoch);
+      validate_and_map();
+      }
       p.jobs.clear();
       if(op==Operation::AllToAll) {
         for(int peer=0;peer<size;++peer)
@@ -536,23 +557,23 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
         p.jobs.push_back({&p.inputs[0],static_cast<const char*>(inputs[0]),c.peers[rank].data,true,0});
       prepare_copy();
     });
-    copy();
-    control([&] {
+    if(op!=Operation::Barrier)copy();
+    // Only lane 0 touches protocol state. All lanes next meet at the copy
+    // preparation below; joining once here as well would be redundant.
+    if(lane==0) {
       store(&own->ready,p.team_epoch);
       for(auto& peer:c.peers)c.wait(&peer.header->ready,p.team_epoch);
+      if(early_snapshot)validate_and_map();
       std::iota(p.origins.begin(),p.origins.end(),0);std::fill(p.replicas.begin(),p.replicas.end(),0);
-      p.relay=op==Operation::AllGather && c.options.relay && p.largest>=c.options.relay_threshold;
-    });
+    }
     if(p.relay)for(size_t level=0;level<c.options.replica_levels.size();++level) {
       if(!p.copy_levels[level])continue;
       control([&] {
         const auto& groups=c.options.replica_levels[level];
-        int members=0;for(int r=0;r<size;++r)members+=groups[r]==groups[rank];
         p.jobs.clear();
         for(int source=0;source<size;++source) {
           if(groups[source]==groups[rank])continue;
-          int target=source%members,rep=rank;
-          for(int r=0;r<size;++r)if(groups[r]==groups[rank] && target--==0){rep=r;break;}
+          const int rep=p.relay_targets[level][source];
           const int origin=p.origins[source];
           const char* from=c.peers[origin].data+(p.replicas[source]?(source+1)*load(&c.peers[origin].header->capacity):0);
           char* to=c.peers[rep].data+(source+1)*load(&c.peers[rep].header->capacity);
@@ -562,11 +583,11 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
         prepare_copy();
       });
       copy();
-      control([&] {
+      if(lane==0) {
         store(&own->stages[level],p.team_epoch);
         // Includes readers in every group before a later level reuses a slot.
         for(auto& peer:c.peers)c.wait(&peer.header->stages[level],p.team_epoch);
-      });
+      }
     }
     control([&] {
       p.jobs.clear();p.team_rows=false;
@@ -604,7 +625,7 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
       const auto lanes=std::min<size_t>({c.options.threads,team->worker_count,p.interleaved_rows});
       if(lane<lanes)c.copy->rows(&job,lane,lanes);
       sync();
-    } else if(team)copy();
+    } else if(team){if(!borrowed)copy();}
     else if(borrowed || !p.interleaved_rows || !c.row_batch(p.jobs,p.borrowed,p.interleaved_rows,p.interleaved_stride))c.batch(p.jobs);
     if(consumer)(*consumer)(p.borrowed.data(),p.borrowed.size());
     if(team_consumer){(*team_consumer)(p.borrowed.data(),p.borrowed.size(),*team);sync();}

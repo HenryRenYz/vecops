@@ -3435,3 +3435,89 @@ Executions may receive different physical pages: a reduction in rare tails
 between fresh runs alone does not prove that a loader/placement change caused
 it. The independently exec'd workers' file-backed atomic admission is solely
 benchmark control, not the production collective barrier algorithm.
+
+### Torch OpenMP resident teams (opt in)
+
+Set `VECOPS_THREAD_POOL=torch` and `VECOPS_TORCH_RESIDENT_TEAM=1` before
+registering kernels or creating a communicator to use one canonical provider
+for source kernels, graph islands, and collectives. Its workers are Torch's
+OpenMP team; it does not activate the native pool. A matched direct OpenMP
+compiler adapter is required (Clang/libomp or GNU/libgomp). The packaged-GOMP
+function-table fallback does not provide this extension. Prepare a new graph
+when changing providers, thread budgets or worker affinity.
+Compiler wrappers with nonstandard executable names are identified through
+`--version`; a BiSheng `bisheng-cxx` wrapper is recognized as Clang. Runtime
+and compiler binary identities participate in the provider cache key. The
+provider honors the selected toolchain environment, `CXXFLAGS` and `LDFLAGS`;
+these flags and include/library search variables are also keyed. Loading a
+second OpenMP runtime is rejected. An explicit GNU compiler remains incompatible with
+Torch/libomp: choose a matching Clang wrapper through the bridge compiler
+environment settings.
+
+Resident execution requests exactly its prepared worker count. If OpenMP
+dynamic teams or thread limits reduce that count, it rejects the call before
+entering any worker callback rather than deadlocking a barrier. Worker errors
+cancel all local barriers and are rethrown after every OpenMP worker joins.
+The provider can be reused after failure; a failed communicator remains poisoned.
+Single-worker teams also count as nested callbacks, through the C10 guard;
+logical tasks submitted inside them execute serially on the calling worker.
+`OMP_WAIT_POLICY`, `KMP_BLOCKTIME`, `OMP_PROC_BIND` and `OMP_PLACES` must be
+selected before runtime initialization and benchmarked with the full model;
+active waiting may compete with native/ATen work when providers are mixed.
+
+The platform policy `communication.early_snapshot=true` opts AllGather into
+early local publication: after previous readers retire, a rank copies its
+source while other ranks may still compute. The ready acquire precedes
+descriptor validation and every output/borrowed read. No collective uses
+background copy workers; AllToAll retains validation before remote writes.
+This can hide publication under peer arrival skew; it does not remove that
+skew or promise less waiting in every individual phase counter. Evaluate
+whole-model and last-arrival-to-completion latency, not just arrival wait.
+
+Replica ingress targets are planned once from the actual partition membership
+and per-source payload bytes. Each remote source is assigned to the least-loaded
+local member, with global-rank order breaking ties. Interleaved rank numbering
+and unequal group sizes do not concentrate traffic through `source % members`.
+Every member independently derives the same immutable routing table; replay
+only reads it. This balances modeled payload bytes, not measured fabric load.
+
+Resident collectives join the local team at copy-preparation and actual copy
+completion boundaries. Leader-only ready/relay publication flows directly into
+the following preparation join. Barrier-only and borrowed-output phases omit
+copies using immutable operation properties. A dynamic zero-task check cannot
+skip a join: a fast leader could overwrite the next phase's task metadata while
+a delayed worker still reads it.
+Relay branch decisions are immutable prepared-plan properties, so workers never
+read an unpublished leader decision. Cross-process publication and reader
+retirement ordering are unchanged.
+
+Prepared pointwise lowering also supports guarded scalar square/sqrt and
+scalar fills without reading uninitialized output. Functional scalar outputs
+retain their captured zero-dimensional Tensor metadata; only the native ABI
+uses a one-element logical view. Short `sum(dim=-2)` reductions of up to 32
+floating values and contiguous feature panels divisible by 64 use one
+row/panel grid with float accumulation and the original output dtype. Other
+axes, integer masks, long reductions and unsupported layouts retain ATen.
+Reduction order is explicit and must be numerically validated; no bitwise
+equivalence across all Torch implementations or ISA widths is promised.
+
+
+Graph control values with a captured one-element `int64` Tensor and a Python
+integer offset can lower `add` to one native grid. The grid preserves full-width
+integer wrap and executes in tape order before consumers read the value; it
+does not convert random seeds through floating point. Other integer operations
+retain ATen. `VECOPS_GRAPH_INTEGER_SCALARS=0` disables this lowering.
+
+### Flattened Tensor replay
+
+`replay.run_tensors(tensors)` accepts an already flattened sequence in capture
+leaf order when every captured input leaf is a Tensor. Static non-Tensor leaves
+require the ordinary `replay(*args, **kwargs)` entry. Outputs retain their
+captured container structure and ownership/alias policy.
+
+This entry avoids Python pytree construction and duplicate Python Tensor
+metadata queries. It still rejects Tensor subclasses, checks inference/context
+and reentrancy, and runs the same C++ input/state guards for dispatch keys,
+names, metadata, storage sizes, storage aliases and overlapping byte ranges
+before any graph operation. Dynamic input addresses are rebound on each call;
+this is not an unchecked pointer-only entry or an invariant-content promise.

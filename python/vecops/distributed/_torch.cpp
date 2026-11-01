@@ -383,7 +383,7 @@ public:
       uint32_t threads,uint64_t executor,int node,std::vector<int> groups,
       size_t initial,size_t threshold,size_t chunk,bool relay,bool strict,
       std::vector<std::vector<int>> levels,std::vector<int> modes,
-      bool row_owned=true):c10d::Backend(rank,size) {
+      bool row_owned=true,bool early_snapshot=false):c10d::Backend(rank,size) {
     auto phase=std::make_shared<size_t>(0);
     vc::Exchange exchange=[store,rank,size,phase](const std::string& own) {
       std::string prefix="vecops-comm/bootstrap/"+std::to_string((*phase)++)+"/";
@@ -397,7 +397,7 @@ public:
     options.initial_capacity=initial;options.relay_threshold=threshold;
     options.chunk_bytes=chunk;options.relay=relay;options.require_placement=strict;
     options.replica_levels=std::move(levels);options.copy_levels=std::move(modes);
-    options.row_owned_copy=row_owned;
+    options.row_owned_copy=row_owned;options.early_snapshot=early_snapshot;
     communicator_=vc::Communicator::create(rank,size,options,std::move(exchange),
         reinterpret_cast<const VecopsThreadPoolV1*>(executor));
     queue_->communicator=communicator_;
@@ -570,6 +570,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
   py::class_<Backend,c10d::Backend,c10::intrusive_ptr<Backend>>(m,"Backend")
     .def(py::init<c10::intrusive_ptr<c10d::Store>,int,int,uint64_t,uint32_t,uint64_t,int,std::vector<int>,size_t,size_t,size_t,bool,bool,std::vector<std::vector<int>>,std::vector<int>>(),py::call_guard<py::gil_scoped_release>())
     .def(py::init<c10::intrusive_ptr<c10d::Store>,int,int,uint64_t,uint32_t,uint64_t,int,std::vector<int>,size_t,size_t,size_t,bool,bool,std::vector<std::vector<int>>,std::vector<int>,bool>(),py::call_guard<py::gil_scoped_release>())
+    .def(py::init<c10::intrusive_ptr<c10d::Store>,int,int,uint64_t,uint32_t,uint64_t,int,std::vector<int>,size_t,size_t,size_t,bool,bool,std::vector<std::vector<int>>,std::vector<int>,bool,bool>(),py::call_guard<py::gil_scoped_release>())
     .def("prepare",[](Backend& b,const std::string& kind,const std::vector<at::Tensor>& out,const std::vector<at::Tensor>& in,std::vector<int64_t> os,std::vector<int64_t> is,int root){return b.prepare(kind,out,in,std::move(os),std::move(is),root)->id;})
     .def("gatherv",[](Backend& b,at::Tensor out,at::Tensor in,std::vector<int64_t> counts){return b.submit("all_gatherv",{out},{in},std::move(counts));},py::call_guard<py::gil_scoped_release>())
     .def_readwrite("tuning_context",&Backend::tuning_context)

@@ -63,14 +63,22 @@ def _create(dist_options, pg_options=None):
   if timeout <= 0:
     raise ValueError('vecops communication timeout must be positive')
   levels, modes = platform.partitions([x["cpu_node"] for x in members])
+  # Use the identical process-local provider as source kernels when opting
+  # into Torch resident teams; pointer identity is part of island composition.
+  if (os.environ.get("VECOPS_THREAD_POOL", "native").strip().lower() == "torch"
+      and os.environ.get("VECOPS_TORCH_RESIDENT_TEAM", "0") == "1"):
+    from vecops._torch_pool import address
+    pool_address = int(address().value)
+  else:
+    pool_address = int(_C.native_thread_pool_address(threads))
   backend = extension.Backend(store, rank, size, timeout, threads,
-      int(_C.native_thread_pool_address(threads)), target, groups,
+      pool_address, target, groups,
       int(policy.get('initial_capacity_bytes', 1 << 20)),
       int(policy.get('relay_threshold_bytes', 1 << 20)),
       int(policy.get('chunk_bytes', 256 << 10)),
       bool(levels) or policy.get('algorithm', 'auto') == 'hierarchical',
       bool(policy.get('require_placement', False)), levels, modes,
-      policy.get('copy_schedule','auto')!='peer')
+      policy.get('copy_schedule','auto')!='peer', bool(policy.get('early_snapshot',False)))
   signature = context(platform, members, threads, extension.build_id)
   backend.tuning_context = json.dumps(signature, sort_keys=True)
   if profile := policy.get('calibration'):

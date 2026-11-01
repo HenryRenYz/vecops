@@ -95,11 +95,13 @@ class Platform:
     comm = data.get('communication', {})
     supported = {'algorithm', 'direction', 'replica_domain', 'initial_capacity_bytes',
                  'relay_threshold_bytes', 'chunk_bytes', 'require_placement', 'timeout_ms', 'levels', 'calibration',
-                 'copy_schedule'}
+                 'copy_schedule', 'early_snapshot'}
     if set(comm)-supported:
       raise ValueError(f'unsupported communication policy fields: {sorted(set(comm)-supported)}')
     if comm.get('algorithm', 'auto') not in {'auto', 'flat', 'hierarchical'}:
       raise ValueError('unknown communication algorithm')
+    if type(comm.get('early_snapshot',False)) is not bool:
+      raise ValueError('early_snapshot must be a bool')
     if comm.get('copy_schedule','auto') not in {'auto','peer'}:
       raise ValueError('copy_schedule must be auto or peer')
     if comm.get('direction', 'auto') != 'auto':

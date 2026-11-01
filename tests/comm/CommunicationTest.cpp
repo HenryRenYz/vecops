@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Standalone fork test: no Torch/Python/GTest or external transport dependency.
 #include "vecops/comm/Communication.h"
+#include "vecops/comm/details/ReplicaRouting.h"
 #include "vecops/comm/Copy.h"
 #include <array>
 #include <atomic>
@@ -29,6 +30,26 @@ struct Bootstrap {
   struct Record {std::atomic<int> ready{0};char value[1024]{};} values[ranks][phases];
 };
 void check(bool result){if(!result)throw std::runtime_error("standalone communication assertion");}
+void replica_routing() {
+  const std::vector<uint64_t> bytes(8,1024);
+  const std::vector<int> contiguous{0,0,0,0,1,1,1,1};
+  check(detail::balanced_relay_targets(contiguous,0,bytes)==std::vector<int>({-1,-1,-1,-1,0,1,2,3}));
+  const std::vector<int> interleaved{0,1,0,1,0,1,0,1};
+  const std::vector<int> expected{-1,0,-1,2,-1,4,-1,6};
+  for(int rank:{0,2,4,6})check(detail::balanced_relay_targets(interleaved,rank,bytes)==expected);
+  check(detail::balanced_relay_targets(interleaved,1,bytes)==std::vector<int>({1,-1,3,-1,5,-1,7,-1}));
+  // Unequal rank counts and payloads, with non-dense domain labels.
+  const std::vector<int> unequal{8,9,8,9,9};
+  const std::vector<uint64_t> ragged{10,100,10,20,10};
+  check(detail::balanced_relay_targets(unequal,0,ragged)==std::vector<int>({-1,0,-1,2,2}));
+  bool rejected=false;
+  try{detail::balanced_relay_targets(unequal,-1,ragged);}catch(const std::invalid_argument&){rejected=true;}
+  check(rejected);
+  const std::vector<int> one{0,1,1};
+  const std::vector<uint64_t> overflow{0,UINT64_MAX,1};rejected=false;
+  try{detail::balanced_relay_targets(one,0,overflow);}catch(const std::overflow_error&){rejected=true;}
+  check(rejected);
+}
 struct Guarded {
   void* mapping;
   size_t capacity, page;
@@ -90,7 +111,7 @@ void worker(int rank,Bootstrap* store) {
     }
     ++phase;return values;
   };
-  Options options;options.timeout_ms=5000;options.relay_threshold=0;
+  Options options;options.early_snapshot=std::getenv("VECOPS_TEST_EARLY_SNAPSHOT")!=nullptr;options.timeout_ms=5000;options.relay_threshold=0;
   if(auto* node=std::getenv("VECOPS_TEST_MEMORY_NODE")){options.memory_node=std::atoi(node);options.require_placement=true;}
   options.replica_levels={{0,0,1},{0,1,2}};options.copy_levels={1,1};
   options.threads=4;
@@ -108,8 +129,16 @@ void worker(int rank,Bootstrap* store) {
     struct Team {std::barrier<> phase{4};} team;
     std::mutex mutex;std::exception_ptr failure;std::vector<std::thread> lanes;
     auto work=[&](uint32_t lane) {
-      VecopsTeamContextV1 context{sizeof(VecopsTeamContextV1),lane,4,&team,
-        [](void* opaque,VecopsError*)->int{static_cast<Team*>(opaque)->phase.arrive_and_wait();return 0;}};
+      struct Lane {Team* team;uint32_t id;} local{&team,lane};
+      VecopsTeamContextV1 context{sizeof(VecopsTeamContextV1),lane,4,&local,
+        [](void* opaque,VecopsError*)->int{
+          auto& local=*static_cast<Lane*>(opaque);
+          local.team->phase.arrive_and_wait();
+          // A join releases workers independently. Deliberately delay one
+          // return to expose reuse of mutable task metadata after empty phases.
+          if(local.id==3)std::this_thread::sleep_for(std::chrono::microseconds(20));
+          return 0;
+        }};
       try{body(context);}catch(...){team.phase.arrive_and_drop();std::lock_guard lock(mutex);if(!failure)failure=std::current_exception();}
     };
     for(uint32_t lane=1;lane<4;++lane)lanes.emplace_back(work,lane);
@@ -200,6 +229,7 @@ void worker(int rank,Bootstrap* store) {
 }
 int main() {
   try {
+    replica_routing();
     copy_boundaries(detail::copy_backend());
     copy_boundaries(detail::portable::backend());
 #if defined(VECOPS_TEST_COMM_COPY_AVX2)

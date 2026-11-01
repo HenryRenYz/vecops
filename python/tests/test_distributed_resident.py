@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 
-def _worker(rank, size, store):
-  os.environ.update(VECOPS_THREAD_POOL='native', VECOPS_NUM_THREADS='2',
+def _worker(rank, size, store, provider):
+  os.environ.update(VECOPS_THREAD_POOL=provider, VECOPS_NUM_THREADS='2',
+                    VECOPS_TORCH_RESIDENT_TEAM='1', VECOPS_COMM_CONFIG=store+'.toml',
                     OMP_WAIT_POLICY='PASSIVE', GOMP_SPINCOUNT='0')
   if lists := os.environ.get('VECOPS_TEST_CPU_LISTS'):
     import json
@@ -138,8 +139,10 @@ def _worker(rank, size, store):
 
 
 @pytest.mark.parametrize('size', [1, 3])
-def test_resident_collectives(size, tmp_path):
+@pytest.mark.parametrize('provider', ['native', 'torch'])
+def test_resident_collectives(size, provider, tmp_path):
   import torch.multiprocessing as mp
   from vecops.distributed._build import load
   load()
-  mp.spawn(_worker, args=(size, str(tmp_path/'store')), nprocs=size, join=True)
+  (tmp_path/'store.toml').write_text('[communication]\nearly_snapshot=true\n')
+  mp.spawn(_worker, args=(size, str(tmp_path/'store'), provider), nprocs=size, join=True)

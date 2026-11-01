@@ -52,6 +52,12 @@ struct Options {
   // destination rows to one worker. Other layouts retain the generic path.
   // Every scheduling path uses vec byte transport with cold ISA selection.
   bool row_owned_copy = true;
+  /** AllGather may copy its own snapshot before peers arrive, then validate
+   * descriptors after the ready acquire. Previous readers must still retire
+   * first; no output/remote inbox is written before descriptor validation.
+   * This overlaps local publication with peer computation, not background DMA.
+   */
+  bool early_snapshot = false;
 };
 struct Statistics {
   // Logical explicit-copy payload, not read+write traffic or fabric bytes.

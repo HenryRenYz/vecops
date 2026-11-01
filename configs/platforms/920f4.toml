@@ -192,6 +192,9 @@ os_nodes = [31]
 timeout_ms = 1800000
 # Explicit measured routing candidate; no nominal bandwidth used as proof.
 algorithm = "hierarchical"
+# Qualified on 107/740 with the resident-team implementation (2026-11-01).
+# Retire previous readers before publishing the next local snapshot.
+early_snapshot = true
 replica_domain = "die"
 relay_threshold_bytes = 1048576
 initial_capacity_bytes = 1048576

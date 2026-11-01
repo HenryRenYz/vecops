@@ -72,7 +72,9 @@ def instrument(text, snapshot_addresses=False):
       if(dcurrent){auto& d=*dcurrent;d.context=reinterpret_cast<DU>(&c);d.epoch=c.epoch+1;d.descriptor=p.descriptor_id;d.op=static_cast<DU>(p.spec.operation);d.rank=c.rank;d.size=c.size;d.borrowed=borrowed;for(auto& x:p.inputs)d.input_bytes+=x.bytes;for(auto& x:p.outputs)d.output_bytes+=x.bytes;}
 ''')
   replace('      c.reserve(p.required);','      dp(2);c.reserve(p.required);')
-  replace('      for(auto& peer:c.peers)c.wait(&peer.header->arrived,p.team_epoch);','      dp(3);for(auto& peer:c.peers)c.wait(&peer.header->arrived,p.team_epoch);dp(4);')
+  replace('      store(&own->arrived,p.team_epoch);','      store(&own->arrived,p.team_epoch);dp(3);')
+  replace('      if(early_snapshot)validate_and_map();','      if(early_snapshot){dp(4);validate_and_map();}')
+  replace('      for(auto& peer:c.peers)c.wait(&peer.header->arrived,p.team_epoch);','      for(auto& peer:c.peers)c.wait(&peer.header->arrived,p.team_epoch);dp(4);')
   replace('        if(p.validated_descriptors[peer]!=h->descriptor) {','        if(p.validated_descriptors[peer]!=h->descriptor) {\n          if(dcurrent)++dcurrent->descriptor_checks;')
   replace('      p.jobs.clear();\n      if(op==Operation::AllToAll)', '      dp(5);p.jobs.clear();\n      if(op==Operation::AllToAll)')
   replace('      store(&own->ready,p.team_epoch);\n      for(auto& peer:c.peers)c.wait(&peer.header->ready,p.team_epoch);','      store(&own->ready,p.team_epoch);dp(6);\n      for(auto& peer:c.peers)c.wait(&peer.header->ready,p.team_epoch);dp(7);')
@@ -87,14 +89,14 @@ def instrument(text, snapshot_addresses=False):
   replace('      if(lane<lanes)c.copy->rows(&job,lane,lanes);\n      sync();', '      DC dc{};dc.begin=dcurrent?dn():0;dc.kind=2;\n      if(lane<lanes)c.copy->rows(&job,lane,lanes);\n      sync();if(dcurrent){dc.bytes=job.rows*job.run*job.peers;dc.strided=dc.bytes;dc.rows=job.rows;dc.minrun=dc.maxrun=job.run;dc.tasks=job.rows;dc.lanes=lanes;dc_save(dc);}')
   if snapshot_addresses:
     replace('namespace vecops::comm {',SNAPSHOT_HEADER+'\nnamespace vecops::comm {')
-    replace('      prepare_copy();\n    });\n    copy();', '''      if(op==Operation::AllToAll) {
+    replace('      prepare_copy();\n    });\n    if(op!=Operation::Barrier)copy();', '''      if(op==Operation::AllToAll) {
         dsnapshot.count=0;bool contiguous=p.jobs.size()<=128;
         for(const auto& j:p.jobs)contiguous &= j.shape->offsets.size()==1;
         if(contiguous)for(const auto& j:p.jobs){auto i=dsnapshot.count++;dsnapshot.sources[i]=j.source;dsnapshot.destinations[i]=j.destination;dsnapshot.bytes[i]=j.shape->bytes;}
       }
       prepare_copy();
     });
-    copy();''')
+    if(op!=Operation::Barrier)copy();''')
   return text
 
 def main():
