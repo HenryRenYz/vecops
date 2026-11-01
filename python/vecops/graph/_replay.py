@@ -490,7 +490,7 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
   planned_storages = {capture._torch_execution_graph.tensors[x].storage_id for x in planned}
   planned_aliases = {identity for identity,tensor in capture._torch_execution_graph.tensors.items()
                      if tensor.storage_id in planned_storages}
-  # Lower pure floating ATen intermediates into ordinary recordable C++ grids.
+  # Lower statically guarded ATen intermediates into recordable C++ grids.
   # Escaping outputs keep the original functional-allocation contract.
   execution = capture._torch_execution_graph
   pointwise = {}
@@ -501,7 +501,7 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
   output_owner = None
   retained_output_count = 0
   if native_pointwise and os.environ.get('VECOPS_GRAPH_POINTWISE', '1') != '0':
-    from . import _pointwise
+    from . import _pointwise, _reduction, _int_scalar
     from vecops import language as T
     from vecops._arm_vector_state import get_vector_state
     pointwise_vector_token = get_vector_state().env_token
@@ -512,19 +512,22 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
       if not isinstance(result_ref, _Ref):
         continue
       tensor = execution.tensors[result_ref.id]
-      inplace = instruction.function._schema.name in {'aten::add_', 'aten::sub_', 'aten::mul_', 'aten::div_', 'aten::copy_'}
+      inplace = instruction.function._schema.name in {'aten::add_', 'aten::sub_', 'aten::mul_', 'aten::div_', 'aten::copy_', 'aten::fill_'}
       if (not inplace and not borrow_outputs and
           any(execution.tensors[x].escapes for x in execution.storages[tensor.storage_id].tensors)):
         continue
-      selected = _pointwise.select(instruction.function._schema, instruction.arguments,
-                                   result_ref, metadata)
+      reduction_input = (_reduction.select(instruction.function._schema, instruction.arguments, result_ref, metadata)
+          if os.environ.get('VECOPS_GRAPH_SHORT_REDUCTION', '1') != '0' else None)
+      integer = (_int_scalar.select(instruction.function._schema, instruction.arguments, result_ref, metadata)
+          if os.environ.get('VECOPS_GRAPH_INTEGER_SCALARS', '1') != '0' else None)
+      selected = ((31, integer[0], integer[0], integer[1]) if integer is not None else
+          (30, reduction_input, reduction_input, 0.) if reduction_input is not None else
+          _pointwise.select(instruction.function._schema, instruction.arguments, result_ref, metadata))
       if selected is None:
         continue
       code, a, b, alpha = selected
       output_ref = instruction.arguments[0] if inplace else result_ref
       am, bm, om = metadata(a), metadata(b), metadata(output_ref)
-      if not om.shape:
-        continue  # Preserve functional scalar-result allocation via ATen.
       # SIMD inner vectors require contiguous/zero-stride inner operands.
       # Other layouts retain ATen's general implementation.
       if any(m.device != 'cpu' or (m.shape and m.shape[-1] != 1 and m.strides[-1] != 1)
@@ -534,8 +537,16 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
       strided_copy = (instruction.function._schema.name == 'aten::copy_'
                       and _pointwise.nonoverlapping_layout(om.shape, om.strides))
       if contiguous or strided_copy:
-        compiled = _pointwise.kernel(code, am.shape or (1,), am.strides or (1,), am.dtype.removeprefix('torch.'),
-            bm.shape or (1,), bm.strides or (1,), bm.dtype.removeprefix('torch.'), om.shape, om.strides,
+        if code == 31:
+          compiled = _int_scalar.kernel(am.shape, am.strides, om.shape, om.strides,
+              int(os.environ.get('VECOPS_NUM_THREADS', torch.get_num_threads())), pointwise_vector_token)
+        elif code == 30:
+          compiled = _reduction.kernel(am.shape, am.strides, am.dtype.removeprefix('torch.'),
+              om.shape, om.strides, om.dtype.removeprefix('torch.'),
+              int(os.environ.get('VECOPS_NUM_THREADS', torch.get_num_threads())), pointwise_vector_token)
+        else:
+          compiled = _pointwise.kernel(code, am.shape or (1,), am.strides or (1,), am.dtype.removeprefix('torch.'),
+            bm.shape or (1,), bm.strides or (1,), bm.dtype.removeprefix('torch.'), om.shape or (1,), om.strides or (1,),
             om.dtype.removeprefix('torch.'), int(os.environ.get('VECOPS_NUM_THREADS', torch.get_num_threads())),
             pointwise_vector_token)
         pointwise[ordinal] = (compiled, a, b, output_ref, alpha)
@@ -914,6 +925,7 @@ class TorchReplay:
     self._executor = executor
     self._input_spec = tape.input_spec
     self._input_refs = tape.input_refs
+    self._tensor_only_inputs = all(isinstance(x, _Ref) for x in self._input_refs)
     self._output_leaves = tape.output_leaves
     self._output_spec = tape.output_spec
     self._bound = tuple(bound)
@@ -926,6 +938,33 @@ class TorchReplay:
                              'functional_aten':'native ATen allocator',
                              'unapplied_slow_plan_storages':unplanned}
     self._lock = threading.Lock()
+
+  def run_tensors(self, tensors):
+    """Replay already flattened, all-Tensor inputs in capture leaf order.
+
+    This avoids Python pytree rebuilding and duplicate Tensor metadata queries.
+    Exact Python Tensor types are still required; the ordinary native executor
+    checks every input/state's metadata, keys, names and aliases before running
+    anything. Context/ownership/reentrancy/output contracts match __call__.
+    """
+    import torch
+    from torch.utils._pytree import tree_unflatten
+    _check_context()
+    if not self._lock.acquire(blocking=False):
+      raise RuntimeError('graph replay is not reentrant or concurrently callable')
+    try:
+      if not self._tensor_only_inputs:
+        raise ValueError('flat Tensor replay requires all captured input leaves to be tensors')
+      tensors = tuple(tensors)
+      if len(tensors) != len(self._input_refs):
+        raise ValueError('graph replay flat input count changed')
+      if any(type(x) not in (torch.Tensor, torch.nn.Parameter) for x in tensors):
+        raise TypeError('graph replay rejects Tensor subclasses, FakeTensors and tensor modes')
+      result = iter(self._executor.run([*tensors, *self._bound]))
+      outputs = [next(result) if isinstance(x, _Ref) else x for x in self._output_leaves]
+      return tree_unflatten(outputs, self._output_spec)
+    finally:
+      self._lock.release()
 
   def __call__(self, *args, **kwargs):
     import torch

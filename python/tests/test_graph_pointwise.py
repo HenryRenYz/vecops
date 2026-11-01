@@ -384,3 +384,136 @@ def test_same_dtype_copy_preserves_raw_nan_payloads(dtype, broadcast):
     program = capture.compile_torch(native_pointwise=True, borrow_outputs=True)
     assert program.allocator_policy['native_pointwise_inplace_nodes'] == 1
     assert torch.equal(program(x).view(torch.int16), function(x).view(torch.int16))
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('count,keepdim', [(0,False),(24,False),(24,True)])
+def test_short_axis_sum_preserves_dtype_rebinding_and_empty_reduction(dtype,count,keepdim):
+  torch.set_num_threads(4)
+  # Noncontiguous outer rows, contiguous features; no shared output fill.
+  x=torch.randn(6,count,128,dtype=dtype)[::2]
+  function=lambda x: x.sum(-2,keepdim=keepdim)
+  with torch.inference_mode():
+    capture=GraphCapture('short-axis-reduction')
+    capture.capture_torch(function,x)
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    assert program.allocator_policy['native_pointwise_nodes']==1
+    for i in range(2):
+      value=x.clone(memory_format=torch.preserve_format)+i
+      # Match the captured strides even when a clone compacts outer rows.
+      rebound=torch.empty(6,count,128,dtype=dtype)[::2]
+      rebound.copy_(value)
+      torch.testing.assert_close(program(rebound),function(rebound))
+
+
+def test_scalar_noise_chain_and_fill_are_recorded_without_reading_uninitialized_output():
+  torch.set_num_threads(4)
+  def function(x):
+    y=torch.empty(3,128)
+    y.fill_(2.)
+    scale=torch.sqrt(x**2+1.)
+    return y/scale
+  with torch.inference_mode():
+    capture=GraphCapture('scalar-noise-chain')
+    capture.capture_torch(function,torch.tensor(2.))
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    assert program.allocator_policy['native_pointwise_inplace_nodes']>=1
+    for x in (torch.tensor(2.),torch.tensor(3.),torch.tensor(float('inf'))):
+      torch.testing.assert_close(program(x),function(x))
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+      program(torch.tensor(4.))
+    assert not {'aten::fill_','aten::pow','aten::sqrt'}.intersection(x.key for x in profile.key_averages())
+
+
+def test_float64_scalar_conversion_and_float32_promotion_stay_in_island():
+  torch.set_num_threads(4)
+  def function(x,scalar):
+    value=scalar.to(torch.float32)
+    return ((x+scalar)*value).relu()
+  with torch.inference_mode():
+    x=torch.randn(4,128)
+    scalar=torch.tensor(1.125,dtype=torch.float64)
+    capture=GraphCapture('wrapped-double-scalar')
+    capture.capture_torch(function,x,scalar)
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    assert program.allocator_policy['native_pointwise_nodes']>=4
+    for number in (1.125,-.37,3.5):
+      scalar=torch.tensor(number,dtype=torch.float64)
+      torch.testing.assert_close(program(x,scalar),function(x,scalar),rtol=0,atol=0)
+
+
+def test_flat_tensor_replay_keeps_metadata_alias_and_tensor_type_guards():
+  with torch.inference_mode():
+    x,y=torch.ones(3,17),torch.ones(3,17)*2
+    capture=GraphCapture('flat-tensor-inputs')
+    capture.capture_torch(lambda pair: (pair[0]+pair[1])*2,(x,y))
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    torch.testing.assert_close(program.run_tensors((x,y)),(x+y)*2)
+    torch.testing.assert_close(program.run_tensors((x+1,y+2)),(x+y+3)*2)
+    with pytest.raises(RuntimeError,match='metadata guard'):
+      program.run_tensors((x[:2],y[:2]))
+    with pytest.raises(RuntimeError,match='alias guard'):
+      program.run_tensors((x,x))
+    with pytest.raises(ValueError,match='input count'):
+      program.run_tensors((x,))
+    class SubTensor(torch.Tensor):
+      pass
+    with pytest.raises(TypeError,match='subclasses'):
+      program.run_tensors((x.as_subclass(SubTensor),y))
+    with pytest.raises(RuntimeError,match='Named|named tensors'):
+      program.run_tensors((x.refine_names('a','b'),y))
+    # Rejection must not poison the executable or bypass the shared lock.
+    torch.testing.assert_close(program((x,y)),(x+y)*2)
+
+
+def test_flat_tensor_replay_rejects_captured_static_non_tensor_leaves():
+  with torch.inference_mode():
+    x=torch.ones(3,17)
+    capture=GraphCapture('flat-tensor-static-argument')
+    capture.capture_torch(lambda x,scale: x*scale,x,2.)
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    with pytest.raises(ValueError,match='all captured input leaves'):
+      program.run_tensors((x,))
+
+
+def test_integer_seed_offsets_stay_in_island_and_preserve_full_width_wrap():
+  function=lambda x: ((x+3)+(1<<60))+11
+  with torch.inference_mode():
+    x=torch.tensor([7],dtype=torch.int64)
+    capture=GraphCapture('integer-seed-offsets')
+    capture.capture_torch(function,x)
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    assert program.allocator_policy['native_pointwise_nodes']==3
+    assert max(program.allocator_policy['native_island_sizes'])>=3
+    for value in (7,-19,(1<<63)-5,-(1<<63)+2):
+      x=torch.tensor([value],dtype=torch.int64)
+      assert torch.equal(program.run_tensors((x,)),function(x))
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+      program(x)
+    assert not {'aten::add','aten::add.Tensor'}.intersection(x.key for x in profile.key_averages())
+
+
+def test_large_integer_fill_retains_direct_aten_conversion():
+  # Above an FP32 midpoint, conversion through FP64 rounds to the other side.
+  value=(1<<62)+(1<<38)+1
+  def function(x):
+    result=torch.empty_like(x)
+    return result.fill_(value)
+  with torch.inference_mode():
+    x=torch.empty(3,17)
+    capture=GraphCapture('large-integer-fill-fallback')
+    capture.capture_torch(function,x)
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    assert program.allocator_policy['native_pointwise_inplace_nodes']==0
+    assert torch.equal(program(x).view(torch.int32),function(x).view(torch.int32))
+
+
+def test_short_axis_sum_empty_outer_batch_has_no_grid_work():
+  with torch.inference_mode():
+    x=torch.empty(0,24,128)
+    capture=GraphCapture('short-sum-empty-batch')
+    capture.capture_torch(lambda value:value.sum(-2),x)
+    program=capture.compile_torch(native_pointwise=True,borrow_outputs=True)
+    assert program.allocator_policy['native_pointwise_nodes']==1
+    result=program.run_tensors((torch.empty_like(x),))
+    assert result.shape==(0,128) and result.dtype==torch.float32

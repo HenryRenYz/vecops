@@ -11,6 +11,7 @@
 #include "vecops/vec/Vec.h"
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 #include <type_traits>
 
 using namespace vecops;
@@ -94,14 +95,24 @@ void __kernel__(execution::KernelBuilder& builder, auto a, auto b, auto output, 
             return;
           }
         }
+        if constexpr (Operation == 22) {
+          // A guarded scalar: use the ordinary correctly-rounded sqrtf, not
+          // rsqrt/reciprocal or an approximation that changes noise scaling.
+          *output.data() = static_cast<typename decltype(output)::ElementType>(std::sqrt(static_cast<float>(*a.data())));
+          return;
+        }
         const auto lanes = vec::size(Tag{});
         for (nint_t column = first; column < last; column += lanes) {
           const auto active = vec::opt::first(std::min(lanes, last - column));
-          auto x = load(a, ao, column, active);
-          if constexpr (Operation == 5)
+          auto x = [&] {
+            if constexpr (Operation == 20) return vec::fill(Tag{}, static_cast<float32_t>(alpha));
+            else return load(a, ao, column, active);
+          }();
+          if constexpr (Operation == 21) x = vec::mul(Tag{}, x, x);
+          else if constexpr (Operation == 5)
             x = vec::blend(Tag{}, x, vec::cmplt(Tag{}, x, vec::fill(Tag{}, 0.f)), vec::fill(Tag{}, 0.f));
           else if constexpr (Operation == 6) x = vec::neg(Tag{}, x);
-          else if constexpr (Operation != 0) {
+          else if constexpr (Operation != 0 && Operation != 20 && Operation != 22) {
             auto y = [&] {
               if constexpr (Operation >= 10) return vec::fill(Tag{}, static_cast<float32_t>(alpha));
               else return load(b, bo, column, active);
