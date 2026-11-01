@@ -317,3 +317,30 @@ def test_read_write_bridge_publishes_artifact_after_unchanged_validation(monkeyp
   assert _schema_bridge._compile_pending_torch_bridges_impl(registrations=[registration]) == 0
   assert CompilerStub.build_backend.calls == 1
   assert registration.materialized
+
+
+def test_source_built_torch_uses_one_loaded_openmp_runtime(monkeypatch, tmp_path):
+  from vecops import _schema_bridge
+  libs=tmp_path/'torch-lib'
+  libs.mkdir()
+  (libs/'libtorch_cpu.so').touch()
+  runtime=tmp_path/'external/libomp.so'
+  monkeypatch.setattr(_schema_bridge,'_mapped_openmp_runtime_paths',lambda:{runtime})
+  assert _schema_bridge._torch_openmp_runtime((libs,), 'ATen parallel backend: OpenMP')=='omp'
+  monkeypatch.setattr(_schema_bridge,'_mapped_openmp_runtime_paths',lambda:{runtime,tmp_path/'other/libomp.so'})
+  with pytest.raises(RuntimeError,match='one loaded'):
+    _schema_bridge._torch_openmp_runtime((libs,), 'ATen parallel backend: OpenMP')
+
+
+def test_libomp_policy_recognizes_bisheng_compiler_wrapper(monkeypatch, tmp_path):
+  from vecops import _schema_bridge
+  wrapper=tmp_path/'bisheng-cxx'
+  wrapper.write_text('#!/bin/sh\necho "BiSheng Compiler clang version 20.1.0"\n')
+  wrapper.chmod(0o700)
+  libs=tmp_path/'torch-lib';libs.mkdir()
+  (libs/'libomp.so').touch()
+  monkeypatch.delenv('VECOPS_TORCH_BRIDGE_CC',raising=False)
+  monkeypatch.delenv('VECOPS_TORCH_BRIDGE_CXX',raising=False)
+  policy=_schema_bridge._torch_bridge_build_policy(_config(cxx_compiler=wrapper),
+      (libs,),'ATen parallel backend: OpenMP')
+  assert policy.compile_flags==('-fopenmp=libomp',)

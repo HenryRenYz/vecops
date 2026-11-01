@@ -134,6 +134,9 @@ def _thread_pool_pointer(torch: Any, qualified_name: str) -> ctypes.c_void_p:
   global _native_thread_pool
   mode = os.environ.get("VECOPS_THREAD_POOL", "torch").strip().lower()
   if mode in ("", "torch"):
+    if os.environ.get("VECOPS_TORCH_RESIDENT_TEAM", "0") == "1":
+      from ._torch_pool import address
+      return address()
     return ctypes.c_void_p(None)
   if mode != "native":
     raise RuntimeError(f"VECOPS_THREAD_POOL must be 'torch' or 'native', got {mode!r}")
@@ -1036,10 +1039,18 @@ def _torch_openmp_runtime(torch_libraries: tuple[Path, ...], torch_parallel_info
     for path in directory.iterdir()
     if path.is_file() and (runtime := _openmp_runtime_kind(path.name)) is not None
   }
+  if not detected and any((path / "libtorch_cpu.so").is_file() for path in torch_libraries):
+    # Source-built Torch need not bundle its runtime. Torch is already loaded
+    # here; require an unambiguous mapped runtime rather than guessing a
+    # compiler/system installation and introducing a second worker pool.
+    loaded = _mapped_openmp_runtime_paths()
+    if len(loaded) != 1:
+      raise RuntimeError(f"OpenMP runtime could not be identified unambiguously: source-built Torch requires one loaded OpenMP runtime, found {sorted(map(str, loaded))}")
+    detected = {"gomp" if _openmp_runtime_kind(path.name) == "gomp" else "omp" for path in loaded}
   if len(detected) != 1:
     detail = ", ".join(sorted(detected)) or "none"
     raise RuntimeError(
-      "Torch reports its OpenMP backend, but its packaged OpenMP runtime "
+      "Torch reports its OpenMP backend, but its packaged/loaded OpenMP runtime "
       f"could not be identified unambiguously (found: {detail})"
     )
   return detected.pop()
@@ -1195,6 +1206,22 @@ def _verify_gomp_runtime(path: Path) -> tuple[str, str]:
   return file_identity(path)
 
 
+def _torch_compiler_family(path):
+  """Recognize executable wrappers as well as conventional compiler names."""
+  import subprocess
+  name=Path(path).name.lower()
+  if 'clang' in name:return True,False
+  if 'g++' in name or 'gcc' in name:return False,True
+  try:
+    version=subprocess.run([str(path),'--version'],capture_output=True,text=True,
+                           check=True,timeout=10).stdout.lower()
+  except (OSError,subprocess.SubprocessError):
+    return False,False
+  clang='clang version' in version
+  gnu=not clang and ('free software foundation' in version or 'gcc version' in version)
+  return clang,gnu
+
+
 def _torch_bridge_build_policy(
   config: native.KernelCompilerConfig,
   torch_libraries: tuple[Path, ...],
@@ -1206,9 +1233,7 @@ def _torch_bridge_build_policy(
   if runtime is None:
     return _TorchBridgeBuildPolicy(toolchain)
 
-  compiler_name = Path(toolchain.cxx_compiler).name.lower()
-  compiler_is_clang = "clang" in compiler_name
-  compiler_is_gnu = not compiler_is_clang and ("g++" in compiler_name or "gcc" in compiler_name)
+  compiler_is_clang,compiler_is_gnu = _torch_compiler_family(toolchain.cxx_compiler)
   explicit_cc = os.environ.get("VECOPS_TORCH_BRIDGE_CC")
   explicit_cxx = os.environ.get("VECOPS_TORCH_BRIDGE_CXX")
   if bool(explicit_cc) != bool(explicit_cxx):
@@ -1218,9 +1243,7 @@ def _torch_bridge_build_policy(
     if bridge_cc is None or bridge_cxx is None:
       raise RuntimeError("the explicitly configured Torch bridge compiler was not found")
     toolchain.c_compiler, toolchain.cxx_compiler = Path(bridge_cc).absolute(), Path(bridge_cxx).absolute()
-    compiler_name = Path(toolchain.cxx_compiler).name.lower()
-    compiler_is_clang = "clang" in compiler_name
-    compiler_is_gnu = not compiler_is_clang and ("g++" in compiler_name or "gcc" in compiler_name)
+    compiler_is_clang,compiler_is_gnu = _torch_compiler_family(toolchain.cxx_compiler)
     if runtime == "gomp" and compiler_is_gnu:
       environment = dict(toolchain.environment)
       flags = environment.get("CXXFLAGS", os.environ.get("CXXFLAGS", ""))
