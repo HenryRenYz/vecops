@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Conservative static-metadata lowering of floating point ATen operations.
 
-The caller owns independent output storage. No ATen dispatcher or allocator is
+The caller owns output storage; exact same-index aliases are supported. No ATen dispatcher or allocator is
 entered by these grids. Each operation preserves its original dtype boundary;
 this is scheduling composition, not algebraic expression fusion.
 """

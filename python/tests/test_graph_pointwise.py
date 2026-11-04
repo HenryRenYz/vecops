@@ -131,6 +131,43 @@ def test_static_views_join_island_and_dynamic_aliases_follow_new_storage():
       torch.testing.assert_close(replay(x), function(x))
 
 
+@pytest.mark.parametrize('length', [0, 2, 4])
+def test_static_narrow_of_input_and_scratch_keeps_aliases_and_joins_island(length):
+  def function(x):
+    a = (x + 1).narrow(0, 1, length)
+    return a.relu() * x.narrow(0, 1, length)
+  with torch.inference_mode():
+    capture = GraphCapture('static-narrow')
+    capture.capture_torch(function, torch.randn(6, 17))
+    replay = capture.compile_torch(native_pointwise=True, borrow_outputs=True)
+    if length:
+      assert 'aten::narrow' not in replay.ir
+      assert replay.allocator_policy['hoisted_static_views'] == 2
+    else:
+      # Empty tensors may expose a null data pointer even though their
+      # underlying storage is nonempty. Keep the operation when the capture
+      # cannot establish an addressed anchor instead of inventing an offset.
+      assert 'aten::narrow' in replay.ir
+    for index in range(3):
+      value = torch.randn(6, 17) + index
+      torch.testing.assert_close(replay(value), function(value), rtol=0, atol=0)
+    if length:
+      assert replay._executor.native_islands() == 1
+
+
+def test_tensor_start_narrow_is_not_prebound_to_captured_contents():
+  def function(x, start):
+    return torch.ops.aten.narrow.Tensor(x, 0, start, 2)
+  with torch.inference_mode():
+    capture = GraphCapture('dynamic-narrow-start')
+    capture.capture_torch(function, torch.arange(6.), torch.tensor(0))
+    replay = capture.compile_torch(native_pointwise=True, borrow_outputs=True)
+    assert 'aten::narrow' in replay.ir
+    for start in (0, 1, 3):
+      value = torch.arange(6.) + 10 * start
+      torch.testing.assert_close(replay(value, torch.tensor(start)), value.narrow(0, start, 2), rtol=0, atol=0)
+
+
 def test_scalar_input_views_hoist_typed_empty_geometry_and_rebind():
   def function(x):
     first, second = x.unbind(0)
@@ -517,3 +554,62 @@ def test_short_axis_sum_empty_outer_batch_has_no_grid_work():
     assert program.allocator_policy['native_pointwise_nodes']==1
     result=program.run_tensors((torch.empty_like(x),))
     assert result.shape==(0,128) and result.dtype==torch.float32
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+def test_dead_pointwise_storage_can_be_donated_without_changing_inputs_or_rounding(dtype):
+  def function(x):
+    return (((x + 1).relu() * 2).neg() + 3).sum(-1)
+  with torch.inference_mode():
+    x = torch.randn(3, 17).to(dtype)
+    capture = GraphCapture('donation-chain')
+    capture.capture_torch(function, x)
+    original = capture._torch_execution_graph.to_dict()
+    regular = capture.compile_torch(native_pointwise=True)
+    reused = capture.compile_torch(native_pointwise=True, native_donation=True)
+    assert capture._torch_execution_graph.to_dict() == original
+    assert reused.allocator_policy['native_pointwise_donations'] >= 3
+    assert reused.allocator_policy['static_scratch_required_bytes'] < regular.allocator_policy['static_scratch_required_bytes']
+    for repeat in range(4):
+      value = x + repeat
+      saved = value.clone()
+      torch.testing.assert_close(reused(value), regular(value), rtol=0, atol=0)
+      torch.testing.assert_close(value, saved, rtol=0, atol=0)
+
+
+def test_donation_preserves_later_alias_reads_and_private_borrowed_output_views():
+  def function(x):
+    a = x + 1
+    old = a.view(3, 17)
+    b = a.relu()
+    c = b * 2
+    return (old + c).neg(), c.view(3, 17)
+  with torch.inference_mode():
+    x = torch.randn(3, 17)
+    capture = GraphCapture('donation-aliases')
+    capture.capture_torch(function, x)
+    program = capture.compile_torch(native_pointwise=True, native_donation=True, borrow_outputs=True)
+    assert program.allocator_policy['native_pointwise_donations'] >= 1
+    for repeat in range(4):
+      value = x + repeat
+      result = program(value)
+      expected = function(value)
+      for actual, wanted in zip(result, expected):
+        torch.testing.assert_close(actual, wanted, rtol=0, atol=0)
+
+
+def test_donation_rejects_broadcast_alias_and_never_donates_external_inputs():
+  def function(x):
+    a = x + 1
+    return (a + a[:1]).sum(-1)
+  with torch.inference_mode():
+    x = torch.randn(3, 17)
+    capture = GraphCapture('donation-broadcast')
+    capture.capture_torch(function, x)
+    program = capture.compile_torch(native_pointwise=True, native_donation=True)
+    assert program.allocator_policy['native_pointwise_donations'] == 0
+    for repeat in range(3):
+      value = x + repeat
+      saved = value.clone()
+      torch.testing.assert_close(program(value), function(value), rtol=0, atol=0)
+      torch.testing.assert_close(value, saved, rtol=0, atol=0)

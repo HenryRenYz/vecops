@@ -124,7 +124,7 @@ class GraphCapture:
   def compile_torch(self, *, memory_plan=None, system=None, domain=None,
                     large_pages: bool = True, native_operators=None,
                     borrow_readonly_state: bool = False, native_pointwise: bool = False,
-                    scratch_allocator=None, borrow_outputs: bool = False):
+                    scratch_allocator=None, borrow_outputs: bool = False, native_donation: bool = False):
     """Lower this capture to a guarded, synchronous C++ CPU interpreter.
 
     Call after ``capture_torch``. Unsupported operators/registrations fail
@@ -149,13 +149,18 @@ class GraphCapture:
     pointwise outputs in a separate private arena. Those returned tensors may
     be overwritten on the next call; clone values that must outlive a replay.
     Unsupported functional ATen results still use their native allocator.
+    ``native_donation=True`` permits audited same-index pointwise grids to
+    reuse a dead, internal, nonescaping temporary. Alias-group liveness is
+    checked and extended through the new result. Inputs, state, broadcast
+    aliases and storage owned by other planners cannot be donated. This cold
+    optimization is opt-in and does not change eager operation schemas.
     """
     from ._replay import compile_torch
     return compile_torch(self, memory_plan=memory_plan, system=system, domain=domain,
                          large_pages=large_pages, native_operators=native_operators,
                          borrow_readonly_state=borrow_readonly_state,
                          native_pointwise=native_pointwise, scratch_allocator=scratch_allocator,
-                         borrow_outputs=borrow_outputs)
+                         borrow_outputs=borrow_outputs, native_donation=native_donation)
 
   def _next_event_id(self) -> tuple[str, int]:
     self._event_counter += 1

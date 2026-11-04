@@ -3112,6 +3112,10 @@ at the event producing a new result. Immutable bound views are constructed at
 compile time. Views of dynamic inputs are evaluated before computation and
 follow rebound addresses. Planner input/binding overlap checks use actual live
 byte spans; disjoint views of one arena owner require no staging copy.
+Integer-argument `narrow` views follow the same guarded geometry rule.
+An empty view without an addressed anchor retains its runtime operation.
+Tensor-valued `narrow` starts remain runtime operations because their offsets
+depend on data rather than input metadata.
 Recorded `to`/`contiguous` calls that returned the exact input tensor are
 eliminated under these static metadata guards, so they do not split an island.
 The C++ executor also moves `as_strided`/relative static views whose tensor
@@ -3521,3 +3525,14 @@ and reentrancy, and runs the same C++ input/state guards for dispatch keys,
 names, metadata, storage sizes, storage aliases and overlapping byte ranges
 before any graph operation. Dynamic input addresses are rebound on each call;
 this is not an unchecked pointer-only entry or an invariant-content promise.
+
+### Shared prepared buffer capacity
+
+`vecops.memory.BufferRequirement`, `plan_buffers` and `BufferSession` are the
+common tensor/graph/native-workspace planning interfaces. See [Memory](Memory.md)
+for ownership, concurrency and static-placement limits. Graph compilation uses
+the active BufferSession automatically for its native/explicit-factory storage,
+including escaping outputs. An explicit `scratch_allocator` still takes
+precedence for transient storage. This does not intercept opaque ATen allocator
+internals. Standalone graph compilation without a BufferSession retains its
+ordinary private Torch allocation behavior.

@@ -393,7 +393,7 @@ def _native_owners(functions, explicit):
 
 def compile_torch(capture, *, memory_plan=None, system=None, domain=None,
                   large_pages=True, native_operators=None, borrow_readonly_state=False,
-                  native_pointwise=False, scratch_allocator=None, borrow_outputs=False):
+                  native_pointwise=False, scratch_allocator=None, borrow_outputs=False, native_donation=False):
   """Compile transactionally and release failed-attempt arena ownership.
 
   Inactive compiler/allocator frame locals are cleared on error, so retaining
@@ -407,7 +407,7 @@ def compile_torch(capture, *, memory_plan=None, system=None, domain=None,
     return _compile_torch_impl(capture, memory_plan=memory_plan, system=system,
         domain=domain, large_pages=large_pages, native_operators=native_operators,
         borrow_readonly_state=borrow_readonly_state, native_pointwise=native_pointwise,
-        scratch_allocator=scratch_allocator, borrow_outputs=borrow_outputs)
+        scratch_allocator=scratch_allocator, borrow_outputs=borrow_outputs, native_donation=native_donation)
   except BaseException as error:
     if saved is not None:
       tape.tensors, tape.storage_bindings, tape.arena_leases, tape.session_owner = saved
@@ -420,7 +420,7 @@ def compile_torch(capture, *, memory_plan=None, system=None, domain=None,
 
 def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
                         large_pages=True, native_operators=None, borrow_readonly_state=False,
-                        native_pointwise=False, scratch_allocator=None, borrow_outputs=False):
+                        native_pointwise=False, scratch_allocator=None, borrow_outputs=False, native_donation=False):
   import torch
   tape = getattr(capture, '_torch_replay_tape', None)
   if tape is None or getattr(capture, '_torch_replay_failed', False):
@@ -428,6 +428,10 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
   _check_context()
   if not isinstance(borrow_readonly_state, bool):
     raise TypeError('borrow_readonly_state must be bool')
+  if not isinstance(native_donation, bool):
+    raise TypeError('native_donation must be bool')
+  if native_donation and not native_pointwise:
+    raise ValueError('native_donation requires native_pointwise')
   if not isinstance(native_pointwise, bool):
     raise TypeError('native_pointwise must be bool')
   if not isinstance(borrow_outputs, bool):
@@ -495,6 +499,12 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
   execution = capture._torch_execution_graph
   pointwise = {}
   pointwise_inplace = {}
+  donations = {}
+  replacements = {}
+  native_rewrites = {}
+  prepared_cache = {}
+  opaque_tensors = set()
+  tensor_spans = tape.tensor_spans
   static_factories = set()
   scratch_owner = None
   scratch_required_bytes = 0
@@ -582,6 +592,58 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
       if (tensor.metadata.device == 'cpu' and not storage.external and not storage.persistent
           and (borrow_outputs or not any(execution.tensors[x].escapes for x in storage.tensors))):
         static_factories.add(identity)
+    if native_donation:
+      from ._donation import plan_reuse
+      from vecops import _schema_bridge
+      native_contracts, native_outputs = {}, {}
+      for ordinal, instruction in enumerate(tape.instructions):
+        if ordinal in pointwise:
+          continue
+        prepared = _schema_bridge.prepare_replay_plan(instruction.function, instruction.arguments,
+            lambda ref: execution.tensors[ref.id].metadata)
+        prepared_cache[ordinal] = prepared
+        if prepared is None:
+          if not instruction.function._schema.name.startswith('aten::'):
+            opaque_tensors.update(refs(instruction.arguments))
+            opaque_tensors.update(refs(instruction.result))
+          continue
+        lease, flags, _, _ = prepared
+        # Only SDK source kernels export this contract. Communication/custom
+        # providers keep their independent completion and ownership semantics.
+        if (not hasattr(lease, 'inplace_contracts') or
+            instruction.function._schema.name in _schema_bridge._replay_plan_providers):
+          opaque_tensors.update(refs(instruction.arguments))
+          opaque_tensors.update(refs(instruction.result))
+          continue
+        paths = getattr(lease, 'argument_paths', None)
+        # Source ABI indices describe call values. Nested/custom paths need a
+        # separate ownership proof; never interpret them as schema positions.
+        if (len(flags) > len(instruction.arguments)
+            or any(isinstance(value, (list, tuple, dict))
+                   for value in instruction.arguments[:len(flags)])
+            or any(refs(instruction.arguments[len(flags):]))
+            or (paths is not None and tuple(paths) != tuple(map(str, range(len(flags)))))):
+          opaque_tensors.update(refs(instruction.arguments))
+          opaque_tensors.update(refs(instruction.result))
+          continue
+        contracts = lease.inplace_contracts
+        if any(i >= len(flags) or o >= len(flags) or flags[i] != 1 or flags[o] != 2
+               for i,o in contracts):
+          raise ValueError('invalid native inplace input/output access contract')
+        native_contracts[ordinal] = contracts
+        native_outputs[ordinal] = [value for value,flag in zip(instruction.arguments,flags)
+                                   if flag == 2 and isinstance(value, _Ref)]
+      eligible = {ordinal:value for ordinal,value in pointwise.items()
+                  if ordinal not in pointwise_inplace
+                  and tape.instructions[ordinal].function._schema.name in {
+                      'aten::add', 'aten::sub', 'aten::mul', 'aten::div', 'aten::relu', 'aten::neg', 'aten::pow'}}
+      execution, donations, replacements, native_rewrites, tensor_spans = plan_reuse(
+          execution, tape.instructions, eligible, pointwise_inplace,
+          set(planned) | set(input_ids) | bound_ids | opaque_tensors, tensor_spans,
+          native_contracts, native_outputs, static_factories)
+      pointwise.update(eligible)
+      pointwise_inplace.update(donations)
+      static_factories.difference_update(replacements)
     scratch_ids = static_factories | {ref.id for ordinal,(_,_,_,ref,_) in pointwise.items()
                                       if ordinal not in pointwise_inplace}
     if scratch_ids:
@@ -590,24 +652,34 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
           for x in execution.storages[execution.tensors[identity].storage_id].tensors)}
       scratch = {}
       transient = scratch_ids - retained
-      if transient:
-        scratch, scratch_owner, scratch_required_bytes = allocate(
-            execution, sorted(transient), allocator=scratch_allocator)
-        owners.append(scratch_owner)
+      # Retained results coexist with transient work and may feed many later
+      # replays. Bind them before reusable temporaries consume common capacity.
       if retained:
         outputs, output_owner, _ = allocate(execution, sorted(retained), allow_escaping=True)
         owners.append(output_owner)
         scratch.update(outputs)
         retained_output_count = len(retained)
+      if transient:
+        intermediates, scratch_owner, scratch_required_bytes = allocate(
+            execution, sorted(transient), allocator=scratch_allocator)
+        owners.append(scratch_owner)
+        scratch.update(intermediates)
       for identity, owned in scratch.items():
         item = graph.addInput('scratch_' + identity);item.setType(torch._C.TensorType.get())
         values[identity] = item;bound.append(owned);examples.append(owned)
       planned.update({identity:scratch[identity] for identity in static_factories})
       planned_aliases.update(identity for identity,tensor in execution.tensors.items()
                              if tensor.storage_id in {execution.tensors[x].storage_id for x in static_factories})
+  def donated_identity(identity):
+    # A donated target can be a view, whose JIT Value is constructed by the
+    # static-view pass or ordinary instruction lowering below. Resolve uses
+    # lazily rather than requiring every view to exist before those passes.
+    while identity in replacements:
+      identity = replacements[identity].id
+    return identity
   def value(item, expected=None):
     if isinstance(item, _Ref):
-      return values[item.id]
+      return values[donated_identity(item.id)]
     if isinstance(expected, torch._C.TensorType) and type(item) in (int, float, bool):
       # TorchDispatch may present a Python scalar to a Tensor schema argument;
       # reproduce the dispatcher's wrapped-number conversion in native IR.
@@ -644,7 +716,7 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
   # at submission, before all grids, and follow rebound input storage addresses.
   alias_nodes = set()
   static_views = {'aten::view', 'aten::_unsafe_view', 'aten::reshape', 'aten::reshape_as',
-                  'aten::select', 'aten::slice', 'aten::unsqueeze', 'aten::squeeze',
+                  'aten::select', 'aten::slice', 'aten::narrow', 'aten::unsqueeze', 'aten::squeeze',
                   'aten::expand', 'aten::transpose', 'aten::permute', 'aten::detach',
                   'aten::alias', 'aten::broadcast_to', 'aten::unflatten',
                   'aten::movedim', 'aten::flatten', 'aten::split',
@@ -662,6 +734,10 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
     name = instruction.function._schema.name
     if name not in static_views:
       continue
+    # narrow.Tensor reads its start from tensor data. Only the integer
+    # overload has geometry fixed by the captured, guarded call contract.
+    if name == 'aten::narrow' and any(type(x) is not int for x in instruction.arguments[1:]):
+      continue
     if isinstance(instruction.result, _Ref):
       outputs = (instruction.result,)
     elif (name in {'aten::split', 'aten::split_with_sizes', 'aten::unbind'}
@@ -674,17 +750,17 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
     for ref in outputs:
       identity = ref.id
       tensor = execution.tensors[identity]
-      low, high = tape.tensor_spans[identity]
+      low, high = tensor_spans[identity]
       root = next((candidate for candidate in anchors.get(tensor.storage_id, ())
           if tensor.metadata.dtype == execution.tensors[candidate].metadata.dtype
-          and tape.tensor_spans[candidate][0] <= low
-          and high <= tape.tensor_spans[candidate][1]), None)
+          and tensor_spans[candidate][0] <= low
+          and high <= tensor_spans[candidate][1]), None)
       if root is None:
         break  # E.g. flatten of a noncontiguous Tensor really allocates.
       meta = tensor.metadata
       # Relocation can compact old arena offsets. Preserve actual relative
       # byte addresses, and validate every result before replacing a list op.
-      delta = tape.tensor_spans[identity][0] - tape.tensor_spans[root][0]
+      delta = tensor_spans[identity][0] - tensor_spans[root][0]
       if delta % meta.element_size:
         break
       offset = delta // meta.element_size
@@ -728,6 +804,8 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
   prepared_nodes = 0
   static_noops = 0
   for ordinal, instruction in enumerate(tape.instructions):
+    if ordinal in native_rewrites:
+      instruction = replace(instruction, arguments=native_rewrites[ordinal])
     if ordinal in alias_nodes:
       continue
     # Torch's composite to/contiguous entry can be recorded even when it
@@ -744,7 +822,7 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
       compiled, a, b, pointwise_output, alpha = pointwise[ordinal]
       if ordinal in pointwise_inplace:
         original_result, target = pointwise_inplace[ordinal]
-        values[original_result.id] = values[target.id]
+        values[original_result.id] = value(target)
       function, specs = compiled.explicit_torch_binding()
       instruction = _Instruction(instruction.event_id, function,
           (a, b, pointwise_output, alpha, *specs), None, instruction.matmul_precision)
@@ -763,8 +841,8 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
         result_id = instruction.result.id
         source = capture._torch_execution_graph.tensors[source_id]
         output = capture._torch_execution_graph.tensors[result_id]
-        low, high = tape.tensor_spans[source_id]
-        start, end = tape.tensor_spans[result_id]
+        low, high = tensor_spans[source_id]
+        start, end = tensor_spans[result_id]
         same_storage = source.storage_id == output.storage_id
         same_dtype = source.metadata.dtype == output.metadata.dtype
         # Empty views access no byte; their implicit offset is inherited too.
@@ -775,7 +853,7 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
         raise ValueError('explicit storage-offset operations on planned arena tensors '
                          f'are unsupported (node {ordinal}: {schema})')
     result_ids = list(refs(instruction.result))
-    if schema.name in {'aten::empty', 'aten::empty_like', 'aten::empty_strided'} and result_ids and all(identity in planned for identity in result_ids):
+    if schema.name in {'aten::empty', 'aten::empty_like', 'aten::empty_strided'} and result_ids and all(identity in planned or identity in replacements for identity in result_ids):
       continue
     arguments = []
     for argument, item in zip(schema.arguments, instruction.arguments):
@@ -804,7 +882,8 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
       if pointwise_output is not None and not m.shape:
         return replace(m, shape=(1,), strides=(1,))
       return m
-    prepared = _schema_bridge.prepare_replay_plan(instruction.function, instruction.arguments, describe_tensor)
+    prepared = (prepared_cache[ordinal] if ordinal in prepared_cache else
+                _schema_bridge.prepare_replay_plan(instruction.function, instruction.arguments, describe_tensor))
     if prepared is not None:
       lease, flags, dtypes, outputs = prepared
       owners.append(lease)
@@ -822,7 +901,7 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
     elif len(schema.returns) > 1:
       for item, output in zip(instruction.result, node.outputs()):
         assign(item, output)
-  outputs = [values[x.id] for x in tape.output_leaves if isinstance(x, _Ref)]
+  outputs = [value(x) for x in tape.output_leaves if isinstance(x, _Ref)]
   node = graph.create('prim::TupleConstruct', outputs, 1);graph.appendNode(node)
   node.output().setType(torch._C.TupleType([x.type() for x in outputs]));graph.registerOutput(node.output())
   torch._C._jit_pass_lint(graph)
@@ -834,6 +913,9 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
   executor = executor_class(ir, examples)
   result = TorchReplay(executor, tape, bound, owners, ir, capture._torch_execution_graph,
                        len(planned), memory_plan, unplanned)
+  result._retained_output_owner = output_owner
+  result._ownership_proof = native_donation
+  result._protected_storages = {execution.tensors[x].storage_id for x in opaque_tensors}
   result.allocator_policy.update(
       recorded_cpp_plan_nodes=prepared_nodes,
       native_pointwise_nodes=len(pointwise),
@@ -843,10 +925,14 @@ def _compile_torch_impl(capture, *, memory_plan=None, system=None, domain=None,
       pointwise_scratch_bytes=sum(execution.tensors[ref.id].metadata.logical_bytes
           for ordinal,(_,_,_,ref,_) in pointwise.items() if ordinal not in pointwise_inplace),
       native_pointwise_inplace_nodes=len(pointwise_inplace),
+      native_pointwise_donations=len(donations),
+      native_kernel_donations=len(native_rewrites),
       static_factory_count=len(static_factories),
       static_scratch_arena_bytes=scratch_owner.numel() if scratch_owner is not None else 0,
       static_scratch_required_bytes=scratch_required_bytes,
       custom_scratch_allocator=scratch_allocator is not None,
+      buffer_placement={kind:owner.placement_stats() for kind,owner in
+          (('transient', scratch_owner), ('retained', output_owner)) if hasattr(owner, 'placement_stats')},
       borrowed_outputs=borrow_outputs,
       retained_output_tensor_count=retained_output_count,
       retained_output_arena_bytes=output_owner.numel() if output_owner is not None else 0,
@@ -922,6 +1008,8 @@ class TorchReplay:
   Newly planned arenas are private, and escaping outputs cannot use their slots.
   """
   def __init__(self, executor, tape, bound, owners, ir, execution, planned_count, plan, unplanned):
+    from vecops.planner.buffers import current_session
+    self._buffer_session = current_session()
     self._executor = executor
     self._input_spec = tape.input_spec
     self._input_refs = tape.input_refs
@@ -929,6 +1017,16 @@ class TorchReplay:
     self._output_leaves = tape.output_leaves
     self._output_spec = tape.output_spec
     self._bound = tuple(bound)
+    # Cold, non-owning evidence for alias-closure checks when linking outputs
+    # into another executable. Distinct StorageImpls may overlap physically.
+    import torch
+    def span(value):
+      if not isinstance(value, torch.Tensor):
+        return None
+      storage = value.untyped_storage()
+      return storage.data_ptr(), storage.nbytes()
+    self._input_storage_spans = tuple(map(span, tape.input_leaves))
+    self._bound_storage_spans = tuple(map(span, self._bound))
     self._owners = tuple(owners) + (tape.module_owner,)
     self.ir = ir
     self.graph = execution
@@ -938,6 +1036,21 @@ class TorchReplay:
                              'functional_aten':'native ATen allocator',
                              'unapplied_slow_plan_storages':unplanned}
     self._lock = threading.Lock()
+
+  def fixed_output_values(self, values):
+    """Cold descriptors for fixed, privately owned output storage only."""
+    from ._output_transfer import fixed_values
+    return fixed_values(self, values)
+
+  def prepare_output_transfer(self, values, consumer, *, input_offset, expected_replays):
+    """Prepare readonly-cache promotion and native copies into free fast space.
+
+    The caller asserts invocation-scoped immutability across all other graphs.
+    Consumer write/opaque effects and unused caches are excluded. Existing
+    placement stays fixed; source allocations retain canonical contents.
+    """
+    from ._output_transfer import prepare
+    return prepare(self, values, consumer, input_offset=input_offset, expected_replays=expected_replays)
 
   def run_tensors(self, tensors):
     """Replay already flattened, all-Tensor inputs in capture leaf order.
@@ -950,6 +1063,11 @@ class TorchReplay:
     import torch
     from torch.utils._pytree import tree_unflatten
     _check_context()
+    if self._buffer_session is not None:
+      from vecops.planner.buffers import current_session
+      if (current_session() is not self._buffer_session or
+          threading.get_ident() != self._buffer_session.thread_id):
+        raise RuntimeError('graph replay requires its prepared BufferSession on its execution thread')
     if not self._lock.acquire(blocking=False):
       raise RuntimeError('graph replay is not reentrant or concurrently callable')
     try:
@@ -970,6 +1088,11 @@ class TorchReplay:
     import torch
     from torch.utils._pytree import tree_flatten, tree_unflatten
     _check_context()
+    if self._buffer_session is not None:
+      from vecops.planner.buffers import current_session
+      if (current_session() is not self._buffer_session or
+          threading.get_ident() != self._buffer_session.thread_id):
+        raise RuntimeError('graph replay requires its prepared BufferSession on its execution thread')
     if not self._lock.acquire(blocking=False):
       raise RuntimeError('graph replay is not reentrant or concurrently callable')
     try:

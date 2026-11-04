@@ -220,13 +220,13 @@ class PlanBinding {
       : flags_(std::move(flags)), dtypes_(std::move(dtypes)), outputs_(std::move(outputs)), arguments_(arguments) {
     TORCH_CHECK(address, "null native kernel plan");
     const auto* source = reinterpret_cast<const VecopsPreparedKernelV1*>(static_cast<uintptr_t>(address));
-    TORCH_CHECK(source->struct_size >= sizeof(VecopsPreparedKernelV1) && source->abi_major == 1 &&
+    TORCH_CHECK(source->struct_size >= offsetof(VecopsPreparedKernelV1, inplace_count) && source->abi_major == 1 &&
         source->retain && source->destroy && source->bind_prevalidated && source->replay &&
         source->execution_context, "invalid retained native kernel plan");
     TORCH_CHECK(flags_.size() == dtypes_.size() && flags_.size() <= arguments_, "invalid native plan argument table");
     for (auto index : outputs_) TORCH_CHECK(index >= 0 && static_cast<size_t>(index) < flags_.size(), "invalid plan output");
     values_.resize(flags_.size()); results_.resize(outputs_.size());
-    abi_ = *source;
+    std::memcpy(&abi_, source, std::min<std::size_t>(source->struct_size, sizeof(abi_)));
     abi_.retain(abi_.context);
     for (size_t i = 0; i < values_.size(); ++i) {
       values_[i].struct_size = sizeof(VecopsValue);
