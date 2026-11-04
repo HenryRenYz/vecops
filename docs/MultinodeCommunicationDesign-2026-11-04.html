@@ -1,0 +1,88 @@
+<!-- SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Vecops 多机 CPU 通信方案</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;color:#183047;background:#eef3f8;margin:0}main{max-width:1220px;margin:auto;padding:36px;background:white}h1{font-size:29px}h2{margin-top:36px;border-bottom:2px solid #d9e4ef;padding-bottom:8px}table{border-collapse:collapse;width:100%;font-size:14px;margin:16px 0}td,th{border:1px solid #d5dfeb;padding:9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#edf3fb}pre{background:#f1f5f9;padding:18px;white-space:pre-wrap}code{background:#f1f5f9}a{color:#175daa}@media print{main{padding:0}table{font-size:11px}}</style><main>
+<h1>Vecops 多机 CPU 通信：直接 MPI 传输、节点代理与图事件</h1>
+<p>2026-11-04 · 设计与初始基线，尚未实现生产网络后端。目标是任意机器数、任意每机进程数下高效完成多机推理；不承诺超过单机。单机共享内存能力继续保留。测试平台为用户指定的 920f-lx / Donau / 200 Gbps RoCE。</p>
+<h2>1. 建议决策</h2>
+<p><strong>上层兼容 torch.distributed，核心保持框架无关；跨机数据面首选直接调用站点 MPI/HMPI，网络之下的 UCX/verbs 由 MPI 管理。这里的直接 MPI 主要是原生异步点对点能力和可选集体快速路径，不是机械地把每个逻辑 collective 替换成同名 MPI collective。</strong>不把每次网络传输再次转交 Python torch.distributed，也不强制所有通信经过 c10d Work。MPI 是可选插件，不成为 vecops 核心或普通单机用户的强制依赖。预留同一 C++ 传输接口的 c10d/Gloo 兼容插件及以后直接 UCX 插件；兼容插件没有通过性能认证时，不作为高速默认路径。</p>
+<p>首选部署是一台机器一个独立网络代理进程，默认两个通信核：一个线程唯一调用 MPI 并推进网络，另一个处理必要的小包归并/布局转换。计算进程不加载 MPI、不轮询网络、不运行隐式 MPI 后台线程。节点内仍使用现有 NUMA 通信。之后才考虑按 NIC/NUMA 增加代理或通道；不把“两个线程”误当成两条网络 rail。</p>
+<table><thead><tr><th>路径</th><th>优点</th><th>实际风险</th><th>定位</th></tr></thead><tbody><tr><td>vecops C++ → MPI/HMPI</td><td>原生缓冲区/字节接口，可直接控制异步进度、线程绑定和固定计划；无 Torch 构建依赖</td><td>MPI 实现/ABI 与 I* 算法表现需实测；MPI 内部仍可能 staging</td><td>首选</td></tr><tr><td>vecops → C++ c10d → MPI</td><td>可复用现有 ProcessGroup</td><td>Work 队列/全局锁、部分算子临时张量与复制、MPI 线程级别和 affinity 不由 vecops 完全控制</td><td>兼容/对照</td></tr><tr><td>vecops → Python torch.distributed → MPI/Gloo</td><td>接入容易</td><td>额外 Python/dispatcher/Work；图内准备、后台线程和内存布局约束较多</td><td>普通 eager 回退；不作图内高速路径</td></tr><tr><td>vecops C++ → UCX</td><td>直接掌握 worker、注册和网络端点</td><td>需自行承担连接、协议、集体算法、错误处理与版本适配</td><td>MPI 确有无法解决的实测瓶颈后再做</td></tr><tr><td>vecops → Gloo</td><td>MPI 不可用时仍可运行</td><td>实际是否 TCP/verbs、集体能力及线程数取决于构建；不能把普通 TCP 当成 RoCE</td><td>通用回退，显式展示所用传输</td></tr></tbody></table>
+<h2>2. 当前实现与 Torch 层开销的具体来源</h2>
+<p>当前 <a href="../python/vecops/distributed/__init__.py">distributed._create</a> 用 boot_id 识别主机，并明确拒绝多主机；跨进程数据由 <a href="../src/comm/Communication.cpp">Communication.cpp</a> 的 shm_open/mmap 和共享原子协议完成。<a href="../python/vecops/distributed/_torch.cpp">_torch.cpp</a> 的 Pending/Queue 仍在 wait/drain 时执行，不是网络后台推进。现有 resident team 由 lane0 发布/轮询，其余 lane 做本地屏障；不能直接把远程指针或共享原子协议延伸到网络。</p>
+<p>本地 pytorch-arm 源码审计版本 68dcff5254e097244e71818e1143af4f70c65e61：ProcessGroupMPI 请求 MPI_THREAD_SERIALIZED，每组有 worker 队列，并通过进程级 pgGlobalMutex 串行 MPI。list allgather 在 worker 中 newLikeFlat、MPI_Allgather，再 copy_ 到各输出；alltoall_base 则可直接把 src/dst 指针交给 MPI_Alltoall，变长分支还构造 lengths/offsets 数组。因此可以指出具体额外成本，<strong>不能据此声称 Torch MPI 一定只有原生 MPI 一半带宽</strong>。实际安装版本需单独验证，连续输出 API也应按它实际调用的路径测量。<a href="https://github.com/pytorch/pytorch/blob/main/torch/csrc/distributed/c10d/ProcessGroupMPI.cpp">上游实现参考</a>。</p>
+<p>Torch 官方支持第三方 backend，因此让 Torch 调用 vecops，而 vecops 网络插件直接调用 MPI，不影响上层通用接口。MPI 是否可用取决于 Torch 构建；直接 MPI 插件不会被 Torch 的 USE_MPI 开关限制。<a href="https://docs.pytorch.org/docs/stable/distributed.html">Torch distributed</a>，<a href="https://docs.pytorch.org/docs/main/distributed/custom_backends.html">自定义 backend</a>。</p>
+<h2>3. 分层、拓扑和任意进程数</h2>
+<p>保留 LocalTransport（现有共享内存），新增 NetworkTransport（插件）与 CompositeCollectivePlan（共同编排）。传输接口只接受固定 region/offset/bytes、request slot 和完成事件，支持 prepare、start_send/recv、start_collective、poll、drain、shutdown；热路径只做一次已解析的函数指针调用，不重新分配 Tensor、注册地址、生成 layout 或查询 Store。</p>
+<p>独立维护 LogicalGroup（全局 rank 顺序）、NodeMembership（host → 此组实际成员列表）、MemoryDomain（host/socket/die/NUMA/内存池）与 NetworkEndpoint（NIC/port/rail/PCIe/共享带宽资源）。跨主机的 NUMA0 是不同的域；本机配置按 host 类型复用，而不是要求所有主机 platform fingerprint/binary hash 完全相同。协议版本、dtype/字节序、操作序列、分段计数和能力交集必须一致；跨 ISA 支持还要单独验证。同一 MPI 作业内各节点代理仍须使用相互兼容的 MPI 实现/协议；允许计算 kernel 的 fingerprint 不同，不代表任意 MPI runtime 可以混用。</p>
+<p>以组内成员清单计算每台主机的 p_h、每源大小 b_r、每源到目的大小 b_rt，不使用 rank % local_world_size 或固定 H×p reshape。节点间组只有含该逻辑组成员的代理；仅一台机器参与时直接走原单机后端。不同逻辑组的代理 communicator 在冷准备期按稳定 group UID 创建，不能要求无关计算 rank 每次参加世界级屏障。</p>
+<p>大多数每机相同进程数的情况可采用规则分块；不等进程数用 Allgatherv/Alltoallv 的 counts/displacements 或点对点分块调度，按字节量平衡。无需因为 p_h 不等就整体退化为所有计算进程直接跑网络 MPI。支持零长度、乱序/交错 rank 映射、子组非成员和某机此组无成员。</p>
+<h2>4. 每机代理如何使用两个通信核</h2>
+<p>首选代理主线程调用 MPI_Init_thread(FUNNELED)，并始终是唯一的 MPI 调用线程；辅助线程只做本地工作。若嵌入进程已由其他线程初始化 MPI，则需要 SERIALIZED 且进程内所有 MPI 使用者遵守同一串行契约；不能错误地请求 FUNNELED 再让非初始化线程调用 MPI。MULTIPLE 只有实测证明需要多 MPI caller 时启用，不作为两个通信核的默认要求。<a href="https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man3/MPI_Init_thread.3.html">MPI 线程级别</a>。</p>
+<p>代理轮询各生产者独立的、填充到 cache line 的 SPSC 队列和完成页，采用有界 request/chunk 窗口与 credit。每次消费只提交已准备好的描述符；通过 MPI_Isend/Irecv + Testsome 持续推进多组、多 peer。可选快速路径为 MPI_Iallgatherv/Ialltoallv，但必须比较非阻塞和阻塞版本：某些实现的非阻塞集体算法可能比阻塞版本慢，不能把“直接 MPI”当成所有 I* 自动同速的保证。必要时用点对点流水组合，避免被低效 I* 算法锁住。</p>
+<p>不能因为 Isend 已返回就假设网络会在计算线程不进 MPI 时自动完成；推进由通信代理承担。固定通信计划可检测 MPI 能力后使用持久请求；优先兼容 MPI-3 的 Send_init/Recv_init，MPI-4 persistent collectives/large counts 仅在实际可用时启用。没有大计数接口时分块避免 int 溢出。<a href="https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm">MPI 完成语义</a>，<a href="https://docs.open-mpi.org/en/main/man-openmpi/man3/MPI_Send_init.3.html">持久点对点请求</a>。</p>
+<p>MPI/UCX/PMIx 自建线程全部计入代理 CPU 预算并核实每个 TID 的实际 affinity；不能只绑最外层线程。节点 launcher 在 MPI/verbs 初始化前启动本机计算进程，或使用独立调度 step；避免初始化 MPI/RDMA 后 fork 一个持续执行的子进程。启动器给非 MPI 计算子进程提供 RANK/LOCAL_RANK/LOCAL_WORLD_SIZE/WORLD_SIZE 与 agent endpoint，并移除继承的 MPI/PMIx rank 环境，防止误占代理的 MPI 身份。代理进程隔离也避免 Torch 内已有不同 MPI ABI 的库冲突。原生插件在构建/加载时记录实际 libmpi 路径、版本与符号，不假定任意同名 libmpi ABI 兼容。</p>
+<p>“两个通信核吃满”成立的前提是 NIC DMA 与减少软件复制。两个核不一定能同时承担所有计算 rank 的完整张量复制和网络推进；私有张量大规模 staging 若超过这两个核的实测复制能力，必须暴露回退成本，或显式允许更多通信核，不能悄悄借用计算核。</p>
+<h2>5. 必须与统一内存规划连接</h2>
+<p>独立代理不能解引用另一进程的 malloc/private anonymous Tensor。新增可导出的 BufferMemorySession region：memfd/shm backing、region ID、offset/span、generation、读写权限及 NUMA placement。通信张量在 prepare 阶段直接分配在可导出池；代理映射同一物理页，双方 VA 可以不同。通过本机控制 socket/SCM_RIGHTS 交换 fd，网络线上只传数据/协议 ID，绝不传本地 VA/fd。</p>
+<p>生产 kernel 直接写计划的共享 outbox；代理从其自身映射地址向 MPI 提交。接收缓冲区也是计算方可见的共享池，接收后无需先复制出代理进程。固定页面和 MPI/UCX 注册缓存预热均在准备阶段完成，持有 region 到所有网络请求和借用 reader 完成；热路径不做 shm_open/mmap/munmap 或重新注册搜索。MPI 内部是否还发生 registration/staging 需要计数与 profiling 证明。</p>
+<p>普通外部私有 Tensor、未知生命周期、未证明可导出的 stride/别名、无法注册的 HBM 路径都保留显式 staging。大非连续块优先让原生生产算子直接写 wire layout；其次用 vec pack/unpack，最后才考虑 derived datatype，并核实其内部有没有隐式 packing。HBM 被暴露为 CPU NUMA 内存不代表已经证明该 NIC 的注册和直达性能，必须测 DDR/HBM 与跨 die NIC 路径。</p>
+<h2>6. 集体算法与布局</h2>
+<table><thead><tr><th>操作</th><th>节点间</th><th>节点内/消费</th><th>收益边界</th></tr></thead><tbody><tr><td>AllGather / Allgatherv</td><td>每个源的数据每个远端节点只接收一份；host 大小 S_h=Σ本地 b_r。连续 slab 用 Iallgatherv，分散输入用分块 P2P 或布局融合</td><td>一份 remote-node cache 按全局 rank 表映射；原有 NUMA share/copy 策略继续工作，优先借用消费</td><td>相对每个本地 rank 各收远端全量，可减少冗余网络；标准可独立写输出仍需本地 materialize</td></tr><tr><td>AllToAll / Alltoallv</td><td>节点 a→b 聚合 Σ(r∈a,t∈b)b_rt；destination-major slab，按就绪 tile 流水</td><td>接收页按目的 NUMA 放置，准备期映射为 source-major 输出或原生 reader 的分段表</td><td>AllToAll 的必要远端 payload 原本只发一次；收益主要是少消息、少提交、少 pack，不承诺基本网络字节再减半</td></tr><tr><td>Broadcast</td><td>根所在节点向其他节点传播一份；广播树由库/校准选择</td><td>节点内共享只读或按标准语义分发</td><td>根可以是任意 rank，不要求 local_rank0</td></tr><tr><td>AllReduce / ReduceScatter</td><td>按字节量选择原生 MPI 或分层规约/分发</td><td>本机原生 reduction 可由通信核或显式协作核执行</td><td>浮点结合顺序变化需要容差/可复现策略验证；不能沿用 Gather 的逐位一致承诺</td></tr></tbody></table>
+<p>例如两台机器各 8 rank、每 rank 贡献 B：若 8 个本地 rank 各自接收另一台机器的 8B，则单台节点需接收 64B；节点聚合只接收 8B，再由本地 reader 使用。这个 8 倍只是该重复网络方案的字节比，不是模型加速比；若下层 MPI 本来已做分层，实际增益会小得多。必须用 NIC 端口计数器核实，而非比较名称。</p>
+<p>页面重映射可以拼接页对齐块，不能零拷贝拼接任意子页碎片。大块可使用冷映射的 padded slab，并把 padding wire 额外字节计入成本；小消息直接归并通常更合理。每个洞的页尾必须初始化，防止发送未定义内容。标准 c10d 输出默认可写且彼此独立，跨 rank 共享输出只允许显式只读借用契约；性能 Hints 本身不授予别名权限。</p>
+<p>采用一个有界 tile 窗口而非整机全部输入到齐才启动：先预贴接收、哪个 producer 的必要片段就绪就发哪片。可合并同一依赖波次的小消息，但不能跨真实依赖无限等待凑包；低延迟模式设置最大等待时间/阈值。MPI derived datatype 是否硬件 SG 必须实测；把内部 pack 换个名字不会减少内存流量。</p>
+<h2>7. 与 graph/resident team 的统一方式</h2>
+<p>新增三个显式动作：NetworkStart、NetworkReady/Wait、Retire。Start 只发布 region/slot/epoch 描述符并返回；独立算子继续执行。消费者只依赖必要的接收 tile 完成；源输入在 send completion 前不能被 consume/inplace/arena 复用，借用接收槽要等本地最后 reader retire 才归还远端 credit。</p>
+<p>这要求图 IR/内存规划器表达 read_until(send_done) 和 write_ready(recv_done)，而非仍把 Start 当成普通同步 read。EventId/请求槽在准备阶段预分配；eager 可返回 Work，图内直接使用原生事件槽。未知 ATen/外部调用保守断开 island，不能对 mutable/void 的 Start/Retire 盲目 DCE。动态 B/count 使用已准备的容量与有界 variant/header，不能在 replay 重新建图或增长注册窗口。</p>
+<p>短的本地 CPU 屏障继续使用 resident team。毫秒级网络等待应结束当前 resident island，或保存预先分配的 continuation，在事件就绪时恢复；不能让 36 个 worker 围着网络事件长期自旋。首版先在 NetworkStart/Wait 处拆图成可继续的 island，确保上一 submission 全部退出且不再观察栈上参数；后续才增加无现场分配的原生 ready-DAG 调度。只由协调者有限自旋后 futex/eventfd 等待，其他 worker 归还池。</p>
+<p>本机 release/acquire 原子只同步本机 CPU。跨机完成以 MPI 接收完成为准，再由代理发布本地 ready；发送完成只允许复用发送源，并不等于远端 reader 已完成。槽位生命周期为 Free → ProducerReady → InFlight → ReceiveReady → ConsumersRetired → Free，带 64 位 epoch 防止复用混淆。MPI 集体不能按普通 request 随意取消；超时/代理故障 poison 组、取消 native team 并终止作业，首版不承诺失败后透明恢复。</p>
+<p>组使用独立 communicator/context，slot/chunk 的 tag 范围在冷准备时核实 MPI_TAG_UB；64 位 epoch 放在协议状态中，不直接截断成 MPI tag。槽位只有全部 request 与 reader 退役后才能回绕。多组就绪次序不同不能把唯一 MPI caller 阻塞在一个依赖尚未满足的 collective 上；因此默认使用可轮询的非阻塞请求，并预贴匹配接收。</p>
+<p>没有独立计算时，通信的真实依赖无法被隐藏。改进指标应为 compute-core 在队列/网络等待中的 CPU 时间、暴露的 critical-path stall 和 wall time，不能把“线程睡着”当成模型加速，也不能把自旋占用率当成有效计算。</p>
+<h2>8. 拓扑配置与手动覆盖</h2>
+<p>沿用 vecops 自己的机器内拓扑文件，在其上增加 cluster manifest / 网络配置；AF3 最多引用路径，不出现 NIC、host leader、NUMA 或 MPI 细节。下面是<strong>拟议 schema v2</strong>，当前 Platform.load(v1) 不接受这些新增字段，不能直接用于现有程序：</p>
+<pre>[topology]
+schema_version = 2
+host_profile = "920f-lx.toml"
+
+[network]
+transport = "mpi"              # mpi / c10d / ucx(future)
+require_rdma = true
+agent_mode = "node_process"
+communication_cpus = [0, 38]     # 示例，须从分配的隔离核及 NIC locality 决定
+progress_threads = 1
+helper_threads = 1
+aggregation = "auto"           # node / per_rank / auto
+algorithm = "auto"             # builtin_nonblocking / p2p_pipeline / ...
+chunk_bytes = 1048576           # 初值；通过真实消息校准
+max_inflight_chunks = 8         # 每 peer/组还要有全局公平上限
+materialization = "auto"       # direct_shared / staged / auto
+profile = "profiles/roce-certified.json"
+
+# manifest: 每台机器可用同一 host_profile，local_ranks 数量可以不同。
+# global rank 的顺序由显式 members 决定，而非机器序号乘固定 local_size。
+</pre>
+<p>CPU ID 示例不覆盖 Donau housekeeping 核；37/75/... 不可选。代理的两个核与所有本地计算子进程的核集合必须互斥，且总量处于同一独占分配预算内。单机原有配置继续直接可用。</p>
+<p>操作级 Hints 扩展为聚合偏好、chunk/inflight、网络算法和低延迟/吞吐倾向，其他后端可忽略。合法性/所有权检查优先；然后是用户 strict override、匹配的认证 profile、保守启发式。显式 require_rdma 不能静默降级 TCP；性能 override 不得绕过顺序、别名或生命周期限制。每个计划提供 explain：选择原因、预计 payload/pack 字节、真实端点、fallback 原因和 CPU 预算。</p>
+<h2>9. 成本模型与自动启用标准</h2>
+<p>冷规划比较 T≈排队/同步 + 消息数×有效启动延迟 + NIC 注入/共享链路/PCIe/内存资源占用 + pack/unpack + 最后暴露的等待。流水可重叠的项使用 pipeline 瓶颈/依赖 DAG 而不是机械相加；代价估计必须留误差余量。合并启用条件是节约的启动次数/冗余网络字节大于新 pack、等待凑包和本机分发成本。</p>
+<p>单条 200 Gbps 端口的原始单向上限是 25 GB/s，payload 更低；两个端口、多 rail 或双向相加必须分别计量。UCX 可按网络设备、PCIe 和 NUMA 选择 rail；设备数不是独立物理带宽之和。保留每个 NIC 的 host/port/GID/速率、实际 endpoint lane、PCIe/NUMA、UCX/PML/算法日志、端口计数器和 CPU affinity。<a href="https://openucx.readthedocs.io/en/master/faq.html">UCX 的设备与 multi-rail 说明</a>。</p>
+<p>现有 2026-10-07 报告的两节点 SendRecv 约 48 GB/s 没有保留实际 lane 证据，不能作为单个 200 Gbps 端口的目标，也不能断定具体 rail 数。新基线先限 RNDV rail=1，并核实实际传输；以后再分别校准 2 rail/多 NIC，不把它们混成库层速度差。</p>
+<p>共享/借用用于少次消费时避免本机复制；重复密集消费比较“远端 NUMA 反复读”的开销，必要时复制到消费者本地 HBM。NIC-local DDR staging 只有注册/带宽/容量收益超过额外复制才选。窗口/分片按网络 bandwidth-delay product、peer 公平性与模型依赖校准，而不是盲目增加线程。</p>
+<h2>10. 920f-lx 验证与性能门槛</h2>
+<p>全部性能测试在 Donau 独占计算节点进行，不在登录节点构建/计时；先记录调度资源、CPU/内存绑定和实际链接。初始探针单独保留在 tools/comm-network：两节点、每节点 1 rank × 2 核，比较同一缓冲区/同一 blocking MPI 算法的直接调用与原子 SPSC 代理线程，尺寸 1 B–64 MiB、5 个交错轮次、每块取最慢 rank，块后检查完整有效 payload。它不等于生产跨进程代理，也不测试计算重叠。</p>
+<div id="probe-results"><p><strong>已完成：作业 2022873，cn11205/cn11206，2 节点独占、每节点 1 rank × 2 核（CPU0/1）、DDR0、HMPI/Open MPI 4.1.6rc4、UCX 1.15.0、RNDV rail 上限 1。</strong>数据操作在两种模式均由 CPU1 执行；另外一个 CPU 都忙轮询。计时外的控制 collective 串行调用。210 个 block 样本完整，5 个交错轮次；每块 warmup 3 次，正式迭代 max(8,min(4096,2GiB/bytes))，1B 为 4096 次、64MiB 为 32 次。两 rank 发送/接收有效 payload 检查均通过，源码 SHA256 在两个节点及本地快照一致。两端实际 tag 使用 rc_verbs/roceroh2:1，完整设备/端点日志保留。</p><table><thead><tr><th>64MiB/远端 peer</th><th>直接 MPI / GB/s</th><th>SPSC 代理 / GB/s</th><th>代理/原生</th><th>耗时 CV 原生/代理</th></tr></thead><tbody><tr><td>sendrecv</td><td>23.699</td><td>23.691</td><td>99.97%</td><td>0.01% / 0.01%</td></tr><tr><td>allgather</td><td>8.691</td><td>8.620</td><td>99.19%</td><td>0.55% / 1.52%</td></tr><tr><td>alltoall</td><td>8.722</td><td>8.724</td><td>100.03%</td><td>0.58% / 1.35%</td></tr></tbody></table><table><thead><tr><th>1B/远端 peer</th><th>直接 MPI / μs</th><th>SPSC 代理 / μs</th><th>差值 / μs</th><th>耗时 CV 原生/代理</th></tr></thead><tbody><tr><td>sendrecv</td><td>1.925</td><td>2.610</td><td>0.686</td><td>4.21% / 3.43%</td></tr><tr><td>allgather</td><td>2.263</td><td>2.636</td><td>0.373</td><td>3.52% / 2.84%</td></tr><tr><td>alltoall</td><td>2.148</td><td>2.798</td><td>0.650</td><td>3.28% / 2.67%</td></tr></tbody></table><p>大块 SendRecv 原生 23.699 GB/s、代理 23.691 GB/s（单向远端 payload/时间；不把双向相加），相对 200 Gbps 的 25 GB/s 原始单向上限约为 94.8%。本探针的 SPSC 派发没有造成大块吞吐减半。1B 的 block 均值中位数增加约 0.37–0.69μs；这是五个块的统计，不是逐调用 p50/p99，不能当作稳定尾延迟保证。两个模式的非 MPI 核均忙自旋，没有证明计算重叠或低 CPU 消耗。</p>
+<p><strong>关键发现：直接 MPI 的 AllGather/AllToAll 仅约 8.69/8.72 GB/s，明显低于同条件 SendRecv 的 23.70 GB/s；代理前后接近，差距已经存在于下层 collective/本地数据处理路径。</strong>尚未 profiling，不能断言具体 memcpy、算法或缓存贡献。实现时必须加入点对点流水、in-place/共享接收布局与内置 collective 的对照，不能机械包装 MPI_Allgather 便认为性能达标。初始探针不证明生产跨进程代理、注册共享内存、多机聚合或模型重叠已经实现。</p>
+<p>计算节点 Torch 2.9.0+cpu，is_mpi_available=False，Gloo 可用；因此没有 Torch MPI 速度对照，未修改共享环境。集群此前测试已观察到不同节点同名 roceroh 设备的 NUMA 归属不同，必须每节点发现/选路；本次 cn11205/06 则均选择 NUMA0 上的 roceroh2。UCX 日志含 wireup send failed -2 诊断与随后成功的连接信息；作业和有效 payload 检查均成功，实际 tag 仍为 rc_verbs。没有端口 byte 计数器，不能由该日志证明全部物理流量归属。2022774 为改变了 MPI 调用 CPU 的探索性测试，2022825 为 1B 迭代过少的中间测试；均单独归档，不混入上述正式统计。</p>
+<p>原始目录：/home/renyz/project/vecops-neo/build/comm-network-20261104/2022873；远端：/home/share/youxin/jobs/lx-run/request-a2ca886bf3fd45dc9168a0fa9f9736c6。源/脚本/运行时链接/资源请求/日志/校验摘要均保留。复现步骤见 tools/comm-network/README.txt。</p></div>
+<table><thead><tr><th>阶段</th><th>比较与验证</th><th>建议门槛（目标，不是已达成结论）</th></tr></thead><tbody><tr><td>传输薄层</td><td>相同 MPI、buffer、算法、线程级别、rail 的 direct C++ 与接口调用；blocking/I* 分开</td><td>大块吞吐≥原生95%；接口本身小包额外 p50 目标≤0.5μs</td></tr><tr><td>代理与本机布局</td><td>实际独立进程、共享出口/接收、私有输入 staging，各自列出；两个通信核总预算</td><td>可导出大块路径目标≥原生95%；代理额外小包 p50 目标≤1μs，p95/p99单列；不达标先修队列/placement</td></tr><tr><td>分层集体</td><td>2/4/8机，1/2/4/8 rank/机；[1,3]、[8,5] 等不等进程数、随机rank顺序、子组、零长/尾块</td><td>AllGather实测节点网络冗余不再随本地进程数线性增长；AllToAll减少消息而非虚报payload减半</td></tr><tr><td>图与内存</td><td>固定/变化B、并发组、复用槽、连续多轮、超时/乱序/消费未退役；所有完成事件对应内容校验</td><td>热阶段无计划增长/映射/注册搜索/Work分配；不可提前复用；不存在跨组死锁</td></tr><tr><td>真实模型</td><td>107/740/959/8j7f；Evoformer/diffusion 分列；2机及不等本地进程数；相同全局worldsize对照</td><td>测pack、网络、到达差异、暴露stall及计算核CPU；Gather/AllToAll字节精确，reduction另定容差；不要求多机超过单机</td></tr></tbody></table>
+<p>“同算法达到原生 95%”只是封装成本门槛，不是最终 collective 效率目标。当前 8.7 GB/s 的内置 collective 不能仅因包装层也达到 8.7 GB/s 就宣布完成；还需与 P2P 流水、共享接收布局对照，根据必要网络字节和必需本地内存流量推导可达范围，解释与 23.7 GB/s 点对点基线的差距。</p>
+<p>薄层测试、SPSC 测试和生产代理的额外开销必须分开。不能仅凭两个通信核跑满网络就宣称聚合、共享映射和调度都已经正确；也不能把多 rank 的 bus bandwidth 相加后与单端口线速直接对比。当前还没有 Torch MPI 对照数据时，不能宣称它快/慢多少。</p>
+<h2>11. 建议实现顺序</h2>
+<ol><li>独立 MPI 插件与能力/ABI 检测；先跑 direct/I* / proxy 的可复现基线，冻结计量定义。</li>
+<li>节点代理和启动器、任意 membership、可导出 region、固定 slot/epoch；先保证普通 AllGather(v)/AllToAll(v)/Broadcast/Barrier 正确。</li>
+<li>Graph Start/Wait/Retire 与异步生命周期；网络等待处拆 resident island，证明计算核不替网络轮询。</li>
+<li>AllGather 的节点一份接收、AllToAll destination-major 与页对齐别名；融合生产布局，逐项计量 staging/fallback。</li>
+<li>多 peer/chunk 公平流水、自动成本选择、手动 override；再评估多 rail、多个 agent 和浮点规约。</li></ol>
+<p>网络 schema、插件接口和图事件均属于待实现方案；本次提交仅保存设计、原生 MPI 代理成本探针与原始证据。现有单机功能不会因该方案默认切换到网络代理。</p>
+</main></html>
