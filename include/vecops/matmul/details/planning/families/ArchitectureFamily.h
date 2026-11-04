@@ -57,6 +57,7 @@
  * planning/FamilyPlan.h.
  */
 
+#include "vecops/matmul/Workspace.h"
 #include <algorithm>
 #include <limits>
 #include <type_traits>
@@ -233,6 +234,10 @@ public:
         c_input_(std::move(c_input)), c_output_(std::move(c_output)) {
     validate();
     initialize_batch_rows_pack_a();
+  }
+
+  VECOPS_INLINE auto workspace_parts() const {
+    return WorkspacePlanner::parts(*this);
   }
 
   VECOPS_INLINE nint_t required_workspace() const {
@@ -1359,7 +1364,8 @@ private:
       const auto b_layout = auto_packed_layout<::vecops::matmul::Operand::B>(b_);
       using TB = typename Atom::TB;
       auto* b_data = static_cast<TB*>(workspace.allocate(
-          tensor::numel(b_layout) * static_cast<nint_t>(sizeof(TB)), 64));
+          tensor::numel(b_layout) * static_cast<nint_t>(sizeof(TB)), 64,
+                                                         ::vecops::matmul::WorkspacePart::PackB));
       auto b_tensor = tensor::make_tensor(b_data, b_layout);
       if constexpr (SMEBatchRowsFullPackCandidate) {
         if (VECOPS_LIKELY(batch_rows_flatten_enabled())) {
@@ -1368,7 +1374,7 @@ private:
           const auto a_layout = batch_rows_packed_a_layout();
           using TA = typename Atom::TA;
           auto* a_data = static_cast<TA*>(workspace.allocate(
-              tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
+              tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64, ::vecops::matmul::WorkspacePart::PackA));
           auto a_tensor = tensor::make_tensor(a_data, a_layout);
           const auto batch = tensor::size<0>(
               c_output_.output_layout());
@@ -1388,7 +1394,8 @@ private:
       const auto a_layout = auto_packed_layout<::vecops::matmul::Operand::A>(a_);
       using TA = typename Atom::TA;
       auto* a_data = static_cast<TA*>(workspace.allocate(
-          tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
+          tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64,
+                                                         ::vecops::matmul::WorkspacePart::PackA));
       auto a_tensor = tensor::make_tensor(a_data, a_layout);
       const bool reuse_a = static_cast<nint_t>(tensor::stride<0>(
           a_.input_layout())) == 0;
@@ -1415,7 +1422,8 @@ private:
       const auto layout = auto_packed_layout<::vecops::matmul::Operand::A>(a_);
       using TA = typename Atom::TA;
       auto* data = static_cast<TA*>(workspace.allocate(
-          tensor::numel(layout) * static_cast<nint_t>(sizeof(TA)), 64));
+          tensor::numel(layout) * static_cast<nint_t>(sizeof(TA)), 64,
+                                                       ::vecops::matmul::WorkspacePart::PackA));
       auto packed_tensor = tensor::make_tensor(data, layout);
       const bool reuse = static_cast<nint_t>(tensor::stride<0>(
           a_.input_layout())) == 0;
@@ -1440,7 +1448,8 @@ private:
       const auto layout = auto_packed_layout<::vecops::matmul::Operand::B>(b_);
       using TB = typename Atom::TB;
       auto* data = static_cast<TB*>(workspace.allocate(
-          tensor::numel(layout) * static_cast<nint_t>(sizeof(TB)), 64));
+          tensor::numel(layout) * static_cast<nint_t>(sizeof(TB)), 64,
+                                                       ::vecops::matmul::WorkspacePart::PackB));
       auto packed_tensor = tensor::make_tensor(data, layout);
       const bool reuse = static_cast<nint_t>(tensor::stride<0>(
           b_.input_layout())) == 0;
@@ -1457,7 +1466,7 @@ private:
               auto* a_data = static_cast<TA*>(workspace.allocate(
                   tensor::numel(a_layout) *
                       static_cast<nint_t>(sizeof(TA)),
-                  64));
+                  64, ::vecops::matmul::WorkspacePart::PackA));
               auto a_tensor = tensor::make_tensor(a_data, a_layout);
               const auto batch = tensor::size<0>(
                   c_output_.output_layout());
@@ -1543,8 +1552,8 @@ private:
             tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA));
         const nint_t b_bytes =
             tensor::numel(b_layout) * static_cast<nint_t>(sizeof(TB));
-        auto* a_data = static_cast<TA*>(workspace.allocate(a_bytes, 64));
-        auto* b_data = static_cast<TB*>(workspace.allocate(b_bytes, 64));
+        auto* a_data = static_cast<TA*>(workspace.allocate(a_bytes, 64, ::vecops::matmul::WorkspacePart::PackA));
+        auto* b_data = static_cast<TB*>(workspace.allocate(b_bytes, 64, ::vecops::matmul::WorkspacePart::PackB));
         auto a_tensor = tensor::make_tensor(a_data, a_layout);
         auto b_tensor = tensor::make_tensor(b_data, b_layout);
         run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a_, a_tensor);
@@ -1558,7 +1567,7 @@ private:
         using TA = typename Atom::TA;
         const nint_t bytes =
             tensor::numel(layout) * static_cast<nint_t>(sizeof(TA));
-        auto* data = static_cast<TA*>(workspace.allocate(bytes, 64));
+        auto* data = static_cast<TA*>(workspace.allocate(bytes, 64, ::vecops::matmul::WorkspacePart::PackA));
         auto packed_tensor = tensor::make_tensor(data, layout);
         run_matmul_pack<Atom, ::vecops::matmul::Operand::A>(scope, a_, packed_tensor);
         execute_problem(
@@ -1570,7 +1579,7 @@ private:
         using TB = typename Atom::TB;
         const nint_t bytes =
             tensor::numel(layout) * static_cast<nint_t>(sizeof(TB));
-        auto* data = static_cast<TB*>(workspace.allocate(bytes, 64));
+        auto* data = static_cast<TB*>(workspace.allocate(bytes, 64, ::vecops::matmul::WorkspacePart::PackB));
         auto packed_tensor = tensor::make_tensor(data, layout);
         run_matmul_pack<Atom, ::vecops::matmul::Operand::B>(scope, b_, packed_tensor);
         execute_problem(
@@ -1757,7 +1766,8 @@ private:
     const auto a_layout = batch_rows_packed_a_layout();
     using TA = typename Atom::TA;
     auto* a_data = static_cast<TA*>(workspace.allocate(
-        tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64));
+        tensor::numel(a_layout) * static_cast<nint_t>(sizeof(TA)), 64,
+                                                       ::vecops::matmul::WorkspacePart::PackA));
     auto a_tensor = tensor::make_tensor(a_data, a_layout);
     const auto batch = tensor::size<0>(c_output_.output_layout());
     const auto flat_m = batch * m_;
@@ -1804,7 +1814,8 @@ private:
       if (VECOPS_UNLIKELY(batch_columns_periodic_c_input_enabled())) {
         auto* dense = static_cast<Acc*>(workspace.allocate(
             static_cast<nint_t>(flat_n) *
-                static_cast<nint_t>(sizeof(Acc)), 64));
+                static_cast<nint_t>(sizeof(Acc)), 64,
+                                               ::vecops::matmul::WorkspacePart::Auxiliary));
         for (nint_t batch_index = 0;
              batch_index < static_cast<nint_t>(batch); ++batch_index)
           for (nint_t column = 0;
@@ -1858,7 +1869,7 @@ private:
     const auto max_layout = whole_b_panel_layout();
     using TB = typename Atom::TB;
     auto* packed_data = static_cast<TB*>(workspace.allocate(
-        tensor::numel(max_layout) * static_cast<nint_t>(sizeof(TB)), 64));
+        tensor::numel(max_layout) * static_cast<nint_t>(sizeof(TB)), 64, ::vecops::matmul::WorkspacePart::PackB));
 
     const nint_t panel_n = whole_b_panel_n();
     // Keep the execution boundary type-erased on purpose: propagating the

@@ -171,7 +171,7 @@ public:
     context_.struct_size = sizeof(context_);
     context_.thread_pool = CallGuard::pool(call);
     if (const auto* provider = CallGuard::provider(call)) {
-      if (provider->struct_size < sizeof(VecopsWorkspaceArenaProvider))
+      if (provider->struct_size < offsetof(VecopsWorkspaceArenaProvider, place_buffers))
         throw std::invalid_argument("workspace provider ABI is truncated");
       provider_ = *provider;
       context_.workspace_provider = &provider_;
@@ -180,6 +180,7 @@ public:
   virtual ~PreparedBase() = default;
   virtual void bind_call(const VecopsCall&, bool validate = true) = 0;
   virtual KernelInstance& instance() = 0;
+  virtual const std::vector<VecopsKernelInplaceV1>& inplace_contracts() const = 0;
   CallGuard guard;
   VecopsPreparedKernelV1 abi() {
     return {
@@ -218,7 +219,9 @@ public:
       [](void* p, uint32_t ok) { static_cast<PreparedBase*>(p)->instance().leave(ok != 0); },
       [](void* p) { delete static_cast<PreparedBase*>(p); },
       nullptr,
-      &context_};
+      &context_,
+      static_cast<uint32_t>(inplace_contracts().size()),
+      inplace_contracts().data()};
   }
 
 private:
@@ -236,8 +239,26 @@ public:
     , instance_(std::move(plan), CallGuard::pool(call),
                 CallGuard::provider(call) ? workspace_arena_provider_from_abi(*CallGuard::provider(call))
                                           : default_workspace_arena_provider()) {
+    // Symbolic slots omit nullopt arguments. Export call-value indices,
+    // never the private frame-slot indices used inside KernelBuilder.
+    for (const auto& contract : instance_.plan().inplace_contracts()) {
+      VecopsKernelInplaceV1 mapped{UINT32_MAX, UINT32_MAX};
+      [&]<std::size_t... I>(std::index_sequence<I...>) {
+        auto map = [&](const auto& arg, std::size_t index) {
+          if constexpr (requires { arg.slot(); }) {
+            if (arg.slot() == contract.input) mapped.input = static_cast<uint32_t>(index);
+            if (arg.slot() == contract.output) mapped.output = static_cast<uint32_t>(index);
+          }
+        };
+        (map(std::get<I>(arguments_), I), ...);
+      }(std::make_index_sequence<std::tuple_size_v<Arguments>>{});
+      if (mapped.input == UINT32_MAX || mapped.output == UINT32_MAX)
+        throw std::logic_error("inplace contract does not refer to call arguments");
+      inplace_.push_back(mapped);
+    }
     bind_call(call);
   }
+  const std::vector<VecopsKernelInplaceV1>& inplace_contracts() const override { return inplace_; }
   KernelInstance& instance() override {
     return instance_;
   }
@@ -252,6 +273,7 @@ public:
 private:
   Arguments arguments_;
   KernelInstance instance_;
+  std::vector<VecopsKernelInplaceV1> inplace_;
 };
 
 /** Build once or execute a cached instance. A nonnull output transfers ownership. */
@@ -268,7 +290,9 @@ void launch(const VecopsCall* call, VecopsPreparedKernelV1* output, Build build,
   };
   if (output) {
     auto object = prepare();
-    *output = object->abi();
+    auto abi = object->abi();
+    abi.struct_size = std::min<uint32_t>(output->struct_size, sizeof(abi));
+    std::memcpy(output, &abi, abi.struct_size);
     object.release();
     return;
   }

@@ -124,4 +124,28 @@ TEST(WorkspacePlanTest, DynamicAxisAndDecisionFingerprintGuardReplay) {
   EXPECT_FALSE(bound.accepts({7, 10}, {128}));
 }
 
+TEST(WorkspacePlanTest, FirstFitKeepsAlignmentReservationsAndLifetimeReuse) {
+  LogicalBufferPlan logical;
+  auto append = [&](std::uint64_t site, const char* name, nint_t bytes, nint_t alignment,
+                    double priority, BufferLifetime life) {
+    logical.allocations.push_back({{site, 0}, name,
+      {.bytes = bytes, .alignment = alignment,
+       .estimated_traffic_bytes = priority * bytes}, {life}});
+  };
+  append(1, "a", 64, 64, 4, {0, 4});
+  append(2, "b", 96, 64, 3, {0, 4});
+  append(3, "c", 96, 128, 2, {0, 4});
+  append(4, "later", 64, 64, 1, {4, 8});
+  const std::vector<BufferReservation> reserved{
+      {BufferTier::Fast, 64, 64}, {BufferTier::Fast, 256, 128}};
+  const auto placed = place_buffers(logical, 512, 0, reserved);
+  ASSERT_EQ(placed.entries.size(), 4u);
+  EXPECT_EQ(placed.entries[0].offset, 0);
+  EXPECT_EQ(placed.entries[1].offset, 128);
+  EXPECT_EQ(placed.entries[2].offset, 384);
+  EXPECT_EQ(placed.entries[3].offset, 0);
+  EXPECT_EQ(placed.fast_bytes, 512);
+  EXPECT_EQ(placed.slow_bytes, 0);
+}
+
 } // namespace

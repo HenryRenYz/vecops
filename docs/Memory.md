@@ -184,6 +184,12 @@ temporary's slot.
 
 Sampled loops require special liveness handling: a value allocated before a
 steady sample and read by that sample remains live through the whole loop.
+Loop traffic weights distribute only unobserved iterations across steady samples;
+fully observed indexed layers each keep their own read counts and state identity.
+Their temporary lifetimes end at the recorded last use; only sampled loops need
+invariant widening. Runtime scopes use exact recorded iteration identities and
+reject a changed concrete trip count or an extra iteration of a complete trace.
+Symbolic trip counts retain conservative sampled-loop behavior.
 Its last observed read in a two-iteration trace does not imply that later real
 iterations stop using it. The planner widens these invariant lifetimes to the
 loop exit, and validation rejects cached plans that release them earlier.
@@ -335,3 +341,94 @@ Bounded async request queues count completed bytes and include final draining in
 the shared elapsed envelope. Payload counts bytes once; application read+write
 counts twice. Generation/sentinel verification, page-residence checks, pin/setup
 exclusion and per-worker CPU time are documented in `tools/memory/README.md`.
+
+## Unified prepared buffer memory
+
+`execution/BufferPlan.h` is the common pointer-free buffer IR and interval
+colorer. `WorkspacePlan.h` now only provides source-compatible names. Python
+`memory.BufferRequirement` and `memory.plan_buffers` use that same native
+implementation; graph replay and model tensor planning no longer contain
+independent copies of the interval allocator.
+
+`memory.BufferSession` owns one fast/slow capacity authority. It installs a
+source-kernel provider and also serves model state, explicit tensor factories,
+graph intermediates and retained graph outputs. Capacities are **total managed
+capacities**, not an allowance independently granted to each category. A plan
+sees reservations of other live owners, including alignment and worker replica
+padding. Buffers in one plan can independently select fast or slow memory.
+
+A named `reuse_group` explicitly asserts serialized, non-overlapping execution
+between those plans. Native kernel workspace uses the reserved `native` group;
+prepared graph intermediates use a distinct group because they coexist with
+kernel workspace. Escaping outputs use unique, storage-owned leases. Releasing
+a larger graph lease shrinks its group's reservation to the remaining users.
+Tensor aliases retain physical ownership after session close. Cached native
+workspace metadata does not pin obsolete physical pools across model sessions.
+Factory adapters explicitly report mutable backing arenas that capture must
+isolate. Independent storage-owned leases have no such arena: captured Tensor
+references retain their leases directly. When a captured planner arena does
+need a private snapshot, its allocation uses the same active buffer budget.
+
+Binding is prepare-time only. A new optional `place_buffers` callback on the
+size-versioned arena provider ABI carries individual buffer sizes, traffic,
+worker replication and half-open lifetimes into the same planner. Old provider
+prefixes remain accepted. Prepared execution uses bound pointers, not Python
+allocation callbacks. Moving a live allocation after binding is unsupported;
+reprepare when changing capacity, placement policy or executable concurrency.
+
+```python
+from vecops.memory import BufferRequirement, BufferSession
+with BufferSession(fast_capacity=3 << 30, slow_capacity=16 << 30) as memory:
+  buffers = memory.bind([
+      BufferRequirement('packed-a', 8 << 20, traffic_bytes=128 << 20),
+      BufferRequirement('packed-b', 32 << 20, traffic_bytes=64 << 20),
+  ])
+  # Each buffers[name] owns a lease and exposes a writable buffer protocol.
+  # Prepare/capture kernels using these owners, then replay them synchronously.
+  print(memory.stats())
+  print(memory.manifest())
+```
+
+This version performs conservative static placement as owners are prepared.
+Within a batch it prioritizes required-fast buffers and traffic per allocated
+byte, colors proved-disjoint lifetimes, and spills individual buffers to DDR.
+Already bound owners are not evicted to admit later requests. The existing
+model-state frontend still supplies its loop-weighted benefit/copy-cost
+selection and may retain a compact arena as one layout-constrained lease.
+Reuse across native and graph plans is conservative; their internal timelines
+are not merged into one whole-model liveness schedule. Traffic hints count
+total reads/writes across all replicas in the declared execution interval.
+This is **not** a whole-model optimal solver, an automatic
+prefetch/eviction scheduler, or a cross-process physical-capacity broker.
+External ATen allocations and communication-owned mappings are not implicitly
+captured by this managed allocator. Reserve platform headroom for them.
+The legacy standalone `System.workspace_session` API remains available for
+callers explicitly requesting an isolated workspace provider; AF3 no longer
+uses it.
+
+The common buffer placement preserves deterministic first-fit offsets: it resolves
+conflicting allocations through a plan-local index, sorts their physical ranges,
+and scans for the first aligned gap. It does not repeatedly search the full trace
+at each candidate address. This is preparation-time work; replay uses bound slots.
+
+
+Kernel workspace parts and outer tensors use the same `BufferPlan` allocation
+and placement representation. Kernel grid effects and audited per-call scratch
+contracts now supply narrower lifetimes to that planner. `KernelProgram` can
+link serial C++ plans before arena allocation, while unknown retained states
+remain pinned for its full lifetime. See `WorkspacePlanning.md` for the
+`read`/`overwrite`/`consume`, `allow_inplace`, and opt-in graph donation contracts.
+These capabilities do not imply automatic phase-dependent eviction of model
+weights or cache restoration; such changes require an explicit global schedule
+and prepared restore/copy nodes.
+
+### Prepared readonly replicas in unused capacity
+
+`TorchReplay.prepare_output_transfer` can bind individually selected readonly
+initializer outputs into free fast leases without moving other allocations.
+The slow canonical version remains alive, and its explicit vec copy runs once
+between initializer and steady execution. Unknown/peer ownership and unconsumed
+outputs are excluded. Placement uses steady logical access estimates rather
+than initializer production volume. See WorkspacePlanning for the API and
+immutability contract. This is opt-in; it does not implement transparent
+weight eviction/restoration or a globally optimal phase schedule.

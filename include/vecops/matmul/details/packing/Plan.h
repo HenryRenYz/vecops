@@ -176,13 +176,17 @@ private:
         (::vecops::matmul::is_corresponding_packed_layout<Atom, Side>(
             input.input_layout(), output.output_layout())),
         "packed output layout does not correspond to the input layout");
-    if (tensor::numel(output.output_layout()) != 0) {
-      VECOPS_ASSERT(is_aligned(64, output.tensor().data()),
-                    "packed output base must be 64-byte aligned");
-      VECOPS_ASSERT(
-          reinterpret_cast<const void*>(input.tensor().data()) !=
-              reinterpret_cast<const void*>(output.tensor().data()),
-          "matrix packing does not support in-place output");
+    if constexpr (OutputSpec::OutputTensor::is_bound) {
+      if (tensor::numel(output.output_layout()) != 0) {
+        VECOPS_ASSERT(is_aligned(64, output.tensor().data()),
+                      "packed output base must be 64-byte aligned");
+        if constexpr (InputSpec::InputTensor::is_bound) {
+          VECOPS_ASSERT(
+              reinterpret_cast<const void*>(input.tensor().data()) !=
+                  reinterpret_cast<const void*>(output.tensor().data()),
+              "matrix packing does not support in-place output");
+        }
+      }
     }
   }
 

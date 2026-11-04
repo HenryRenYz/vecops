@@ -306,6 +306,7 @@ public:
                                             .domain = WorkspaceDomain::Global,
                                             .replicas = 1,
                                             .placement = options.placement,
+                                            .estimated_traffic_bytes = options.estimated_traffic_bytes,
                                           });
     return ::vecops::tensor::make_tensor(static_cast<T*>(slot.replica()), std::move(stable_layout));
   }
@@ -471,6 +472,7 @@ private:
                                       .domain = WorkspaceDomain::WorkerLocal,
                                       .replicas = replica_count,
                                       .placement = options.placement,
+                                      .estimated_traffic_bytes = options.estimated_traffic_bytes,
                                     },
                                     persistent);
     VECOPS_CHECK(slot.replica_stride % static_cast<nint_t>(sizeof(T)) == 0,
@@ -765,8 +767,7 @@ private:
           const std::shared_ptr<WorkspaceArenaProvider>& arena_provider)
       : fingerprint(logical.fingerprint)
       , axes(logical.axes)
-      , placement(place_workspace(logical, arena_provider->capacity(WorkspaceTier::Fast),
-                                  arena_provider->capacity(WorkspaceTier::Slow))) {
+      , placement(arena_provider->place(logical)) {
       try {
         reserve(arena_provider);
       } catch (const WorkspaceArenaUnavailable&) {

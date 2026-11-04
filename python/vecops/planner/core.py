@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import hashlib
-import heapq
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -136,13 +135,25 @@ def graph_digest(graph: ExecutionGraph) -> str:
   return hashlib.sha256(graph.dumps(indent=None).encode("utf-8")).hexdigest()
 
 
+def _fully_observed(loop) -> bool:
+  """A concrete loop with every declared iteration present needs no extrapolation."""
+  return isinstance(loop.trip_count, int) and len(set(loop.observed_iterations)) >= loop.trip_count
+
+
 def _event_weights(graph: ExecutionGraph) -> dict[int, float]:
   weights = {event.index: 1.0 for event in graph.events}
   event_index = {event.id: event.index for event in graph.events}
   for loop in graph.loops:
     if not isinstance(loop.trip_count, int) or loop.trip_count <= 0 or not loop.samples:
       continue
-    remaining = max(loop.trip_count - 1, 0)
+    # Fully observed indexed layers each have their own state identities.
+    # Only extrapolate the unobserved iterations over steady samples. Giving
+    # every observed steady iteration (trip_count-1) reads overcounts complete
+    # traces and makes one sampled module appear to own all other layers.
+    explicit = sum(sample.role in {"prologue", "epilogue"} or i == 0
+                   for i, sample in enumerate(loop.samples))
+    steady = len(loop.samples) - explicit
+    remaining = max(loop.trip_count - explicit, 0)
     for sample_index, sample in enumerate(loop.samples):
       begin = event_index[sample.begin_event]
       end = event_index[sample.end_event] if sample.end_event is not None else begin
@@ -151,7 +162,7 @@ def _event_weights(graph: ExecutionGraph) -> dict[int, float]:
       elif sample.role == "epilogue":
         multiplier = 1
       else:
-        multiplier = max(remaining, 1)
+        multiplier = max(remaining / max(steady, 1), 1)
       for index in range(begin, end + 1):
         weights[index] *= multiplier
   return weights
@@ -184,10 +195,11 @@ def _loop_invariant_ends(graph: ExecutionGraph) -> dict[str, int]:
       accesses[graph.tensors[use.tensor_id].storage_id].add(event.index)
   required: dict[str, int] = {}
   for loop in graph.loops:
-    if loop.end_event is None or loop.trip_count == 1:
+    if loop.end_event is None or _fully_observed(loop):
       continue
-    for sample in loop.samples:
-      if sample.role != "steady_sample" or sample.end_event is None:
+    for ordinal, sample in enumerate(loop.samples):
+      steady = sample.role == "steady_sample" or (sample.role is None and ordinal > 0)
+      if not steady or sample.end_event is None:
         continue
       begin, end = indexes[sample.begin_event], indexes[sample.end_event]
       for storage_id, storage in graph.storages.items():
@@ -197,23 +209,7 @@ def _loop_invariant_ends(graph: ExecutionGraph) -> dict[str, int]:
   return required
 
 
-def _profiles(graph: ExecutionGraph, machine: MachineProfile) -> list[_Profile]:
-  weights = _event_weights(graph)
-  invariant_ends = _loop_invariant_ends(graph)
-  event_indexes = {event.id: event.index for event in graph.events}
-  event_scopes = {event.id: event.scope for event in graph.events}
-  explicit_factories = {
-    graph.tensors[tensor_id].storage_id
-    for event in graph.events
-    if event.attributes.get("explicit_factory") is True
-    for tensor_id in event.outputs
-  }
-  steady_ranges = [
-    (event_indexes[sample.begin_event], event_indexes[sample.end_event])
-    for loop in graph.loops
-    for sample in loop.samples
-    if sample.role == "steady_sample" and sample.end_event is not None
-  ]
+def _storage_accesses(graph, weights):
   accesses: dict[str, list[int]] = defaultdict(list)
   access_bytes: dict[str, float] = defaultdict(float)
   writes: set[str] = set()
@@ -249,6 +245,35 @@ def _profiles(graph: ExecutionGraph, machine: MachineProfile) -> list[_Profile]:
     for storage_id, touched in event_storage_bytes.items():
       accesses[storage_id].append(event.index)
       access_bytes[storage_id] += touched * weights[event.index]
+
+  return accesses, access_bytes, writes
+
+
+def storage_traffic(graph):
+  """Loop-weighted payload access bytes, excluding view/metadata-only events."""
+  return dict(_storage_accesses(graph, _event_weights(graph))[1])
+
+
+def _profiles(graph: ExecutionGraph, machine: MachineProfile) -> list[_Profile]:
+  weights = _event_weights(graph)
+  invariant_ends = _loop_invariant_ends(graph)
+  event_indexes = {event.id: event.index for event in graph.events}
+  event_scopes = {event.id: event.scope for event in graph.events}
+  explicit_factories = {
+    graph.tensors[tensor_id].storage_id
+    for event in graph.events
+    if event.attributes.get("explicit_factory") is True
+    for tensor_id in event.outputs
+  }
+  steady_ranges = [
+    (event_indexes[sample.begin_event], event_indexes[sample.end_event])
+    for loop in graph.loops
+    if not _fully_observed(loop)
+    for ordinal, sample in enumerate(loop.samples)
+    if (sample.role == "steady_sample" or (sample.role is None and ordinal > 0))
+    and sample.end_event is not None
+  ]
+  accesses, access_bytes, writes = _storage_accesses(graph, weights)
 
   output_storages = {
     graph.tensors[tensor_id].storage_id for tensor_id in graph.outputs
@@ -472,89 +497,22 @@ def _profile_peak(
   return usage.maximum
 
 
-def _coalesce(blocks: list[tuple[int, int]]) -> list[tuple[int, int]]:
-  result: list[tuple[int, int]] = []
-  for offset, size in sorted(blocks):
-    if result and result[-1][0] + result[-1][1] == offset:
-      result[-1] = (result[-1][0], result[-1][1] + size)
-    else:
-      result.append((offset, size))
-  return result
+def _pack_native(placements, alignment, *, compact):
+  from .buffers import BufferRequirement, plan_buffers
+  placements = list(placements)
+  requirements = [BufferRequirement(p.storage_id, p.bytes, alignment=alignment,
+      placement='slow', lifetimes=((p.begin_event, p.end_event + 1),),
+      traffic_bytes=p.bytes * (p.bytes if compact else 1 / (p.begin_event + 1))) for p in placements]
+  result = plan_buffers(requirements, fast_capacity=0, slow_capacity=(1 << 63)-1)
+  return {name:p['offset'] for name,p in result['buffers'].items()}, result['slow_bytes']
 
 
-def _pack(
-  placements: Iterable[StoragePlacement], alignment: int
-) -> tuple[dict[str, int], int]:
-  ordered = sorted(
-    placements,
-    key=lambda item: (item.begin_event, -item.bytes, item.storage_id),
-  )
-  active: list[tuple[int, str, int, int]] = []
-  free: list[tuple[int, int]] = []
-  offsets: dict[str, int] = {}
-  high_water = 0
-  for placement in ordered:
-    while active and active[0][0] < placement.begin_event:
-      _end, _storage_id, offset, size = heapq.heappop(active)
-      free.append((offset, size))
-    free = _coalesce(free)
-    required = _align_up(placement.bytes, alignment)
-    chosen = None
-    for index, (offset, size) in enumerate(free):
-      aligned = _align_up(offset, alignment)
-      padding = aligned - offset
-      if padding + required <= size:
-        chosen = (index, offset, size, aligned, padding)
-        break
-    if chosen is None:
-      offset = _align_up(high_water, alignment)
-      high_water = offset + required
-    else:
-      index, block_offset, block_size, offset, padding = chosen
-      del free[index]
-      if padding:
-        free.append((block_offset, padding))
-      tail = block_size - padding - required
-      if tail:
-        free.append((offset + required, tail))
-    offsets[placement.storage_id] = offset
-    heapq.heappush(
-      active,
-      (placement.end_event, placement.storage_id, offset, required),
-    )
-  return offsets, high_water
+def _pack(placements, alignment):
+  return _pack_native(placements, alignment, compact=False)
 
 
-def _pack_compact(
-  placements: Iterable[StoragePlacement], alignment: int
-) -> tuple[dict[str, int], int]:
-  """Global decreasing-size first fit for the capacity-constrained tier."""
-  placed: list[tuple[StoragePlacement, int, int]] = []
-  offsets: dict[str, int] = {}
-  high_water = 0
-  for placement in sorted(
-    placements,
-    key=lambda item: (-item.bytes, item.begin_event, item.storage_id),
-  ):
-    required = _align_up(placement.bytes, alignment)
-    cursor = 0
-    occupied = sorted(
-      (offset, size)
-      for existing, offset, size in placed
-      if placement.begin_event <= existing.end_event
-      and existing.begin_event <= placement.end_event
-    )
-    for offset, size in occupied:
-      cursor = _align_up(cursor, alignment)
-      if cursor + required <= offset:
-        break
-      if cursor < offset + size:
-        cursor = offset + size
-    cursor = _align_up(cursor, alignment)
-    offsets[placement.storage_id] = cursor
-    placed.append((placement, cursor, required))
-    high_water = max(high_water, cursor + required)
-  return offsets, high_water
+def _pack_compact(placements, alignment):
+  return _pack_native(placements, alignment, compact=True)
 
 
 def _pack_for_capacity(

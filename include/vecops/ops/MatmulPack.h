@@ -145,6 +145,13 @@ public:
             typename OutputPattern, typename WorkerScratch>
   class PatternPrepared {
   public:
+    /** Constructors/destructors never access workspace contents. Each call
+     * creates fresh cursors/ExecutionSession and initializes scratch before
+     * reading it; no packed-data cache survives a call. KernelPlan may reuse
+     * these buffers at completed grid boundaries, including gaps between uses.
+     */
+    static constexpr bool transient_workspace = true;
+
     static_assert(Parallelism > 0,
                   "prepared MatmulPack parallelism must be positive");
 

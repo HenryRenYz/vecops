@@ -239,3 +239,149 @@ these nodes executes only during construction. All recorded callbacks receive
 explicit input/scalar/state bindings and must not retain references to the
 builder's stack. SME/AMX resource scopes are entered on the executing worker,
 not retained from plan construction.
+
+## Common buffer placement and segmented operator storage
+
+The implementation now lives in `execution/BufferPlan.h`; the workspace names
+above are aliases to this common IR. `BufferMemorySession` accounts for graph
+and tensor owners while placing kernel buffers. KernelBuilder uses this same
+colorer rather than a second append-only allocator. Buffer names and traffic
+hints are retained through the optional prepare-time provider ABI.
+
+Prepared architecture Matmul declares backend scratch, packed A, packed B and
+auxiliary materialization separately. Prepared SDPA declares backend workspace,
+scores, probabilities, output accumulation, row statistics and cached Q/K/V
+packs separately. These are ordinary typed worker buffers and may occupy
+different memory tiers. Each sub-buffer's active capacity is checked before
+execution, including bounded dynamic shapes. Current kernel-plan lifetimes
+remain conservative for independently callable prepared operations; sibling
+C++ declaration scopes alone do not prove storage reuse.
+
+`kernel::WorkspaceView` can bind a table of separately placed segments. Its
+mark/rewind captures each segment cursor. Nested operators use a scoped,
+contiguous child workspace, preserving the parent's activated CPU resource
+configuration and preventing an inner Matmul's packing sites from aliasing an
+attention score buffer. Legacy contiguous views retain their existing meaning.
+Segments are raw typed storage; no `torch.Tensor` wrappers occur inside native
+workers. No placement lookup or allocation occurs on replay.
+
+
+## Grid effects, consumed values and linked serial kernels
+
+`KernelBuilder` uses the common `LogicalBufferPlan` for both named intermediates
+and each separately declared prepared-operation scratch part. Bind a symbolic
+tensor as `execution::read(x)`, `write(x)`, `read_write(x)` or `overwrite(x)`.
+The callback receives the original bound tensor with unchanged Const/stride
+metadata. `overwrite` is an author assertion that every subsequently read byte
+is initialized in this grid on every replay, including dynamic tails. It must
+cover a root buffer view. Plain bindings remain opaque and conservatively live
+for the complete instance; `write` alone does not prove initialization.
+
+Recording a grid returns `KernelStage`. `builder.consume(x, stage)` checks that
+no later recorded use of this slot, its views, or a referencing prepared state
+exists. The declaration changes no eager behavior and grants no external input
+ownership. There is no additional runtime free or barrier. Internally owned
+buffers with a defining overwrite and known effects are colored using their
+grid intervals and existing completion barriers.
+
+Prepared state remains pinned by default: constructors/destructors or retained
+packing can access workspace outside a grid. An audited prepared-operation type
+can declare `static constexpr bool transient_workspace = true`. This contract
+requires constructors/destructors never to access scratch contents, all calls
+to initialize scratch before reading it, and no scratch contents to survive a
+call. Its declared sub-buffers use the union of calling-grid intervals, allowing
+reuse in gaps between invocations. Opaque state retaining such an operation
+pins its scratch transitively. `ops::Matmul::PatternPrepared` and
+`ops::MatmulPack::PatternPrepared` satisfy this contract with fresh per-call
+workspace cursors and `ExecutionSession`; persistent user states do not inherit
+it automatically.
+
+`KernelProgram({plan_a, plan_b}, pool, provider)` links serial C++ kernels through
+one placement and one pair of arena allocations. Eligible internal intervals
+are shifted into a common program timeline. Unknown/prepared persistent storage
+stays live across the entire program, including construction and destruction.
+Use `program.set(phase, argument, address_or_scalar)` before `program.replay()`.
+The program owns its instances and submits one resident team. Its member frames
+cannot be obtained for independent concurrent replay. `buffer_plan()` and
+`placement()` expose cold evidence. This linker currently accepts C++
+`KernelPlan` objects; it does not reinterpret independently compiled Torch
+executables as global phases or release model weights automatically.
+
+## Inplace permission and graph donation
+
+`builder.allow_inplace(input, output)` declares an audited kernel capability for
+identical complete argument views. Every old input read must finish before its
+first overwrite, through same-index worker ordering or an existing completed
+grid. Other input aliases must be excluded. It does not select an alias on its
+own. The optional source-plan ABI exports call-value indices, including correct
+mapping around missing optional arguments; legacy consumers receive only their
+known prefix.
+
+`GraphCapture.compile_torch(native_pointwise=True, native_donation=True)` opts
+into dead-storage reuse for supported pointwise grids and source-kernel
+capabilities. The graph separately verifies internal ownership, whole alias
+liveness, dtype/layout, an uninitialized out buffer, and other-input alias
+hazards. It extends the original allocation lifetime through every donated
+logical version before common planning, and hoists views using relocated byte
+spans. Inputs, persistent/escaping old values, other planners' bindings and
+unproven operations retain their allocation semantics. Tensors touched by opaque
+custom operators or specialized collective providers are protected as whole
+alias groups; local last use does not prove peer completion. Borrowed graph outputs
+still require `borrow_outputs=True`; eager schemas are unchanged. The default
+is `native_donation=False` pending workload-specific correctness and performance
+qualification. Memory reuse performs no DCE of mutable or void native calls.
+
+Ownership follows storage through view/reshape aliases, rather than only the
+Tensor ID originally produced by a kernel. Donation tests the final data use:
+the readonly `other` argument of `view_as`, `reshape_as` and `expand_as` describes
+shape, and does not keep old contents alive. Reads of `self`, writes, unknown
+operations and escaping aliases remain conservative. Earlier uses of an out
+buffer are also conservative, including metadata uses that could precede the
+definition of the proposed input view. Rewritten JIT references resolve at use,
+after static or ordinary view lowering establishes their targets.
+
+## Explicit initializer-to-steady cache transfer
+
+A Torch executable may expose cold `fixed_output_values(values)` descriptors,
+then prepare `producer.prepare_output_transfer(values, consumer,
+input_offset=..., expected_replays=...)`. This API requires an active common
+`BufferSession`, `native_donation=True` ownership analysis, and a caller promise
+that the cache tuple is immutable for the entire invocation, including other
+graphs. It only selects privately owned retained initializer outputs in slow
+memory that the steady executable actually reads. Consumer writes, opaque or
+collective uses, and aliases outside the selected cache inputs exclude a storage.
+
+The planner leaves all existing addresses, offsets and tiers unchanged, ranks
+eligible complete storages by static read bytes per byte of capacity, and binds
+individual fast leases into currently free space. It skips storages larger than
+the largest free extent and caches with no reads. This is a conservative capacity
+heuristic, not a bandwidth-optimal placement proof. Preparation must happen after
+cold eager prototypes are released. It retains canonical slow storage, so peak
+logical capacity includes both versions; it does not retire or migrate weights.
+
+`transfer.replay(values)` is an explicit once-per-invocation native vec copy
+after the initializer and before steady consumption. Four independent vector
+streams preserve bits; no SDMA/libc fallback is used. The copy graph and target
+views are prepared once; replay performs no allocation, mapping, capture or
+placement. Full storage capacity, offset, strides and input alias groups remain
+identical. A different source address or execution thread is rejected. The
+caller must serialize the producer, transfer and consumer. C++ program scratch
+reuse, graph donation and this transfer all draw from the common capacity
+manager, with different explicit ownership/completion contracts.
+
+Link-time alias closure includes both StorageImpl identity and overlapping
+storage byte intervals. Captured input/state spans are cold, non-owning proof
+metadata: an alias outside the rebound cache tuple, including a distinct
+frombuffer StorageImpl or a bound module buffer, excludes promotion. Trailing
+scalar specialization arguments remain distinct from runtime tensor call-value
+indices; nested/custom argument paths stay conservative. Copy kernels have an
+explicit worker upper bound, clamped to the compiled execution provider's
+capacity, independently of compiler job count.
+
+Logical pinning applies within a kernel/program. An explicitly shared workspace
+provider also requires contents to be disposable between unrelated invocations;
+serialization alone does not preserve hidden packing data. Values that survive
+calls should be declared external tensors with owning leases, or kept in an
+isolated provider/program covering all users. The AF3 native scratch paths use
+invocation-local contents; opaque custom state is not made recyclable merely
+by a consume marker.

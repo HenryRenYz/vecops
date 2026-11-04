@@ -18,6 +18,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 #include <limits>
 #include <memory>
 #include <new>
@@ -53,6 +55,13 @@ public:
   [[nodiscard]] virtual nint_t capacity(WorkspaceTier tier) const noexcept = 0;
   virtual WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t alignment) = 0;
 
+  /** Plan all logical buffers together. Called only while preparing bindings.
+   * Providers may account for other live owners and serialized reuse groups.
+   */
+  virtual WorkspacePlacement place(const LogicalWorkspacePlan& logical) {
+    return place_workspace(logical, capacity(WorkspaceTier::Fast), capacity(WorkspaceTier::Slow));
+  }
+
   /** Whether every plan receives a view of the same session-owned arenas. */
   [[nodiscard]] virtual bool shares_arenas_between_plans() const noexcept {
     return false;
@@ -87,8 +96,9 @@ public:
 class AbiWorkspaceArenaProvider final : public WorkspaceArenaProvider {
 public:
   explicit AbiWorkspaceArenaProvider(const VecopsWorkspaceArenaProvider& provider)
-    : provider_(provider) {
-    if (provider_.struct_size < sizeof(VecopsWorkspaceArenaProvider) || provider_.identity == 0 ||
+    : provider_{} {
+    std::memcpy(&provider_, &provider, std::min<std::size_t>(provider.struct_size, sizeof(provider_)));
+    if (provider_.struct_size < offsetof(VecopsWorkspaceArenaProvider, place_buffers) || provider_.identity == 0 ||
         provider_.capacity == nullptr || provider_.allocate == nullptr || provider_.release == nullptr ||
         provider_.retain == nullptr || provider_.release_context == nullptr) {
       throw WorkspaceArenaUnavailable("workspace arena provider ABI is incomplete");
@@ -134,6 +144,55 @@ public:
         std::shared_ptr<void>(arena.owner, [provider](void* value) { provider.release(provider.context, value); });
     }
     return {arena.data, static_cast<nint_t>(arena.capacity), std::move(owner)};
+  }
+
+  WorkspacePlacement place(const LogicalWorkspacePlan& logical) override {
+    if (provider_.struct_size <
+          offsetof(VecopsWorkspaceArenaProvider, place_buffers) + sizeof(provider_.place_buffers) ||
+        provider_.place_buffers == nullptr)
+      return WorkspaceArenaProvider::place(logical);
+    std::vector<VecopsBufferRequirementV1> requests;
+    std::vector<std::vector<VecopsBufferLifetimeV1>> lifetimes;
+    lifetimes.reserve(logical.allocations.size());
+    requests.reserve(logical.allocations.size());
+    for (const auto& allocation : logical.allocations) {
+      auto& times = lifetimes.emplace_back();
+      for (const auto& t : allocation.lifetimes)
+        times.push_back({t.begin, t.end});
+      const auto& r = allocation.request;
+      requests.push_back({allocation.canonical_path.c_str(), static_cast<std::uint64_t>(r.bytes),
+                          static_cast<std::uint64_t>(r.alignment), static_cast<std::uint64_t>(r.replicas),
+                          static_cast<std::uint32_t>(r.domain), static_cast<std::uint32_t>(r.placement),
+                          r.estimated_traffic_bytes, times.data(), times.size()});
+    }
+    std::vector<VecopsBufferPlacementV1> placements(requests.size());
+    std::array<char, 512> message{};
+    VecopsError error{sizeof(error), 0, message.data(), message.size(), 0};
+    const auto status =
+      provider_.place_buffers(provider_.context, requests.data(), requests.size(), placements.data(), &error);
+    if (status != VECOPS_STATUS_OK)
+      throw WorkspaceArenaUnavailable(message.data());
+    WorkspacePlacement result{logical.fingerprint, logical.axes, {}, 0, 0};
+    for (std::size_t i = 0; i < placements.size(); ++i) {
+      const auto& p = placements[i];
+      const auto& a = logical.allocations[i];
+      const auto candidate = workspace_plan_details::candidate(logical, i);
+      if (p.tier != VECOPS_WORKSPACE_TIER_FAST && p.tier != VECOPS_WORKSPACE_TIER_SLOW)
+        throw WorkspaceArenaUnavailable("buffer provider returned an invalid tier");
+      const auto tier = p.tier == VECOPS_WORKSPACE_TIER_FAST ? WorkspaceTier::Fast : WorkspaceTier::Slow;
+      if (p.offset > static_cast<std::uint64_t>(capacity(tier)) ||
+          static_cast<std::uint64_t>(candidate.bytes) > static_cast<std::uint64_t>(capacity(tier)) - p.offset ||
+          p.offset % candidate.alignment ||
+          (a.request.placement == WorkspacePlacementPolicy::FastRequired && tier != WorkspaceTier::Fast) ||
+          (a.request.placement == WorkspacePlacementPolicy::SlowAllowed && tier != WorkspaceTier::Slow))
+        throw WorkspaceArenaUnavailable("buffer provider violated the allocation contract");
+      result.entries.push_back({a.site, tier, static_cast<nint_t>(p.offset), a.request.bytes, candidate.stride,
+                                a.request.replicas, candidate.alignment, a.request.domain, a.request.alignment,
+                                a.request.placement});
+      auto& size = tier == WorkspaceTier::Fast ? result.fast_bytes : result.slow_bytes;
+      size = std::max(size, workspace_plan_details::checked_add(p.offset, candidate.bytes));
+    }
+    return result;
   }
 
   [[nodiscard]] std::uint64_t identity() const noexcept {

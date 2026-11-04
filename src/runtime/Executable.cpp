@@ -392,12 +392,17 @@ Result<std::shared_ptr<PreparedKernel>> Executable::prepare_prevalidated(const V
   VecopsError error{sizeof(VecopsError), 0, message.data(), message.size(), 0};
   auto status = kernel_status(descriptor->prepare(&call, &result, &error), error, "kernel plan preparation failed");
   if (!status.ok()) return status;
-  if (result.struct_size < sizeof(result) || result.abi_major != 1 || !result.context || !result.bind ||
+  if (result.struct_size < offsetof(VecopsPreparedKernelV1, inplace_count) || result.abi_major != 1 || !result.context || !result.bind ||
       !result.bind_prevalidated || !result.replay ||
       !result.enter || !result.run_lane || !result.leave || !result.destroy || result.workers == 0) {
     if (result.context && result.destroy) result.destroy(result.context);
     return make_status(StatusCode::AbiMismatch, "invalid prepared kernel ABI");
   }
+  if (result.struct_size >= sizeof(result) && result.inplace_count && !result.inplace) {
+    result.destroy(result.context);
+    return make_status(StatusCode::AbiMismatch, "null inplace contract table");
+  }
+  result.struct_size = sizeof(result);
   return std::make_shared<PreparedKernel>(module_, result);
 }
 

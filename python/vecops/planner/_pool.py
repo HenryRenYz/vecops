@@ -31,6 +31,10 @@ class TensorPool:
     self.allocations = 0
     self.misses = 0
 
+  def capture_arenas(self):
+    """Mutable backing arenas that executable capture must isolate."""
+    return ((self.owner, self.capacity),)
+
   def _release(self, offset: int, size: int):
     with self._lock:
       self.live_bytes -= size

@@ -6,6 +6,10 @@
  * A source __kernel__ builds a KernelPlan. Only registered grid bodies execute
  * on replay. Bodies must be stateless; inputs, scalars and prepared state enter
  * through explicit bindings. Tensor metadata retains its original C++ types.
+ * Source grids complete synchronously and must not export/retain borrowed
+ * tensor pointers or launch work that outlives grid completion. Asynchronous
+ * or peer-shared ownership requires a specialized provider with explicit
+ * completion/lifetime contracts; graph donation treats it conservatively.
  * A plan is immutable and shareable; each KernelInstance owns separate scratch,
  * prepared state and an allocation-free, non-reentrant replay frame.
  *
@@ -26,6 +30,7 @@
 #include <type_traits>
 #include <vector>
 #include "vecops/execution/Grid.h"
+#include "vecops/runtime/KernelPlanAbi.h"
 #include "vecops/execution/WorkspaceArena.h"
 #include "vecops/execution/WorkspaceTensor.h"
 #include "vecops/tensor/DataAccess.h"
@@ -36,6 +41,7 @@ class KernelBuilder;
 class KernelPlan;
 class KernelInstance;
 class KernelSequence;
+class KernelProgram;
 
 /** One active grid lane. programs() is synchronous; local references captured
  * by its nested callback remain valid. This context must not escape its body.
@@ -105,8 +111,24 @@ struct SlotSpec {
   nint_t alignment = 64;
   const std::type_info* scalar_type = nullptr;
   WorkspacePlacementPolicy placement = WorkspacePlacementPolicy::FastPreferred;
+  std::string name;
+  double estimated_traffic_bytes = 0;
+  nint_t replicas = 1;
+  nint_t worker_bytes = 0;
+};
+enum class AccessMode { Unknown, Read, Write, ReadWrite, Overwrite, CallTemporary };
+struct ResourceAccess {
+  std::size_t slot;
+  AccessMode mode = AccessMode::Unknown;
+  nint_t offset = 0, bytes = 0;
+};
+struct Resources {
+  std::vector<ResourceAccess> buffers;
+  std::vector<std::size_t> states;
 };
 struct StateFactory {
+  Resources resources;
+  bool transient_workspace = false;
   virtual ~StateFactory() = default;
   virtual std::shared_ptr<void> make(const Frame&) const = 0;
 };
@@ -121,6 +143,12 @@ struct PlanData {
   std::vector<SlotSpec> slots;
   std::vector<std::shared_ptr<const StateFactory>> factories;
   std::vector<std::shared_ptr<const Action>> actions;
+  std::vector<Resources> action_resources;
+  std::vector<std::pair<std::size_t, std::size_t>> consumes;
+  LogicalBufferPlan buffers;
+  std::vector<bool> reusable;
+  std::vector<VecopsKernelInplaceV1> inplace;
+
 };
 } // namespace kernel_plan_details
 
@@ -176,6 +204,50 @@ private:
   Pattern pattern_;
 };
 
+/** Grid-local memory effect. Overwrite promises every subsequently read byte
+ * is initialized in this grid on every replay, including dynamic tails. These
+ * wrappers preserve the original resolved tensor and all Const metadata. A
+ * plain binding remains opaque and pins storage for the complete instance.
+ * No ownership or alias permission is implied for external inputs.
+ */
+template <typename Argument, kernel_plan_details::AccessMode Mode>
+class TensorAccess {
+public:
+  explicit TensorAccess(Argument argument) : argument_(std::move(argument)) {}
+  auto owner() const noexcept { return argument_.owner(); }
+  auto slot() const noexcept { return argument_.slot(); }
+  const auto& pattern() const noexcept { return argument_.pattern(); }
+  static constexpr auto access_mode = Mode;
+  auto resolve(const kernel_plan_details::Frame& frame) const { return argument_.resolve(frame); }
+private:
+  Argument argument_;
+};
+template <tensor::UnboundTensorLike P>
+auto read(TensorArgument<P> arg) {
+  return TensorAccess<TensorArgument<P>, kernel_plan_details::AccessMode::Read>{std::move(arg)};
+}
+template <tensor::UnboundTensorLike P>
+auto write(TensorArgument<P> arg) {
+  static_assert(!std::is_const_v<typename P::ElementType>);
+  return TensorAccess<TensorArgument<P>, kernel_plan_details::AccessMode::Write>{std::move(arg)};
+}
+template <tensor::UnboundTensorLike P>
+auto read_write(TensorArgument<P> arg) {
+  static_assert(!std::is_const_v<typename P::ElementType>);
+  return TensorAccess<TensorArgument<P>, kernel_plan_details::AccessMode::ReadWrite>{std::move(arg)};
+}
+template <tensor::UnboundTensorLike P>
+auto overwrite(TensorArgument<P> arg) {
+  static_assert(!std::is_const_v<typename P::ElementType>);
+  return TensorAccess<TensorArgument<P>, kernel_plan_details::AccessMode::Overwrite>{std::move(arg)};
+}
+
+/** Grid boundary in one builder. Valid only for metadata declarations. */
+struct KernelStage {
+  const void* owner;
+  std::size_t index;
+};
+
 /** Runtime scalar slot: its value is read at execution, not plan construction. */
 template <typename T>
 class ScalarArgument {
@@ -215,6 +287,7 @@ public:
   [[nodiscard]] const void* owner() const noexcept {
     return owner_;
   }
+  [[nodiscard]] std::size_t state_slot() const noexcept { return slot_; }
   [[nodiscard]] const T& resolve(const kernel_plan_details::Frame& frame) const {
     return *static_cast<const T*>(frame.states[slot_].get());
   }
@@ -269,17 +342,48 @@ public:
           if constexpr (requires { arg.owner(); }) {
             if (arg.owner() != &plan)
               throw std::invalid_argument("binding belongs to a different kernel plan");
-            if (prepare) {
-              if constexpr (requires { arg.slot(); }) {
-                if (plan.slots[arg.slot()].kind != kernel_plan_details::SlotKind::Buffer)
-                  throw std::invalid_argument("prepare requires patterns/constants, not runtime input values");
-              }
+            if constexpr (requires { arg.slot(); }) {
+              if (arg.slot() >= plan.slots.size())
+                throw std::invalid_argument("binding slot exceeds kernel plan capacity");
+              if (prepare && plan.slots[arg.slot()].kind != kernel_plan_details::SlotKind::Buffer)
+                throw std::invalid_argument("prepare requires patterns/constants, not runtime input values");
+            }
+            if constexpr (requires { arg.state_slot(); }) {
+              if (arg.state_slot() >= plan.factories.size())
+                throw std::invalid_argument("binding state exceeds kernel plan capacity");
             }
           }
         };
         (check(args), ...);
       },
       args_);
+  }
+  [[nodiscard]] kernel_plan_details::Resources resources() const {
+    kernel_plan_details::Resources result;
+    std::apply([&](const auto&... args) {
+      auto collect = [&](const auto& arg) {
+        if constexpr (requires { arg.pattern(); arg.slot(); }) {
+          constexpr auto mode = [] {
+            if constexpr (requires { std::remove_cvref_t<decltype(arg)>::access_mode; })
+              return std::remove_cvref_t<decltype(arg)>::access_mode;
+            else return kernel_plan_details::AccessMode::Unknown;
+          }();
+          const auto& pattern = arg.pattern();
+          using Element = std::remove_const_t<typename std::remove_cvref_t<decltype(pattern)>::ElementType>;
+          result.buffers.push_back({arg.slot(), mode,
+            pattern.element_offset() * static_cast<nint_t>(sizeof(Element)),
+            [&] {
+              if constexpr (mode == kernel_plan_details::AccessMode::Overwrite)
+                return workspace_tensor_details::storage_bytes<Element>(pattern.layout());
+              else return nint_t{0};
+            }()});
+        } else if constexpr (requires { arg.state_slot(); }) {
+          result.states.push_back(arg.state_slot());
+        }
+      };
+      (collect(args), ...);
+    }, args_);
+    return result;
   }
   template <typename Fn>
   decltype(auto) apply(const kernel_plan_details::Frame& frame, Fn&& fn) const {
@@ -326,18 +430,22 @@ public:
     , bindings_(&indices) {
   }
   template <typename T, tensor::LayoutLike Layout>
-  auto tensor(std::string_view, Layout layout) {
+  auto tensor(std::string_view name, Layout layout, WorkspaceTensorOptions options = {}) {
+    workspace_tensor_details::validate_options(options);
     const auto bytes = workspace_tensor_details::storage_bytes<T>(layout);
+    const auto alignment = std::max<nint_t>(64, workspace_tensor_details::allocation_alignment<T>(options));
     void* data = nullptr;
     if (declarations_) {
       indices_->push_back(declarations_->size());
-      declarations_->push_back({kernel_plan_details::SlotKind::Buffer, bytes, std::max<nint_t>(64, alignof(T))});
+      declarations_->push_back({kernel_plan_details::SlotKind::Buffer, bytes, alignment, nullptr, options.placement,
+                                std::string(name), options.estimated_traffic_bytes});
     } else {
       if (cursor_ >= bindings_->size())
         throw std::logic_error("prepared scratch topology changed");
       const auto slot = (*bindings_)[cursor_++];
       const auto& declaration = static_cast<const kernel_plan_details::PlanData*>(frame_->owner)->slots[slot];
-      if (declaration.bytes != bytes || declaration.alignment < static_cast<nint_t>(alignof(T)))
+      if (declaration.bytes != bytes || declaration.alignment != alignment ||
+          declaration.placement != options.placement)
         throw std::logic_error("prepared scratch shape changed during binding");
       data = frame_->slots[slot].address;
     }
@@ -345,21 +453,27 @@ public:
   }
   template <typename T, typename Shape>
     requires tensor::is_shape_v<Shape>
-  auto tensor(std::string_view name, Shape shape) {
-    return tensor<T>(name, tensor::make_layout(std::move(shape)));
+  auto tensor(std::string_view name, Shape shape, WorkspaceTensorOptions options = {}) {
+    return tensor<T>(name, tensor::make_layout(std::move(shape)), options);
   }
   template <typename T, nint_t Replicas, tensor::LayoutLike Layout>
-  auto worker_tensor(std::string_view name, Layout layout) {
+  auto worker_tensor(std::string_view name, Layout layout, WorkspaceTensorOptions options = {}) {
     static_assert(Replicas > 0 && (sizeof(T) & (sizeof(T) - 1)) == 0);
     const auto bytes = workspace_tensor_details::storage_bytes<T>(layout);
-    const auto stride = workspace_plan_details::checked_align_up(bytes, std::max<nint_t>(64, alignof(T)));
-    return tensor<T>(name,
-                     workspace_tensor_details::prepend_worker_layout(meta::cint<Replicas>, layout, stride / sizeof(T)));
+    const auto stride = workspace_plan_details::checked_align_up(
+      bytes, std::max<nint_t>(64, workspace_tensor_details::allocation_alignment<T>(options)));
+    auto result = tensor<T>(name,
+      workspace_tensor_details::prepend_worker_layout(meta::cint<Replicas>, layout, stride / sizeof(T)), options);
+    if (declarations_) {
+      declarations_->back().replicas = Replicas;
+      declarations_->back().worker_bytes = bytes;
+    }
+    return result;
   }
   template <typename T, nint_t Replicas, typename Shape>
     requires tensor::is_shape_v<Shape>
-  auto worker_tensor(std::string_view name, Shape shape) {
-    return worker_tensor<T, Replicas>(name, tensor::make_layout(std::move(shape)));
+  auto worker_tensor(std::string_view name, Shape shape, WorkspaceTensorOptions options = {}) {
+    return worker_tensor<T, Replicas>(name, tensor::make_layout(std::move(shape)), options);
   }
   void finish() const {
     if (bindings_ && cursor_ != bindings_->size())
@@ -409,6 +523,11 @@ public:
   [[nodiscard]] std::size_t state_count() const noexcept {
     return data_->factories.size();
   }
+  [[nodiscard]] const std::vector<VecopsKernelInplaceV1>& inplace_contracts() const noexcept {
+    return data_->inplace;
+  }
+  /** Prepared logical storage and grid-level lifetimes; no addresses. */
+  [[nodiscard]] const LogicalBufferPlan& buffer_plan() const noexcept { return data_->buffers; }
   [[nodiscard]] std::size_t slot_count() const noexcept {
     return data_->slots.size();
   }
@@ -416,6 +535,7 @@ public:
 private:
   friend class KernelBuilder;
   friend class KernelInstance;
+  friend class KernelProgram;
   explicit KernelPlan(std::shared_ptr<const kernel_plan_details::PlanData> data)
     : data_(std::move(data)) {
   }
@@ -460,19 +580,62 @@ public:
    * may change on every replay. Program chunk is one.
    */
   template <nint_t Parallelism, meta::ValueInput Maximum, typename CountArgument, typename Bindings, typename Fn>
-  void indirect_grid(std::string_view name, Maximum maximum, CountArgument count, Bindings bindings, Fn body);
+  KernelStage indirect_grid(std::string_view name, Maximum maximum, CountArgument count, Bindings bindings, Fn body);
   template <nint_t Parallelism, meta::ValueInput Begin, meta::ValueInput End, meta::ValueInput Chunk, typename Bindings,
             typename Fn>
-  void grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body);
+  KernelStage grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body);
   template <nint_t Parallelism, meta::ValueInput Begin, meta::ValueInput End, meta::ValueInput Chunk, typename Bindings,
             typename Fn>
-  void worker_grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body);
+  KernelStage worker_grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body);
   template <typename Bindings, typename Fn>
-  void single(std::string_view name, Bindings bindings, Fn body);
+  KernelStage single(std::string_view name, Bindings bindings, Fn body);
+  /** Author-audited permission to bind an output to exactly the input view.
+   * Every old input value must be read before its first overwrite, whether
+   * through same-index worker ordering or an existing completed grid. Other
+   * inputs must not overlap this view. This declaration never changes eager
+   * bindings; the graph must prove ownership and last use independently.
+   * Only complete external argument views of identical dtype/layout qualify.
+   */
+  template <tensor::UnboundTensorLike P, tensor::UnboundTensorLike Q>
+  void allow_inplace(TensorArgument<P> input, TensorArgument<Q> output) {
+    check_open();
+    static_assert(std::is_same_v<std::remove_const_t<typename P::ElementType>,
+                                std::remove_const_t<typename Q::ElementType>>);
+    static_assert(!std::is_const_v<typename Q::ElementType>);
+    if (input.owner() != data_.get() || output.owner() != data_.get() || input.slot() == output.slot() ||
+        input.slot() >= data_->slots.size() || output.slot() >= data_->slots.size() ||
+        data_->slots[input.slot()].kind != kernel_plan_details::SlotKind::Tensor ||
+        data_->slots[output.slot()].kind != kernel_plan_details::SlotKind::Tensor ||
+        input.pattern().element_offset() || output.pattern().element_offset())
+      throw std::invalid_argument("inplace contract requires root external arguments in this plan");
+    if constexpr (P::Ndim != Q::Ndim) {
+      throw std::invalid_argument("inplace argument ranks differ");
+    } else {
+      for (int axis = 0; axis < P::Ndim; ++axis)
+        if (input.size(axis) != output.size(axis) || input.stride(axis) != output.stride(axis))
+          throw std::invalid_argument("inplace argument layouts differ");
+    }
+    if (input.slot() > UINT32_MAX || output.slot() > UINT32_MAX)
+      throw std::overflow_error("inplace argument index exceeds ABI capacity");
+    data_->inplace.push_back({static_cast<std::uint32_t>(input.slot()), static_cast<std::uint32_t>(output.slot())});
+  }
+  /** Assert the final local use, including aliases and prepared-state uses.
+   * This is checked at finish(), never an eager free or external donation.
+   * Unknown/retained state still prevents reuse even when consumed.
+   */
+  template <tensor::UnboundTensorLike P>
+  void consume(TensorArgument<P> arg, KernelStage after) {
+    check_open();
+    if (arg.owner() != data_.get() || arg.slot() >= data_->slots.size() ||
+        after.owner != data_.get() || after.index >= data_->actions.size())
+      throw std::invalid_argument("consume resource/stage belongs to a different plan");
+    data_->consumes.emplace_back(arg.slot(), after.index);
+  }
   [[nodiscard]] KernelPlan finish();
 
 private:
   void check_open() const;
+  KernelStage record(std::shared_ptr<const kernel_plan_details::Action>, kernel_plan_details::Resources);
   std::shared_ptr<kernel_plan_details::PlanData> data_;
   bool finished_ = false;
 };
@@ -513,6 +676,12 @@ public:
 
 private:
   friend class KernelSequence;
+  friend class KernelProgram;
+  KernelInstance(KernelPlan plan, const VecopsThreadPoolV1* pool,
+                 std::shared_ptr<WorkspaceArenaProvider> provider, const WorkspacePlacement& placement,
+                 WorkspaceArena fast, WorkspaceArena slow);
+  void initialize_frame();
+  void bind_storage(const WorkspacePlacement&, WorkspaceArena fast, WorkspaceArena slow);
   void acquire();
   void release() noexcept;
   void run_lane(nint_t lane, const GridTeam& team) const;
@@ -543,6 +712,36 @@ private:
   std::vector<std::shared_ptr<KernelInstance>> instances_;
   std::vector<KernelInstance*> unique_;
   std::atomic_flag running_ = ATOMIC_FLAG_INIT;
+};
+
+/** Cold link of serial kernels using one BufferPlan and one pair of arenas.
+ * Only buffers with an audited defining overwrite and known grid effects can
+ * overlap across phases. Prepared state and unknown effects stay live for the
+ * complete program, including construction/destruction. External tensors keep
+ * caller-owned storage; this API never donates or mutates them implicitly.
+ * Replay is one resident-team sequence; there is no placement or allocation.
+ * Programs are non-reentrant. Bindings must be set before replay, and neither
+ * a program nor any of its borrowed input/output storage may escape its owner.
+ */
+class KernelProgram {
+public:
+  explicit KernelProgram(std::vector<KernelPlan> plans, const VecopsThreadPoolV1* pool = nullptr,
+                         std::shared_ptr<WorkspaceArenaProvider> provider = default_workspace_arena_provider());
+  template <tensor::UnboundTensorLike P>
+  void set(std::size_t phase, TensorArgument<P> arg, typename P::ElementType* address) {
+    instances_.at(phase)->set(arg, address);
+  }
+  template <typename T>
+  void set(std::size_t phase, ScalarArgument<T> arg, T value) { instances_.at(phase)->set(arg, value); }
+  void replay() { sequence_.replay(); }
+  [[nodiscard]] const LogicalBufferPlan& buffer_plan() const noexcept { return buffers_; }
+  [[nodiscard]] const BufferPlacement& placement() const noexcept { return placement_; }
+  [[nodiscard]] std::uint64_t replay_count(std::size_t phase) const { return instances_.at(phase)->replay_count(); }
+private:
+  LogicalBufferPlan buffers_;
+  BufferPlacement placement_;
+  std::vector<std::shared_ptr<KernelInstance>> instances_;
+  KernelSequence sequence_;
 };
 
 } // namespace vecops::execution

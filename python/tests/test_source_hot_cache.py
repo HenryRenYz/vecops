@@ -66,3 +66,22 @@ def test_identical_metadata_in_a_new_workspace_reprepares_instead_of_failing(sou
       with system.workspace_session(fast_capacity=0, slow_capacity=4096):
         source_call(x+offset,y)
         torch.testing.assert_close(y,(x+offset+1)*2,rtol=0,atol=0)
+
+
+def test_native_buffers_and_tensor_storage_compete_for_one_budget(source_call):
+  from vecops.memory import BufferSession
+  system=vecops.memory.System()
+  x,y=torch.arange(37.),torch.empty(37)
+  with torch.inference_mode(), BufferSession(system=system,fast_capacity=0,slow_capacity=4096) as memory:
+    owner=memory.allocate(128,placement='default')
+    held=torch.frombuffer(owner,dtype=torch.float32).fill_(19)
+    source_call(x,y)
+    before=memory.stats()['plans']
+    for i in range(3):
+      source_call(x+i,y)
+      torch.testing.assert_close(y,(x+i+1)*2,rtol=0,atol=0)
+      torch.testing.assert_close(held,torch.full_like(held,19),rtol=0,atol=0)
+    assert memory.stats()['plans']==before
+    rows=[r for r in memory.manifest() if r['name']=='temp']
+    assert rows and all(r['tier']=='slow' and r['offset']>=128 for r in rows)
+  torch.testing.assert_close(held,torch.full_like(held,19),rtol=0,atol=0)

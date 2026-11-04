@@ -146,6 +146,8 @@ class System:
     large_pages: bool = True,
   ):
     """Create one single-use, bounded vecops workspace session."""
+    if current_session() is not None:
+      raise RuntimeError("isolated workspace providers cannot nest inside a BufferSession")
     return self._native.workspace_session(
       int(fast_capacity),
       None if slow_capacity is None else int(slow_capacity),
@@ -203,3 +205,6 @@ __all__ = [
   "tiers",
   "topology",
 ]
+
+from ._buffers import BufferRequirement, BufferSession, current_session, plan_buffers
+__all__ += ['BufferRequirement', 'BufferSession', 'current_session', 'plan_buffers']

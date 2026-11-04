@@ -19,7 +19,8 @@
  * ## Usage overview
  *
  * @code
- * #include "vecops/ops/Matmul.h"
+ * #include "vecops/matmul/Workspace.h"
+#include "vecops/ops/Matmul.h"
  *
  * using vecops::ops::Matmul;
  * using vecops::ops::MatmulConfig;
@@ -170,8 +171,9 @@ public:
    * A reusable architecture-family plan whose operands carry layout and
    * access semantics but no execution-time addresses.
    *
-   * One scratch tensor is allocated per logical lane when this object is
-   * constructed.  Calls bind the stored patterns to the current operands and
+   * Backend, packed-A, packed-B and auxiliary buffers are declared separately
+   * per logical lane. Each can be placed in a different memory tier. Their
+   * prepared views retain independent cursors and allocation bounds.  Calls bind the stored patterns to the current operands and
    * create the legacy byte cursor and resource session internally.  Thus a
    * kernel author neither sizes nor resets scratch and cannot accidentally
    * share it between lanes.
@@ -184,11 +186,18 @@ public:
             typename CInputPattern, typename COutputPattern, typename WorkerScratch>
   class PatternPrepared {
   public:
+    /** Constructors/destructors never access workspace contents. Each call
+     * creates fresh cursors/ExecutionSession and initializes scratch before
+     * reading it; no packed-data cache survives a call. KernelPlan may reuse
+     * these buffers at completed grid boundaries, including gaps between uses.
+     */
+    static constexpr bool transient_workspace = true;
+
     static_assert(Parallelism > 0, "prepared Matmul parallelism must be positive");
     using ResourceRequirements = typename Matmul::ResourceRequirements;
 
     VECOPS_INLINE PatternPrepared(Config config, M m, N n, K k, APattern a, BPattern b, CInputPattern c_input,
-                                  COutputPattern c_output, WorkerScratch worker_scratch, nint_t workspace_bytes)
+                                  COutputPattern c_output, WorkerScratch worker_scratch)
       : config_(std::move(config))
       , m_(std::move(m))
       , n_(std::move(n))
@@ -197,8 +206,7 @@ public:
       , b_(std::move(b))
       , c_input_(std::move(c_input))
       , c_output_(std::move(c_output))
-      , worker_scratch_(std::move(worker_scratch))
-      , workspace_bytes_(workspace_bytes) {
+      , worker_scratch_(std::move(worker_scratch)) {
     }
 
     /**
@@ -285,11 +293,15 @@ public:
       auto active_c_output = std::forward<COutput>(c_output);
       auto invocation = Plan::prepare(config_, active_m_value, active_n_value, active_k_value,
                                       active_a, active_b, active_c_input, active_c_output);
-      const nint_t active_workspace_bytes = invocation.required_workspace();
-      VECOPS_CHECK(active_workspace_bytes <= workspace_bytes_,
-                   "active Matmul scratch exceeds its planning-pattern capacity");
-      auto scratch = task.local(worker_scratch_);
-      kernel::WorkspaceView workspace{scratch.data(), workspace_bytes_};
+      kernel::WorkspaceView::Segments segments{};
+      const auto active_parts = invocation.workspace_parts();
+      for (unsigned i = 0; i < ::vecops::matmul::WorkspacePart::Count; ++i) {
+        auto scratch = task.local(worker_scratch_[i]);
+        const auto capacity = static_cast<nint_t>(tensor::numel(scratch.layout()));
+        VECOPS_CHECK(active_parts[i] <= capacity, "active Matmul sub-buffer exceeds prepared capacity");
+        segments[i] = {scratch.data(), capacity, 0};
+      }
+      kernel::WorkspaceView workspace{segments};
       ExecutionSession execution{workspace};
       invocation(execution);
     }
@@ -303,7 +315,6 @@ public:
     CInputPattern c_input_;
     COutputPattern c_output_;
     WorkerScratch worker_scratch_;
-    nint_t workspace_bytes_ = 0;
   };
 
   /**
@@ -334,9 +345,12 @@ public:
                                                               tensor::zeros_transform<typename Atom::TAcc, Memory>);
     auto planning_invocation =
       Plan::prepare(config, m_value, n_value, k_value, a_pattern, b_pattern, c_input_pattern, c_output_pattern);
-    const nint_t bytes = planning_invocation.required_workspace();
+    const auto parts = planning_invocation.workspace_parts();
+    auto buffer = [&](unsigned part, const char* name) {
+      return parent.template worker_tensor<std::byte, Parallelism>(std::string(site_name) + "/" + name, tensor::make_shape(meta::Any{parts[part]}));
+    };
     auto scratch =
-      parent.template worker_tensor<std::byte, Parallelism>(site_name, tensor::make_shape(meta::Any{bytes}));
+      std::array{buffer(0, "backend"), buffer(1, "packed-a"), buffer(2, "packed-b"), buffer(3, "auxiliary")};
     return PatternPrepared<Parallelism, decltype(m_value), decltype(n_value), decltype(k_value), decltype(a_pattern),
                            decltype(b_pattern), decltype(c_input_pattern), decltype(c_output_pattern),
                            decltype(scratch)>{config,
@@ -347,8 +361,7 @@ public:
                                               std::move(b_pattern),
                                               std::move(c_input_pattern),
                                               std::move(c_output_pattern),
-                                              std::move(scratch),
-                                              bytes};
+                                              std::move(scratch)};
   }
 
   /** Prepare an explicit-C Matmul from storage-less operand patterns. */
@@ -372,9 +385,12 @@ public:
     auto c_output_pattern = tensor::as_output_spec<typename Atom::TAcc>(std::forward<COutput>(c_output));
     auto planning_invocation =
       Plan::prepare(config, m_value, n_value, k_value, a_pattern, b_pattern, c_input_pattern, c_output_pattern);
-    const nint_t bytes = planning_invocation.required_workspace();
+    const auto parts = planning_invocation.workspace_parts();
+    auto buffer = [&](unsigned part, const char* name) {
+      return parent.template worker_tensor<std::byte, Parallelism>(std::string(site_name) + "/" + name, tensor::make_shape(meta::Any{parts[part]}));
+    };
     auto scratch =
-      parent.template worker_tensor<std::byte, Parallelism>(site_name, tensor::make_shape(meta::Any{bytes}));
+      std::array{buffer(0, "backend"), buffer(1, "packed-a"), buffer(2, "packed-b"), buffer(3, "auxiliary")};
     return PatternPrepared<Parallelism, decltype(m_value), decltype(n_value), decltype(k_value), decltype(a_pattern),
                            decltype(b_pattern), decltype(c_input_pattern), decltype(c_output_pattern),
                            decltype(scratch)>{config,
@@ -385,8 +401,7 @@ public:
                                               std::move(b_pattern),
                                               std::move(c_input_pattern),
                                               std::move(c_output_pattern),
-                                              std::move(scratch),
-                                              bytes};
+                                              std::move(scratch)};
   }
 
   /** Fully bound state retained by this public Matmul implementation. */

@@ -18,6 +18,7 @@
  * query and the actual run always see the same decisions.
  */
 
+#include "vecops/matmul/Workspace.h"
 #include "vecops/matmul/details/kernel/Kernel.h"
 
 namespace vecops::matmul::details {
@@ -27,10 +28,10 @@ template <typename Invocation>
 struct ArchitectureWorkspacePlanner {
   /// Byte bound covering every execution branch of @p op (see the file
   /// comment for the coverage contract).
-  VECOPS_ALWAYS_INLINE static nint_t required(const Invocation& op) {
-    nint_t bytes = kernel::matmul_implementation::scratch_bytes<
+  VECOPS_ALWAYS_INLINE static auto parts(const Invocation& op) {
+    std::array<nint_t, ::vecops::matmul::WorkspacePart::Count> result{};
+    result[0] = kernel::matmul_implementation::scratch_bytes<
         typename Invocation::Implementation>();
-    nint_t whole_packing_bytes = 0;
     // Reserve only the operand types selected from Meta bounds, plus the one
     // possible native-AMX B alternative.  Dynamic extents no longer retain a
     // runtime union of raw/A/B/AB variants.
@@ -38,32 +39,36 @@ struct ArchitectureWorkspacePlanner {
       if constexpr (Invocation::SMEBatchRowsFullPackCandidate) {
         // The two-sided flattened SME branch needs a complete [batch*M,K]
         // packed A rather than the ordinary one-leaf staging buffer.
-        whole_packing_bytes +=
+        result[1] +=
             op.batch_rows_flatten_enabled() && op.online_packs_b()
             ? op.batch_rows_packed_a_bytes()
             : op.template auto_packed_bytes<
                   ::vecops::matmul::Operand::A>(op.a_);
       } else {
-        whole_packing_bytes += op.template auto_packed_bytes<
+        result[1] += op.template auto_packed_bytes<
             ::vecops::matmul::Operand::A>(op.a_);
       }
     }
     if constexpr (Invocation::MayAutoPackB)
-      whole_packing_bytes += op.template auto_packed_bytes<
+      result[2] += op.template auto_packed_bytes<
           ::vecops::matmul::Operand::B>(op.b_);
     // The bounded WholeProblem panel route and complete online packing are
     // mutually exclusive. Reserve the larger alternative instead of adding
     // both lifetimes; scratch above is shared by either branch.
     if (op.whole_b_panel_enabled())
-      bytes += op.whole_b_panel_bytes();
-    else
-      bytes += whole_packing_bytes;
+      result[1] = 0, result[2] = op.whole_b_panel_bytes();
     // The two additions below are runtime-gated but their gates were cached
     // by the constructor, keeping this a deterministic pure query.
     if (op.batch_rows_pack_a_enabled())
-      bytes += op.batch_rows_packed_a_bytes();
+      result[1] += op.batch_rows_packed_a_bytes();
     if (op.batch_columns_periodic_c_input_enabled())
-      bytes += op.batch_columns_periodic_c_input_bytes();
+      result[3] += op.batch_columns_periodic_c_input_bytes();
+    return result;
+  }
+  VECOPS_ALWAYS_INLINE static nint_t required(const Invocation& op) {
+    nint_t bytes = 0;
+    for (auto n : parts(op))
+      bytes += n;
     return bytes;
   }
 };

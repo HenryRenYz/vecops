@@ -83,16 +83,18 @@ def test_scoped_replay_keeps_retained_call_ordinals_and_escaping_output(wrapped_
     assert torch.all(retained == i)
 
 
-def test_sampled_loop_invariant_is_live_after_its_last_observed_read():
+@pytest.mark.parametrize('symbolic_count', [False, True])
+@pytest.mark.parametrize('implicit_roles', [False, True])
+def test_sampled_loop_invariant_is_live_after_its_last_observed_read(symbolic_count, implicit_roles):
   class Model(torch.nn.Module):
     def forward(self, value):
       graph.enter_scope('diffusion')
       invariant = planner.empty_like(value)
       invariant.copy_(value)
       result = torch.zeros_like(value)
-      loop = graph.declare_loop('denoise', 4)
+      loop = graph.declare_loop('denoise', 'steps' if symbolic_count and vecops.is_precompiling() else 4)
       for index in range(2 if vecops.is_precompiling() else 4):
-        role = 'prologue' if index == 0 else 'steady_sample'
+        role = None if implicit_roles else ('prologue' if index == 0 else 'steady_sample')
         with loop.iteration(index, role=role, inputs=(result,)) as state:
           temporary = planner.empty_like(value)
           temporary.copy_(invariant)
@@ -131,3 +133,54 @@ def test_sampled_loop_invariant_is_live_after_its_last_observed_read():
   stale.placements[storage_id].end_event = execution.storages[storage_id].lifetime_end
   with pytest.raises(ValueError, match='loop invariant'):
     planner.validate_plan(execution, stale)
+
+
+def test_complete_loop_uses_exact_scopes_and_does_not_extend_dead_temporaries():
+  class Model(torch.nn.Module):
+    def forward(self, value):
+      graph.enter_scope('diffusion')
+      invariant = planner.empty_like(value)
+      invariant.copy_(value)
+      result = torch.zeros_like(value)
+      loop = graph.declare_loop('layers', 4)
+      for index in range(4):
+        with loop.iteration(index, role='prologue' if index==0 else 'steady_sample', inputs=(result,)) as state:
+          # A different shape per layer detects accidental replay of layer1's
+          # factory slot for every subsequent independent layer.
+          temporary = planner.empty((index+1, *value.shape), dtype=value.dtype, device=value.device)
+          temporary.fill_(index+1)
+          result = result + temporary.sum(dim=0)
+          if index==1:
+            result = result + invariant
+          state['outputs'] = (result,)
+      loop.close()
+      graph.leave_scope()
+      return result
+  model = Model().eval()
+  value = torch.arange(16,dtype=torch.float32)
+  execution = vecops.precompile(model,value,capture_graph=True).graph
+  machine=planner.MachineProfile(fast_capacity=4096,slow_capacity=1<<20,
+      fast_bandwidth_mib_s=100,slow_bandwidth_mib_s=10,transfer_bandwidth_mib_s=100,alignment=64)
+  plan=planner.plan_memory(execution,machine,config=planner.PlannerConfig(
+      minimum_fast_bytes=1,require_replayable_temporaries=True,
+      temporary_scope='diffusion',only_explicit_factory_temporaries=True))
+  factory=next(event for event in execution.events if event.attributes.get('explicit_factory'))
+  sid=execution.tensors[factory.outputs[0]].storage_id
+  loop_end=next(e.index for e in execution.events if e.id==execution.loops[0].end_event)
+  assert plan.placements[sid].end_event == execution.storages[sid].lifetime_end < loop_end
+  expected=model(value)
+  with planner.PlanSession(execution,plan,system=_System(),large_pages=False,
+      enable_factory_replay=True,enable_dynamic_factories=True,strict_factory_replay=True) as session:
+    torch.testing.assert_close(model(value),expected,rtol=0,atol=0)
+    assert session.stats()['factory_fallbacks']==0
+    session.enter_scope('diffusion')
+    try:
+      with pytest.raises(RuntimeError,match='trip count'):
+        session.declare_loop('layers',5)
+      loop=session.declare_loop('layers',4)
+      with pytest.raises(RuntimeError,match='unrecorded iteration'):
+        with loop.iteration(4,'steady_sample'):
+          pass
+      loop.close()
+    finally:
+      session.leave_scope()

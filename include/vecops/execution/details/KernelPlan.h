@@ -15,6 +15,7 @@ struct TypedFactory final : StateFactory {
   TypedFactory(Bindings b, Factory f)
     : bindings(std::move(b))
     , factory(std::move(f)) {
+    resources = bindings.resources();
   }
   std::shared_ptr<void> make(const Frame& frame) const override {
     return bindings.apply(frame, [&](auto&&... args) -> std::shared_ptr<void> {
@@ -44,6 +45,10 @@ struct OperationFactory final : StateFactory {
         [[maybe_unused]] auto prepared = op.template prepare<Parallelism>(declarations, name, args...);
       },
       args);
+    if constexpr (requires { Prepared::transient_workspace; })
+      transient_workspace = Prepared::transient_workspace;
+    for (auto slot : scratch_slots)
+      resources.buffers.push_back({slot, transient_workspace ? AccessMode::CallTemporary : AccessMode::Unknown});
   }
   std::shared_ptr<void> make(const Frame& frame) const override {
     auto scratch = std::make_shared<KernelScratch>(frame, scratch_slots);
@@ -120,7 +125,7 @@ struct TypedIndirectGrid final : Action {
 } // namespace kernel_plan_details
 
 template <nint_t Parallelism, meta::ValueInput Maximum, typename CountArgument, typename Bindings, typename Fn>
-void KernelBuilder::indirect_grid(std::string_view name, Maximum maximum, CountArgument count, Bindings bindings,
+KernelStage KernelBuilder::indirect_grid(std::string_view name, Maximum maximum, CountArgument count, Bindings bindings,
                                   Fn body) {
   check_open();
   static_assert(Parallelism > 0 && std::is_empty_v<Fn>, "indirect grids require positive width and a stateless body");
@@ -129,8 +134,11 @@ void KernelBuilder::indirect_grid(std::string_view name, Maximum maximum, CountA
   kernel_bind(count).validate_owner(*data_, false);
   bindings.validate_owner(*data_, false);
   using Grid = kernel_plan_details::TypedIndirectGrid<Parallelism, CountArgument, Bindings, Fn>;
-  data_->actions.push_back(
-    std::make_shared<Grid>(name, static_cast<nint_t>(maximum), std::move(count), std::move(bindings), std::move(body)));
+  auto resources = bindings.resources();
+  auto implicit = kernel_bind(read(count)).resources();
+  resources.buffers.insert(resources.buffers.end(), implicit.buffers.begin(), implicit.buffers.end());
+  return record(std::make_shared<Grid>(name, static_cast<nint_t>(maximum), std::move(count),
+                                     std::move(bindings), std::move(body)), std::move(resources));
 }
 
 template <tensor::TensorLike Tensor>
@@ -162,7 +170,8 @@ auto KernelBuilder::tensor(std::string_view name, Layout layout, WorkspaceTensor
   const auto bytes = workspace_tensor_details::storage_bytes<T>(layout);
   workspace_tensor_details::validate_options(options);
   const auto alignment = std::max<nint_t>(64, workspace_tensor_details::allocation_alignment<T>(options));
-  data_->slots.push_back({kernel_plan_details::SlotKind::Buffer, bytes, alignment, nullptr, options.placement});
+  data_->slots.push_back({kernel_plan_details::SlotKind::Buffer, bytes, alignment, nullptr, options.placement,
+                          std::string(name), options.estimated_traffic_bytes});
   auto pattern = tensor::make_unbound_tensor<T>(std::move(layout));
   return TensorArgument<decltype(pattern)>{data_.get(), slot, std::move(pattern)};
 }
@@ -174,7 +183,10 @@ auto KernelBuilder::worker_tensor(std::string_view name, Layout layout) {
   const auto bytes = workspace_tensor_details::storage_bytes<T>(layout);
   const auto aligned = workspace_plan_details::checked_align_up(bytes, std::max<nint_t>(64, alignof(T)));
   auto replicated = workspace_tensor_details::prepend_worker_layout(meta::cint<Replicas>, layout, aligned / sizeof(T));
-  return tensor<T>(name, std::move(replicated));
+  auto result = tensor<T>(name, std::move(replicated));
+  data_->slots.back().replicas = Replicas;
+  data_->slots.back().worker_bytes = bytes;
+  return result;
 }
 
 template <typename Bindings, typename Factory>
@@ -217,7 +229,7 @@ auto KernelBuilder::prepare_operation(std::string_view name, Op op, Args... args
 
 template <nint_t Parallelism, meta::ValueInput Begin, meta::ValueInput End, meta::ValueInput Chunk, typename Bindings,
           typename Fn>
-void KernelBuilder::grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body) {
+KernelStage KernelBuilder::grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body) {
   static_assert(Parallelism > 0);
   static_assert(std::is_empty_v<Fn>, "grid bodies must be stateless; use explicit bindings");
   check_open();
@@ -235,13 +247,14 @@ void KernelBuilder::grid(std::string_view name, Begin begin, End end, Chunk chun
     throw std::overflow_error("kernel grid range overflows");
   auto count = ::vecops::ceil_div(e - b, c);
   using Grid = kernel_plan_details::TypedGrid<Parallelism, decltype(c), decltype(count), Bindings, Fn>;
-  data_->actions.push_back(std::make_shared<Grid>(name, static_cast<nint_t>(b), static_cast<nint_t>(e), c, count,
-                                                  std::move(bindings), std::move(body)));
+  auto resources = bindings.resources();
+  return record(std::make_shared<Grid>(name, static_cast<nint_t>(b), static_cast<nint_t>(e), c, count,
+                                      std::move(bindings), std::move(body)), std::move(resources));
 }
 
 template <nint_t Parallelism, meta::ValueInput Begin, meta::ValueInput End, meta::ValueInput Chunk, typename Bindings,
           typename Fn>
-void KernelBuilder::worker_grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body) {
+KernelStage KernelBuilder::worker_grid(std::string_view name, Begin begin, End end, Chunk chunk, Bindings bindings, Fn body) {
   static_assert(Parallelism > 0);
   static_assert(std::is_empty_v<Fn>, "worker bodies must be stateless; use explicit bindings");
   check_open();
@@ -258,12 +271,13 @@ void KernelBuilder::worker_grid(std::string_view name, Begin begin, End end, Chu
     throw std::overflow_error("kernel grid range overflows");
   auto count = ::vecops::ceil_div(e - b, c);
   using Grid = kernel_plan_details::TypedGrid<Parallelism, decltype(c), decltype(count), Bindings, Fn, true>;
-  data_->actions.push_back(std::make_shared<Grid>(name, static_cast<nint_t>(b), static_cast<nint_t>(e), c, count,
-                                                  std::move(bindings), std::move(body)));
+  auto resources = bindings.resources();
+  return record(std::make_shared<Grid>(name, static_cast<nint_t>(b), static_cast<nint_t>(e), c, count,
+                                      std::move(bindings), std::move(body)), std::move(resources));
 }
 
 template <typename Bindings, typename Fn>
-void KernelBuilder::single(std::string_view name, Bindings bindings, Fn body) {
+KernelStage KernelBuilder::single(std::string_view name, Bindings bindings, Fn body) {
   static_assert(std::is_empty_v<Fn>, "single bodies must be stateless; use explicit bindings");
   // A single has its own typed action, avoiding a captured forwarding closure.
   struct Single final : kernel_plan_details::Action {
@@ -282,7 +296,8 @@ void KernelBuilder::single(std::string_view name, Bindings bindings, Fn body) {
   };
   check_open();
   bindings.validate_owner(*data_);
-  data_->actions.push_back(std::make_shared<Single>(name, std::move(bindings), std::move(body)));
+  auto resources = bindings.resources();
+  return record(std::make_shared<Single>(name, std::move(bindings), std::move(body)), std::move(resources));
 }
 
 template <tensor::UnboundTensorLike Pattern>

@@ -57,12 +57,14 @@ def capture_leases(session):
   entries=[('fast',session.fast_owner,session._fast_owner_bytes),
            ('slow',session.slow_owner,session._slow_owner_bytes)]
   pool=getattr(session,'_dynamic_pool',None)
-  if pool is not None:entries.append(('dynamic',pool.owner,pool.capacity))
+  if pool is not None:
+    entries.extend(('dynamic',owner,size) for owner,size in pool.capture_arenas())
+  allocator=getattr(session,'_buffer_session',None) or session.system
   result=[]
   for label,owner,size in entries:
     if owner is None or not size:continue
     raw=torch.frombuffer(owner,dtype=torch.uint8,count=size)
-    result.append(ArenaLease(owner,raw,session.system,session.domain,
+    result.append(ArenaLease(owner,raw,allocator,session.domain,
       'default' if label=='slow' else 'high_bandwidth',
       'default' if label=='slow' or session.allow_fast_fallback else None,
       max(64,session.plan.machine.alignment),session.large_pages,label,

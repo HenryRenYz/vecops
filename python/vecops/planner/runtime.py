@@ -94,16 +94,37 @@ class _FactoryCandidate:
 
 
 class _RuntimeLoop:
-  def __init__(self, session: "PlanSession", name: str) -> None:
+  def __init__(self, session: "PlanSession", name: str, trip_count: int | str) -> None:
     self.session = session
     self.name = name
     self.closed = False
+    candidates = session._captured_loops.get((tuple(session._scope), name), ())
+    templates = [loop for loop in candidates
+                 if not isinstance(loop.trip_count, int) or loop.trip_count == trip_count]
+    if candidates and not templates:
+      raise RuntimeError(f"runtime loop {name!r} trip count differs from its memory plan")
+    self.observed = {sample.iteration for loop in templates for sample in loop.samples}
+    self.representatives = {}
+    for loop in templates:
+      for ordinal, sample in enumerate(loop.samples):
+        role = sample.role
+        if role is None:
+          role = "prologue" if ordinal == 0 else "steady_sample"
+        self.representatives.setdefault(role, sample.iteration)
+    from .core import _fully_observed
+    self.fully_observed = bool(templates) and all(_fully_observed(loop) for loop in templates)
 
   @contextlib.contextmanager
   def iteration(self, index: int | str, role: str | None):
     if self.closed:
       raise RuntimeError("cannot enter an iteration of a closed runtime loop")
-    sample = 0 if role == "prologue" else 1
+    if index in self.observed:
+      sample = index
+    elif self.fully_observed:
+      raise RuntimeError(f"runtime loop {self.name!r} has an unrecorded iteration {index!r}")
+    else:
+      sample = self.representatives.get(role,
+          self.representatives.get("steady_sample", 0 if role == "prologue" else 1))
     with self.session._loop_iteration(self.name, index, sample):
       yield
 
@@ -145,6 +166,8 @@ class PlanSession:
       from vecops import memory
 
       system = memory.default_system()
+    from .buffers import current_session as buffer_session
+    self._buffer_session = buffer_session()
     self.graph = graph
     self.plan = plan
     self.system = system
@@ -186,6 +209,9 @@ class PlanSession:
     self._loop_epochs: list[int] = []
     self._iteration_aliases: list[tuple[str, str]] = []
     self._next_loop_epoch = 0
+    self._captured_loops = {}
+    for loop in graph.loops:
+      self._captured_loops.setdefault((tuple(loop.scope), loop.name), []).append(loop)
     self._activation_lock = threading.Lock()
     self._persistent_ready = False
     self._planned_factory_allocations = 0
@@ -225,7 +251,7 @@ class PlanSession:
         else self._state_fast_arena_bytes()
       )
       if allocated_fast_bytes:
-        self.fast_owner = self.system.allocate(
+        self.fast_owner = (self._buffer_session or self.system).allocate(
           allocated_fast_bytes,
           placement="high_bandwidth",
           domain=self.domain,
@@ -244,7 +270,9 @@ class PlanSession:
         from ._pool import TensorPool
 
         capacity = max(0, self.plan.machine.fast_capacity - allocated_fast_bytes)
-        if capacity:
+        if self._buffer_session is not None:
+          self._dynamic_pool = self._buffer_session.tensor_pool(capacity)
+        elif capacity:
           owner = self.system.allocate(
             capacity, placement="high_bandwidth", domain=self.domain,
             fallback=None, alignment=self.plan.machine.alignment,
@@ -633,11 +661,10 @@ class PlanSession:
     self._scope.pop()
 
   def declare_loop(self, name: str, trip_count: int | str) -> _RuntimeLoop:
-    del trip_count
-    return _RuntimeLoop(self, name)
+    return _RuntimeLoop(self, name, trip_count)
 
   @contextlib.contextmanager
-  def _loop_iteration(self, name: str, index: int | str, sample: int):
+  def _loop_iteration(self, name: str, index: int | str, sample: int | str):
     self._next_loop_epoch += 1
     self._loop_epochs.append(self._next_loop_epoch)
     self._factory_cursor_keys.append([])
@@ -662,7 +689,7 @@ class PlanSession:
       )
       if not size:
         raise RuntimeError(f"{tier.value} arena has zero planned size")
-      owner = self.system.allocate(
+      owner = (self._buffer_session or self.system).allocate(
         size,
         placement="high_bandwidth" if tier == MemoryTier.fast else "default",
         domain=self.domain,

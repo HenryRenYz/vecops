@@ -3,6 +3,7 @@
 #ifndef VECOPS_OPS_DETAILS_ATTENTION_SDPA_H
 #define VECOPS_OPS_DETAILS_ATTENTION_SDPA_H
 
+#include "vecops/ops/details/attention/Workspace.h"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -102,7 +103,23 @@ public:
   const Config config;
 
   VECOPS_INLINE constexpr explicit MaterializedSDPA(Config cfg)
-      : config(std::move(cfg)) {}
+      : config(std::move(cfg)) {
+  }
+
+  template <typename Q, typename K, typename V, typename QM, typename KM, typename AM, typename Bias, typename Out>
+  auto workspace_parts(const Q& q, const K& k, const V& v, const QM& qm, const KM& km, const AM& am, const Bias& bias,
+                       const Out& out) const {
+    std::array<nint_t, attention_details::WorkspacePart::Count> parts{};
+    const auto total = required_workspace(q, k, v, qm, km, am, bias, out);
+    if (!total)
+      return parts;
+    const auto kv = static_cast<nint_t>(tensor::size<0>(tensor::as_input_spec<typename Atom::TB>(k).input_layout()));
+    parts[1] = kernel::WorkspaceView::allocation_bytes<Score>(Config::query_block * kv);
+    parts[2] = kernel::WorkspaceView::allocation_bytes<Probability>(Config::query_block * kv);
+    parts[0] = total - parts[1] - parts[2];
+    VECOPS_CHECK(parts[0] >= 0, "invalid materialized attention buffer bound");
+    return parts;
+  }
 
   template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
             tensor::InputOperandOf<2> V,
@@ -314,9 +331,9 @@ private:
     const auto dqk_extent = tensor::size<1>(q.input_layout());
     const auto dv_extent = tensor::size<1>(v.input_layout());
     auto score_buffer = workspace.template allocate_tensor<Score>(
-        tensor::make_shape(Config::query_block_extent, lkv_extent));
+        tensor::make_shape(Config::query_block_extent, lkv_extent), attention_details::WorkspacePart::Scores);
     auto probability_buffer = workspace.template allocate_tensor<Probability>(
-        tensor::make_shape(Config::query_block_extent, lkv_extent));
+        tensor::make_shape(Config::query_block_extent, lkv_extent), attention_details::WorkspacePart::Probabilities);
     Score* scores = score_buffer.data();
     Probability* probabilities = probability_buffer.data();
 
@@ -332,6 +349,12 @@ private:
     tensor::with_optional_unordered_access(
         [&](auto uqm, auto ukm, auto uam, auto ubias) {
             MatmulOp matmul_op{config.matmul};
+        auto run_matmul = [&](auto&, auto&&... operands) {
+          workspace.with_subworkspace(0, [&](auto& inner) {
+            execution::with_workspace(
+              scope, inner, [&](auto& active) { matmul_op(active, std::forward<decltype(operands)>(operands)...); });
+          });
+        };
             auto v_transposed = tensor::transpose_view<0, 1>(v);
             for (nint_t begin = 0; begin < lq;
                  begin += Config::query_block) {
@@ -343,7 +366,7 @@ private:
                 auto score_tensor = tensor::make_tensor(scores, tensor::make_shape(row_extent, lkv_extent));
                 auto probability_tensor =
                   tensor::make_tensor(probabilities, tensor::make_shape(row_extent, lkv_extent));
-                matmul_op(scope, row_extent, lkv_extent, dqk_extent, q_block, k, score_tensor);
+            run_matmul(scope, row_extent, lkv_extent, dqk_extent, q_block, k, score_tensor);
 
                 std::array<Score, static_cast<std::size_t>(Config::query_block)> query_activity{};
                 attention_details::load_activity_segment<Score>(uqm, begin, rows, query_activity.data());
@@ -357,7 +380,7 @@ private:
                     scores + row * lkv, probabilities + row * lkv, lkv, stats.any, stats.maximum);
                 }
 
-                matmul_op(scope, row_extent, dv_extent, lkv_extent, probability_tensor, v_transposed, out_block);
+            run_matmul(scope, row_extent, dv_extent, lkv_extent, probability_tensor, v_transposed, out_block);
               });
             }
         },

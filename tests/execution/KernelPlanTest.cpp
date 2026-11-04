@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include "vecops/execution/KernelPlan.h"
+#include "vecops/execution/SourceKernelPlan.h"
 #include "vecops/ops/LayerNorm.h"
 
 namespace {
@@ -375,6 +376,205 @@ TEST(KernelPlanTest, SymbolicLayoutViewsPreserveSlotOffsetsAndConstExtents) {
   EXPECT_EQ(output[0], 19);
   EXPECT_EQ(output[1], 19);
   EXPECT_EQ(output[2], 19);
+}
+
+
+TEST(KernelPlanMemoryTest, ReusesConsumedInternalStorageAtExistingGridBoundaries) {
+  CountingPool pool;
+  std::array<int, 17> output{};
+  std::array<std::uintptr_t, 2> addresses{};
+  KernelBuilder builder(4);
+  auto out = builder.input(make_tensor(output.data(), make_shape(meta::cint<17>)));
+  auto address = builder.input(make_tensor(addresses.data(), make_shape(meta::cint<2>)));
+  auto a = builder.tensor<int>("a", make_shape(meta::cint<17>));
+  auto b = builder.tensor<int>("b", make_shape(meta::cint<17>));
+  builder.grid<4>("define-a", 0, 17, 4, kernel_bind(overwrite(a), address),
+    [](auto, const auto& item, auto a, auto address) {
+      if (!item.begin()) address(0) = reinterpret_cast<std::uintptr_t>(a.data());
+      for (auto i = item.begin(); i < item.end(); ++i) a(i) = int(i + 1);
+    });
+  auto last = builder.grid<4>("read-a", 0, 17, 4, kernel_bind(read(a), out),
+    [](auto, const auto& item, auto a, auto out) {
+      static_assert(decltype(a.template size<0>())::value == 17);
+      for (auto i = item.begin(); i < item.end(); ++i) out(i) = a(i);
+    });
+  builder.consume(a, last);
+  builder.grid<4>("define-b", 0, 17, 4, kernel_bind(overwrite(b), address),
+    [](auto, const auto& item, auto b, auto address) {
+      if (!item.begin()) address(1) = reinterpret_cast<std::uintptr_t>(b.data());
+      for (auto i = item.begin(); i < item.end(); ++i) b(i) = int(100 + i);
+    });
+  builder.grid<4>("read-b", 0, 17, 4, kernel_bind(read(b), out),
+    [](auto, const auto& item, auto b, auto out) {
+      for (auto i = item.begin(); i < item.end(); ++i) out(i) += b(i);
+    });
+  auto plan = builder.finish();
+  EXPECT_EQ(plan.buffer_plan().allocations[0].lifetimes[0].end, 2u);
+  EXPECT_EQ(place_buffers(plan.buffer_plan()).fast_bytes, 128);
+  KernelInstance instance(plan, &pool.abi);
+  instance.set(out, output.data()); instance.set(address, addresses.data());
+  for (int repeat = 0; repeat < 5; ++repeat) {
+    instance.replay();
+    EXPECT_EQ(addresses[0], addresses[1]);
+    for (int i = 0; i < 17; ++i) EXPECT_EQ(output[i], 101 + 2*i);
+  }
+  EXPECT_EQ(pool.submissions, 5u);
+}
+
+TEST(KernelPlanMemoryTest, RejectsPartialOverwriteAndUseAfterConsumeThroughAlias) {
+  KernelBuilder partial(1);
+  auto a = partial.tensor<int>("a", make_shape(meta::cint<8>));
+  partial.single("partial", kernel_bind(overwrite(a(range(meta::cint<0>, meta::cint<4>)))), [](auto) {});
+  EXPECT_THROW(partial.finish(), std::invalid_argument);
+  KernelBuilder late(1);
+  auto b = late.tensor<int>("b", make_shape(meta::cint<8>));
+  auto stage = late.single("define", kernel_bind(overwrite(b)), [](auto b) { for (int i=0;i<8;++i) b(i)=i; });
+  late.consume(b, stage);
+  late.single("alias-read", kernel_bind(read(b(range(meta::cint<2>, meta::cint<4>)))), [](auto) {});
+  EXPECT_THROW(late.finish(), std::invalid_argument);
+  KernelBuilder foreign(1);
+  EXPECT_THROW(foreign.consume(b, stage), std::invalid_argument);
+}
+
+TEST(KernelPlanMemoryTest, PreparedStateRemainsPinnedAndIndirectCountsAreUses) {
+  KernelBuilder builder(1);
+  auto retained = builder.tensor<int>("retained", make_shape(meta::cint<1>));
+  auto transient = builder.tensor<int>("transient", make_shape(meta::cint<1>));
+  auto state = builder.prepare(kernel_bind(retained), [](auto storage) {
+    storage(0) = 123;
+    return storage.data();
+  });
+  auto first = builder.single("early", kernel_bind(overwrite(retained), state), [](auto a, auto state) { a(0)=123; });
+  builder.single("other", kernel_bind(overwrite(transient)), [](auto a) { a(0)=456; });
+  auto plan = builder.finish();
+  auto placed = place_buffers(plan.buffer_plan());
+  ASSERT_EQ(placed.entries.size(), 2u);
+  EXPECT_NE(placed.entries[0].offset, placed.entries[1].offset);
+  KernelInstance instance(plan); instance.replay(); instance.replay();
+  KernelBuilder indirect(1);
+  auto count = indirect.tensor<nint_t>("count", make_shape(meta::cint<1>));
+  auto define = indirect.single("define", kernel_bind(overwrite(count)), [](auto c) { c(0)=0; });
+  indirect.consume(count, define);
+  indirect.indirect_grid<1>("read-count", 4, count, kernel_bind(), [](auto, auto) {});
+  EXPECT_THROW(indirect.finish(), std::invalid_argument);
+}
+
+TEST(KernelPlanMemoryTest, ProgramSharesTransientStorageAcrossSerialKernels) {
+  CountingPool pool;
+  std::array<int, 4> output{};
+  KernelBuilder first(4), second(4);
+  auto a = first.tensor<int>("a", make_shape(meta::cint<4>));
+  auto b = second.worker_tensor<int, 4>("b", make_shape(meta::cint<1>));
+  auto x = first.input(make_tensor(output.data(), make_shape(meta::cint<4>)));
+  auto y = second.input(make_tensor(output.data(), make_shape(meta::cint<4>)));
+  first.grid<4>("define", 0, 4, 1, kernel_bind(overwrite(a)),
+    [](auto, auto item, auto a) { a(item.begin())=7; });
+  first.grid<4>("read", 0, 4, 1, kernel_bind(read(a), x),
+    [](auto, auto item, auto a, auto x) { x(item.begin())=a(item.begin()); });
+  second.grid<4>("define", 0, 4, 1, kernel_bind(overwrite(b)),
+    [](auto task, auto, auto b) { task.local(b)(0)=11; });
+  second.grid<4>("read", 0, 4, 1, kernel_bind(read(b), y),
+    [](auto task, auto item, auto b, auto y) { y(item.begin())+=task.local(b)(0); });
+  KernelProgram program({first.finish(), second.finish()}, &pool.abi);
+  EXPECT_EQ(program.buffer_plan().allocations.size(), 2u);
+  EXPECT_EQ(program.placement().fast_bytes, 4 * 64);
+  EXPECT_EQ(program.placement().entries[0].offset, program.placement().entries[1].offset);
+  program.set(0, x, output.data()); program.set(1, y, output.data());
+  for (int repeat=0;repeat<3;++repeat) {
+    program.replay();
+    for (auto value:output) EXPECT_EQ(value,18);
+  }
+  EXPECT_EQ(pool.submissions,3u);
+  EXPECT_EQ(program.replay_count(0),3u);
+  EXPECT_THROW(program.set(0,y,output.data()),std::invalid_argument);
+}
+
+
+TEST(KernelPlanMemoryTest, SourceInplaceAbiMapsOptionalSlotsAndHonorsLegacyPrefix) {
+  std::array<float,4> x{1,2,3,4}, y{};
+  int64_t size=4, stride=1;
+  std::array<VecopsValue,3> values{};
+  for (auto i:{0,2}) {
+    values[i].struct_size=sizeof(VecopsValue); values[i].kind=VECOPS_VALUE_TENSOR;
+    values[i].value.tensor={sizeof(VecopsTensorView), i==0?x.data():y.data(), 0,
+      VECOPS_DEVICE_CPU, 0, VECOPS_DTYPE_F32, 1, &size, &stride,
+      i==0?VECOPS_TENSOR_READ:VECOPS_TENSOR_WRITE};
+  }
+  values[1].struct_size=sizeof(VecopsValue); values[1].kind=VECOPS_VALUE_NONE;
+  VecopsCall call{sizeof(VecopsCall),3,values.data(),nullptr,0,nullptr};
+  auto build=[](auto& builder, auto a, auto, auto b) {
+    builder.allow_inplace(a,b);
+    builder.template grid<1>("copy",0,4,1,kernel_bind(a,b),
+      [](auto,auto work,auto a,auto b) { b(work.begin())=a(work.begin())*2.f; });
+  };
+  VecopsPreparedKernelV1 abi{}; abi.struct_size=sizeof(abi);
+  source_plan_details::launch<1>(&call,&abi,build,make_tensor(x.data(),make_shape(meta::cint<4>)),
+    tensor::nullopt, make_tensor(y.data(),make_shape(meta::cint<4>)));
+  ASSERT_EQ(abi.inplace_count,1u); EXPECT_EQ(abi.inplace[0].input,0u); EXPECT_EQ(abi.inplace[0].output,2u);
+  EXPECT_EQ(abi.replay(abi.context,nullptr),VECOPS_STATUS_OK); EXPECT_EQ(y[3],8.f);
+  abi.destroy(abi.context);
+  // Model an older consumer whose allocation stops before the new fields.
+  abi={}; abi.struct_size=offsetof(VecopsPreparedKernelV1,inplace_count);
+  auto* bytes=reinterpret_cast<unsigned char*>(&abi);
+  std::fill(bytes+abi.struct_size,bytes+sizeof(abi),0xa5);
+  source_plan_details::launch<1>(&call,&abi,build,make_tensor(x.data(),make_shape(meta::cint<4>)),
+    tensor::nullopt, make_tensor(y.data(),make_shape(meta::cint<4>)));
+  EXPECT_EQ(abi.struct_size,offsetof(VecopsPreparedKernelV1,inplace_count));
+  for (std::size_t i=abi.struct_size;i<sizeof(abi);++i) EXPECT_EQ(bytes[i],0xa5);
+  abi.destroy(abi.context);
+}
+
+
+struct TemporaryOperation {
+  template <typename Scratch>
+  struct Prepared {
+    static constexpr bool transient_workspace = true;
+    Scratch scratch;
+    template <typename Task,typename Output>
+    void operator()(Task task, Output output) const {
+      auto local=task.local(scratch);
+      local(0)=output(task.lane_id())+1;
+      output(task.lane_id())=local(0);
+    }
+  };
+  template <nint_t P,typename Authority>
+  auto prepare(Authority& parent,std::string_view name) const {
+    auto scratch=parent.template worker_tensor<int,P>(name,make_shape(meta::cint<1>));
+    return Prepared<decltype(scratch)>{scratch};
+  }
+};
+
+TEST(KernelPlanMemoryTest, AuditedOperationScratchCanReuseGapsBetweenCalls) {
+  CountingPool pool;
+  KernelBuilder builder(4);
+  std::array<int,4> output{};
+  auto out=builder.input(make_tensor(output.data(),make_shape(meta::cint<4>)));
+  auto a=builder.prepare_operation<4>("a",TemporaryOperation{});
+  auto b=builder.prepare_operation<4>("b",TemporaryOperation{});
+  auto record=[&](auto op) {
+    builder.grid<4>("use",0,4,1,kernel_bind(op,out),
+      [](auto task,auto,auto const& op,auto out){op(task,out);});
+  };
+  record(a); record(b); record(a);
+  auto plan=builder.finish();
+  ASSERT_EQ(plan.buffer_plan().allocations[0].lifetimes.size(),2u);
+  EXPECT_EQ(place_buffers(plan.buffer_plan()).fast_bytes,256);
+  KernelInstance instance(plan,&pool.abi); instance.set(out,output.data());
+  for(int repeat=0;repeat<4;++repeat) {
+    instance.replay();
+    for(auto value:output) EXPECT_EQ(value,(repeat+1)*3);
+  }
+}
+
+TEST(KernelPlanMemoryTest, OpaqueParentStatePinsTransientChildWorkspace) {
+  KernelBuilder builder(1);
+  auto a=builder.prepare_operation<1>("a",TemporaryOperation{});
+  auto b=builder.prepare_operation<1>("b",TemporaryOperation{});
+  auto retained=builder.prepare(kernel_bind(a),[](auto const& a){return a;});
+  builder.single("a",kernel_bind(a),[](auto const&){});
+  builder.single("b",kernel_bind(b),[](auto const&){});
+  auto plan=builder.finish();
+  EXPECT_EQ(place_buffers(plan.buffer_plan()).fast_bytes,128);
 }
 
 } // namespace

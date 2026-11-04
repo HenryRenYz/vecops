@@ -3,6 +3,7 @@
 #ifndef VECOPS_OPS_DETAILS_ATTENTION_SPARSE_FLASH_ATTENTION_H
 #define VECOPS_OPS_DETAILS_ATTENTION_SPARSE_FLASH_ATTENTION_H
 
+#include "vecops/ops/details/attention/Workspace.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -69,6 +70,35 @@ public:
 
   VECOPS_INLINE constexpr explicit SparseFlashAttention(Config cfg)
       : config(std::move(cfg)) {}
+
+  template <typename Q, typename K, typename V, typename Index, typename QM, typename KM, typename AM, typename Bias, typename Out>
+  auto workspace_parts(const Q& q, const K& k, const V& v, const Index& index, const QM& qm, const KM& km,
+                       const AM& am, const Bias& bias, const Out& out) const {
+    std::array<nint_t, attention_details::WorkspacePart::Count> parts{};
+    const auto total = required_workspace(q,k,v,index,qm,km,am,bias,out);
+    if (!total) return parts;
+    const auto qs = tensor::as_input_spec<typename Atom::TA>(q);
+    const auto ks = tensor::as_input_spec<typename Atom::TB>(k);
+    const auto vs = tensor::as_input_spec<typename Atom::TB>(v);
+    const nint_t kv = tensor::size<0>(ks.input_layout()), d = tensor::size<1>(qs.input_layout()), dv = tensor::size<1>(vs.input_layout());
+    parts[1] = kernel::WorkspaceView::allocation_bytes<Score>(Config::query_block * Config::key_value_block);
+    parts[2] = kernel::WorkspaceView::allocation_bytes<Probability>(Config::query_block * Config::key_value_block);
+    parts[3] = kernel::WorkspaceView::allocation_bytes<Score>(Config::query_block * dv);
+    parts[4] = parts[5] = parts[6] = kernel::WorkspaceView::allocation_bytes<Score>(Config::query_block);
+    if constexpr (CacheSparsePacks) {
+      const auto ql = matmul::packed_layout<Atom, matmul::Operand::A>(tensor::make_layout(tensor::make_shape(Config::query_block_extent, tensor::size<1>(qs.input_layout()))));
+      const auto kl = matmul::packed_layout<Atom, matmul::Operand::B>(tensor::make_layout(tensor::make_shape(Config::key_value_block_extent, tensor::size<1>(ks.input_layout()))));
+      const auto vl = matmul::packed_layout<Atom, matmul::Operand::B>(tensor::make_layout(tensor::make_shape(tensor::size<1>(vs.input_layout()), Config::key_value_block_extent)));
+      const nint_t blocks = ceil_div(kv, static_cast<nint_t>(Config::key_value_block));
+      parts[7] = kernel::WorkspaceView::allocation_bytes<typename Atom::TA>(tensor::numel(ql));
+      parts[8] = kernel::WorkspaceView::allocation_bytes<typename Atom::TB>(blocks * tensor::numel(kl));
+      parts[9] = kernel::WorkspaceView::allocation_bytes<typename Atom::TB>(blocks * tensor::numel(vl));
+    }
+    parts[0] = total;
+    for (unsigned i=1; i<parts.size(); ++i) parts[0] -= parts[i];
+    VECOPS_CHECK(parts[0] >= 0, "invalid sparse attention buffer bound");
+    return parts;
+  }
 
   template <tensor::InputOperandOf<2> Q, tensor::InputOperandOf<2> K,
             tensor::InputOperandOf<2> V,
@@ -323,19 +353,19 @@ private:
     const auto selected_capacity = tensor::size<1>(index.layout());
     auto score_buffer = workspace.template allocate_tensor<Score>(
         tensor::make_shape(Config::query_block_extent,
-                           Config::key_value_block_extent));
+                           Config::key_value_block_extent), attention_details::WorkspacePart::Scores);
     auto probability_buffer = workspace.template allocate_tensor<Probability>(
         tensor::make_shape(Config::query_block_extent,
-                           Config::key_value_block_extent));
+                           Config::key_value_block_extent), attention_details::WorkspacePart::Probabilities);
     auto output_buffer = workspace.template allocate_tensor<Score>(
         tensor::make_shape(Config::query_block_extent,
-                           tensor::size<1>(v.input_layout())));
+                           tensor::size<1>(v.input_layout())), attention_details::WorkspacePart::Output);
     auto row_max_buffer = workspace.template allocate_tensor<Score>(
-        tensor::make_shape(Config::query_block_extent));
+        tensor::make_shape(Config::query_block_extent), attention_details::WorkspacePart::RowMax);
     auto row_sum_buffer = workspace.template allocate_tensor<Score>(
-        tensor::make_shape(Config::query_block_extent));
+        tensor::make_shape(Config::query_block_extent), attention_details::WorkspacePart::RowSum);
     auto row_scale_buffer = workspace.template allocate_tensor<Score>(
-        tensor::make_shape(Config::query_block_extent));
+        tensor::make_shape(Config::query_block_extent), attention_details::WorkspacePart::RowScale);
     Score* scores = score_buffer.data();
     Probability* probabilities = probability_buffer.data();
     Score* output_acc = output_buffer.data();
@@ -353,6 +383,12 @@ private:
         bias, MatrixPolicy{}, workspace);
     auto output_access = tensor::bind(out, OutputPolicy{}, workspace);
 
+    auto run_pack = [&](const auto& operation, const auto& input, const auto& output) {
+      workspace.with_subworkspace(0, [&](auto& inner) {
+        execution::with_workspace(scope, inner, [&](auto& active) { operation(active, input, output); });
+      });
+    };
+
     typename Atom::TA* cached_q = nullptr;
     typename Atom::TB* cached_k = nullptr;
     typename Atom::TB* cached_v = nullptr;
@@ -366,9 +402,9 @@ private:
           tensor::make_layout(tensor::make_shape(dv, Config::key_value_block_extent)));
       k_capacity = tensor::numel(k_layout); v_capacity = tensor::numel(v_layout);
       const nint_t blocks = ceil_div(lkv, static_cast<nint_t>(Config::key_value_block));
-      cached_q = workspace.template allocate_tensor<typename Atom::TA>(tensor::make_shape(meta::Any{tensor::numel(q_layout)})).data();
-      cached_k = workspace.template allocate_tensor<typename Atom::TB>(tensor::make_shape(meta::Any{blocks * k_capacity})).data();
-      cached_v = workspace.template allocate_tensor<typename Atom::TB>(tensor::make_shape(meta::Any{blocks * v_capacity})).data();
+      cached_q = workspace.template allocate_tensor<typename Atom::TA>(tensor::make_shape(meta::Any{tensor::numel(q_layout)}), attention_details::WorkspacePart::PackedQ).data();
+      cached_k = workspace.template allocate_tensor<typename Atom::TB>(tensor::make_shape(meta::Any{blocks * k_capacity}), attention_details::WorkspacePart::PackedK).data();
+      cached_v = workspace.template allocate_tensor<typename Atom::TB>(tensor::make_shape(meta::Any{blocks * v_capacity}), attention_details::WorkspacePart::PackedV).data();
       const auto pack_b = ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::B>{});
       for (nint_t block = 0; block < blocks; ++block) {
         const nint_t begin = block * Config::key_value_block;
@@ -380,7 +416,7 @@ private:
             matmul::packed_layout<Atom, matmul::Operand::B>(kb.input_layout()));
         auto vp = tensor::make_tensor(cached_v + block * v_capacity,
             matmul::packed_layout<Atom, matmul::Operand::B>(vb.input_layout()));
-        pack_b(scope, kb, kp); pack_b(scope, vb, vp);
+        run_pack(pack_b, kb, kp); run_pack(pack_b, vb, vp);
         });
       }
     }
@@ -390,6 +426,13 @@ private:
               tensor::with_unordered_access(
                   output_access, [&](auto uout) {
                 MatmulOp matmul_op{config.matmul};
+            auto run_matmul = [&](auto&, auto&&... operands) {
+              workspace.with_subworkspace(0, [&](auto& inner) {
+                execution::with_workspace(scope, inner, [&](auto& active) {
+                  matmul_op(active, std::forward<decltype(operands)>(operands)...);
+                });
+              });
+            };
                 for (nint_t block_row = 0,
                      begin = 0; begin < lq;
                      ++block_row, begin += Config::query_block) {
@@ -404,7 +447,7 @@ private:
                       auto qp = tensor::make_tensor(cached_q,
                           matmul::packed_layout<Atom, matmul::Operand::A>(q_block.input_layout()));
                       auto pack_a = ops::matmul_pack(ops::MatmulPackConfig<Atom, matmul::Operand::A>{});
-                      pack_a(scope, q_block, qp);
+                      run_pack(pack_a, q_block, qp);
                       return qp;
                     } else return q_block;
                   }();
@@ -451,7 +494,7 @@ private:
                           matmul::packed_layout<Atom, matmul::Operand::B>(v_transposed.input_layout()));
                       else return v_transposed;
                     }();
-                    matmul_op(
+                    run_matmul(
                         scope, row_extent, column_extent, dqk,
                         q_operand, k_operand, score_tensor);
 
@@ -580,14 +623,14 @@ private:
                             row_extent,
                             tensor::size<1>(v.input_layout())));
                     if (accumulated) {
-                      matmul_op(
+                      run_matmul(
                           scope, row_extent,
                           tensor::size<1>(v.input_layout()),
                           column_extent, probability_tensor, v_operand,
                           tensor::input<Score>(output_tensor),
                           tensor::output<Score>(output_tensor));
                     } else {
-                      matmul_op(
+                      run_matmul(
                           scope, row_extent,
                           tensor::size<1>(v.input_layout()),
                           column_extent, probability_tensor, v_operand,
@@ -673,7 +716,7 @@ public:
         QueryMaskPattern query_mask, KeyMaskPattern key_mask,
         AttentionMaskPattern attention_mask, BiasPattern bias,
         OutputPattern out, WorkerScratch worker_scratch,
-        nint_t workspace_bytes, bool materialized)
+        bool materialized)
       : config_(std::move(config))
       , q_(std::move(q))
       , k_(std::move(k))
@@ -684,7 +727,6 @@ public:
       , bias_(std::move(bias))
       , out_(std::move(out))
       , worker_scratch_(std::move(worker_scratch))
-      , workspace_bytes_(workspace_bytes)
       , materialized_(materialized) {}
 
     template <tensor::InputOperandOf<2> Q,
@@ -744,16 +786,16 @@ public:
       auto rebound_out = tensor::rebind(out_, std::move(active_out));
 
       ScaledDotProductAttention operation{config_};
-      VECOPS_CHECK(
-          operation.required_workspace_with_strategy(
-              materialized_,
-              rebound_q, rebound_k, rebound_v,
-              rebound_query_mask, rebound_key_mask,
-              rebound_attention_mask, rebound_bias, rebound_out) <=
-              workspace_bytes_,
-          "active attention scratch exceeds its planning-pattern capacity");
-      auto scratch = task.local(worker_scratch_);
-      kernel::WorkspaceView workspace{scratch.data(), workspace_bytes_};
+      const auto active_parts = operation.workspace_parts_with_strategy(materialized_, rebound_q, rebound_k, rebound_v,
+          rebound_query_mask, rebound_key_mask, rebound_attention_mask, rebound_bias, rebound_out);
+      kernel::WorkspaceView::Segments segments{};
+      for (unsigned i=0; i<active_parts.size(); ++i) {
+        auto scratch = task.local(worker_scratch_[i]);
+        const nint_t capacity = tensor::numel(scratch.layout());
+        VECOPS_CHECK(active_parts[i] <= capacity, "active attention sub-buffer exceeds prepared capacity");
+        segments[i] = {scratch.data(), capacity, 0};
+      }
+      kernel::WorkspaceView workspace{segments};
       ExecutionSession execution{workspace};
       operation.execute_with_strategy(
           execution, materialized_, rebound_q, rebound_k, rebound_v,
@@ -805,7 +847,6 @@ public:
     BiasPattern bias_;
     OutputPattern out_;
     WorkerScratch worker_scratch_;
-    nint_t workspace_bytes_ = 0;
     bool materialized_ = true;
   };
 
@@ -859,13 +900,13 @@ public:
         std::forward<Output>(out));
     const bool materialized = use_materialized(
         q_pattern, k_pattern, v_pattern);
-    const nint_t bytes = required_workspace_with_strategy(
-        materialized,
-        q_pattern, k_pattern, v_pattern,
-        query_mask_pattern, key_mask_pattern,
-        attention_mask_pattern, bias_pattern, out_pattern);
-    auto scratch = workspace.template worker_tensor<std::byte, Parallelism>(
-        site_name, tensor::make_shape(meta::Any{bytes}));
+    const auto parts = workspace_parts_with_strategy(materialized, q_pattern,k_pattern,v_pattern,query_mask_pattern,
+        key_mask_pattern,attention_mask_pattern,bias_pattern,out_pattern);
+    constexpr const char* names[] = {"backend", "scores", "probabilities", "output", "row-max", "row-sum", "row-scale", "packed-q", "packed-k", "packed-v"};
+    auto buffer = [&](unsigned i) {
+      return workspace.template worker_tensor<std::byte, Parallelism>(std::string(site_name) + "/" + names[i], tensor::make_shape(meta::Any{parts[i]}));
+    };
+    auto scratch = std::array{buffer(0),buffer(1),buffer(2),buffer(3),buffer(4),buffer(5),buffer(6),buffer(7),buffer(8),buffer(9)};
     return PatternPrepared<
         Parallelism, decltype(q_pattern), decltype(k_pattern),
         decltype(v_pattern), decltype(query_mask_pattern),
@@ -875,7 +916,7 @@ public:
           std::move(v_pattern), std::move(query_mask_pattern),
           std::move(key_mask_pattern), std::move(attention_mask_pattern),
           std::move(bias_pattern), std::move(out_pattern),
-          std::move(scratch), bytes, materialized};
+          std::move(scratch), materialized};
   }
 
   /** Prepare SDPA with all optional mask and bias operands omitted. */
@@ -981,6 +1022,20 @@ public:
   }
 
 private:
+  template <typename Q, typename K, typename V, typename QM, typename KM, typename AM, typename Bias, typename Out>
+  auto workspace_parts_with_strategy(bool materialized, const Q& q, const K& k, const V& v, const QM& qm, const KM& km,
+                       const AM& am, const Bias& bias, const Out& out) const {
+    if (materialized) return MaterializedOp{config}.workspace_parts(q,k,v,qm,km,am,bias,out);
+    const auto qs = tensor::as_input_spec<typename Config::Atom::TA>(q);
+    const auto ks = tensor::as_input_spec<typename Config::Atom::TB>(k);
+    const auto tq = ceil_div(tensor::size<0>(qs.input_layout()), Config::query_block_extent);
+    const auto tkv = ceil_div(tensor::size<0>(ks.input_layout()), Config::key_value_block_extent);
+    const auto index = tensor::make_unbound_tensor<int32_t>(tensor::make_shape(tq,tkv));
+    auto parts = SparseOp{config}.workspace_parts(q,k,v,index,qm,km,am,bias,out);
+    parts[0] += kernel::WorkspaceView::allocation_bytes<int32_t>(static_cast<nint_t>(tq*tkv));
+    return parts;
+  }
+
   template <tensor::InputOperandOf<2> Q,
             tensor::InputOperandOf<2> K,
             tensor::InputOperandOf<2> V,

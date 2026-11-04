@@ -42,3 +42,6 @@ __all__ = [
   "profile_from_system",
   "validate_plan",
 ]
+
+from .buffers import BufferRequirement, plan_buffers
+__all__ += ["BufferRequirement", "plan_buffers"]

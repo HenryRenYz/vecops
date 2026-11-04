@@ -21,6 +21,7 @@
 #include <array>
 #include <cstddef>
 #include <limits>
+#include <cmath>
 #include <type_traits>
 #include <utility>
 
@@ -35,6 +36,7 @@ namespace vecops::execution {
 struct WorkspaceTensorOptions {
   nint_t alignment = vec::DEFAULT_ALIGNMENT;
   WorkspacePlacementPolicy placement = WorkspacePlacementPolicy::FastPreferred;
+  double estimated_traffic_bytes = 0;
 };
 
 namespace workspace_tensor_details {
@@ -53,6 +55,8 @@ inline nint_t checked_mul(nint_t left, nint_t right) {
 }
 
 inline void validate_options(const WorkspaceTensorOptions& options) {
+  VECOPS_CHECK(std::isfinite(options.estimated_traffic_bytes) && options.estimated_traffic_bytes >= 0,
+               "workspace traffic must be finite and nonnegative");
   VECOPS_CHECK(options.alignment > 0 && (options.alignment & (options.alignment - 1)) == 0,
                "workspace tensor alignment must be a positive power of two");
 }

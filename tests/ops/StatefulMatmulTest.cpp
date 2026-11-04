@@ -140,7 +140,7 @@ TEST(StatefulMatmulTest, UnboundPatternsRebindPerLaneWithoutPublicScratchHandlin
   }
 
   auto plan = workspace.finish_trace();
-  ASSERT_EQ(plan.allocations.size(), 1u);
+  ASSERT_EQ(plan.allocations.size(), matmul::WorkspacePart::Count);
   EXPECT_EQ(plan.allocations.front().request.domain, execution::WorkspaceDomain::WorkerLocal);
   EXPECT_EQ(plan.allocations.front().request.replicas, P);
   for (nint_t lane = 0; lane < P; ++lane) {
@@ -199,21 +199,24 @@ TEST(StatefulMatmulTest, IndependentNamedPatternsRemainLiveAndUseDistinctPlaceme
                                                       tensor::unbind(at), tensor::unbind(bt), tensor::unbind(ct))),
                std::runtime_error);
   auto plan = workspace.finish_trace();
-  ASSERT_EQ(plan.allocations.size(), 2u);
-  EXPECT_NE(plan.allocations[0].site, plan.allocations[1].site);
+  ASSERT_EQ(plan.allocations.size(), 2u * matmul::WorkspacePart::Count);
+  for (unsigned i=0; i<matmul::WorkspacePart::Count; ++i)
+    EXPECT_NE(plan.allocations[i].site,plan.allocations[i+matmul::WorkspacePart::Count].site);
   auto placement = execution::place_workspace(plan);
-  ASSERT_EQ(placement.entries.size(), 2u);
-  const nint_t first_bytes =
-      placement.entries[0].replica_stride * placement.entries[0].replicas;
-  const nint_t second_bytes =
-      placement.entries[1].replica_stride * placement.entries[1].replicas;
-  // Zero-scratch architecture leaves still retain distinct logical sites,
-  // but both empty physical ranges canonically start at offset zero.
-  if (first_bytes != 0 && second_bytes != 0)
-    EXPECT_NE(placement.entries[0].offset, placement.entries[1].offset);
-  const nint_t expected_peak = placement.entries[0].replica_stride * placement.entries[0].replicas +
-                               placement.entries[1].replica_stride * placement.entries[1].replicas;
-  EXPECT_EQ(placement.fast_bytes, expected_peak);
+  ASSERT_EQ(placement.entries.size(), plan.allocations.size());
+  nint_t expected_peak = 0;
+  for (std::size_t i=0; i<placement.entries.size(); ++i) {
+    const auto& a=placement.entries[i];
+    const nint_t bytes=a.replica_stride*a.replicas;
+    expected_peak += bytes;
+    if (!bytes) continue;
+    for (std::size_t j=0; j<i; ++j) {
+      const auto& b=placement.entries[j];
+      const auto other=b.replica_stride*b.replicas;
+      if (other) EXPECT_TRUE(a.offset >= b.offset+other || b.offset >= a.offset+bytes);
+    }
+  }
+  EXPECT_EQ(placement.fast_bytes,expected_peak);
 }
 
 TEST(StatefulMatmulTest, DynamicCapacityRunsFullAndShortenedTailExtents) {

@@ -11,6 +11,7 @@
 #include "vecops/vec/Vec.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -62,9 +63,19 @@ namespace vecops::kernel {
  */
 class WorkspaceView {
 public:
+  /** Logical sub-buffers may have different physical tiers. Their cursors
+   * belong to the calling lane and retain ordinary mark/rewind semantics. */
+  static constexpr unsigned max_segments = 16;
+  struct Segment {
+    void* data = nullptr;
+    nint_t capacity = 0;
+    nint_t used = 0;
+  };
+  using Segments = std::array<Segment, max_segments>;
   /** @brief Opaque rewind point within this view's current allocation stack. */
   struct Mark {
     nint_t offset;
+    std::array<nint_t, max_segments> segments{};
   };
 
   WorkspaceView() = default;
@@ -100,14 +111,28 @@ public:
     VECOPS_ASSERT(capacity >= 0, "workspace capacity must be non-negative");
   }
 
+  /** Adopt separately placed logical buffers; the segment table outlives this view. */
+  explicit WorkspaceView(Segments& segments)
+    : _segments(&segments) {
+    for (const auto& s : segments)
+      _capacity += s.capacity;
+  }
+
   /** @brief Release all bump allocations without changing high watermark. */
   void reset() {
     _offset = 0;
+    if (_segments)
+      for (auto& s : *_segments)
+        s.used = 0;
   }
 
   /** @brief Capture the current bump offset for later LIFO-style rewind. */
   Mark mark() const {
-    return Mark{_offset};
+    Mark result{_offset};
+    if (_segments)
+      for (unsigned i = 0; i < max_segments; ++i)
+        result.segments[i] = (*_segments)[i].used;
+    return result;
   }
 
   /**
@@ -117,6 +142,11 @@ public:
   void rewind(Mark mark) {
     VECOPS_ASSERT(0 <= mark.offset && mark.offset <= _offset, "workspace mark is outside the active allocation range");
     _offset = mark.offset;
+    if (_segments)
+      for (unsigned i = 0; i < max_segments; ++i) {
+        VECOPS_ASSERT(mark.segments[i] <= (*_segments)[i].used, "invalid segmented workspace mark");
+        (*_segments)[i].used = mark.segments[i];
+      }
   }
 
   /**
@@ -125,7 +155,20 @@ public:
    * @param alignment Positive power-of-two byte alignment.
    * @return Pointer valid until a covering rewind/reset or owner destruction.
    */
-  void* allocate(nint_t bytes, nint_t alignment = vec::DEFAULT_ALIGNMENT) {
+  void* allocate(nint_t bytes, nint_t alignment = vec::DEFAULT_ALIGNMENT, unsigned part = 0) {
+    if (_segments) {
+      VECOPS_CHECK(part < max_segments, "workspace segment index is out of range");
+      auto& s = (*_segments)[part];
+      VECOPS_CHECK(bytes >= 0 && s.used <= s.capacity && bytes <= s.capacity - s.used,
+                   "workspace sub-buffer capacity exceeded");
+      WorkspaceView view{s.data, s.capacity};
+      view._offset = s.used;
+      auto* result = view.allocate(bytes, alignment);
+      _offset += view._offset - s.used;
+      s.used = view._offset;
+      _high_watermark = std::max(_high_watermark, _offset);
+      return result;
+    }
     if (bytes == 0)
       return nullptr;
     VECOPS_ASSERT(_base != nullptr, "workspace buffer is null");
@@ -152,6 +195,12 @@ public:
   [[nodiscard]] bool can_allocate(
       nint_t bytes,
       nint_t alignment = vec::DEFAULT_ALIGNMENT) const {
+    if (_segments) {
+      const auto& s = (*_segments)[0];
+      WorkspaceView view{s.data, s.capacity};
+      view._offset = s.used;
+      return view.can_allocate(bytes, alignment);
+    }
     if (bytes == 0)
       return true;
     if (_base == nullptr || bytes < 0 || alignment <= 0 ||
@@ -170,6 +219,19 @@ public:
       static_cast<std::uintptr_t>(_capacity) - aligned_offset;
   }
 
+  /** Execute a nested operator in one logical segment. Nested allocations
+   * cannot escape the callback; operand sessions commit before it returns. */
+  template <typename Fn>
+  decltype(auto) with_subworkspace(unsigned segment, Fn&& fn) {
+    if (!_segments)
+      return std::forward<Fn>(fn)(*this);
+    VECOPS_CHECK(segment < max_segments, "workspace segment index is out of range");
+    auto& s = (*_segments)[segment];
+    auto* base = static_cast<std::byte*>(s.data);
+    WorkspaceView child{s.used ? base + s.used : base, s.capacity - s.used};
+    return std::forward<Fn>(fn)(child);
+  }
+
   /**
    * @brief Allocate raw storage for `count` T objects.
    *
@@ -179,8 +241,8 @@ public:
    * element buffers.
    */
   template <typename T>
-  T* allocate(nint_t count) {
-    return static_cast<T*>(allocate(count * static_cast<nint_t>(sizeof(T)), typed_alignment<T>()));
+  T* allocate(nint_t count, unsigned segment = 0) {
+    return static_cast<T*>(allocate(count * static_cast<nint_t>(sizeof(T)), typed_alignment<T>(), segment));
   }
 
   /**
@@ -193,9 +255,9 @@ public:
    */
   template <typename T, typename Shape>
     requires tensor::is_shape_v<std::remove_cvref_t<Shape>>
-  auto allocate_tensor(Shape shape) {
+  auto allocate_tensor(Shape shape, unsigned segment = 0) {
     auto layout = tensor::make_layout(std::move(shape));
-    T* data = allocate<T>(tensor::numel(layout));
+    T* data = allocate<T>(tensor::numel(layout), segment);
     return tensor::make_tensor(data, std::move(layout));
   }
 
@@ -217,6 +279,7 @@ private:
   nint_t _capacity = 0;
   nint_t _offset = 0;
   nint_t _high_watermark = 0;
+  Segments* _segments = nullptr;
 };
 
 /**

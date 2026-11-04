@@ -436,3 +436,30 @@ def test_plan_cache_rejects_corrupt_and_stale_entries(tmp_path: Path) -> None:
   )
   assert not hit
   planner.validate_plan(execution, repaired)
+
+
+def test_fully_observed_layers_preserve_independent_state_under_sampled_recycling():
+  """Four separate weights are read once per each of eleven recycles."""
+  capture = graph.GraphCapture('independent-layers')
+  weights = [_Tensor() for _ in range(4)]
+  with capture:
+    for i, weight in enumerate(weights):
+      capture.tensor(weight, _metadata(128), storage_identity=('weight', i), storage_bytes=128,
+                     name=f'layer.{i}.weight', kind=graph.TensorKind.parameter,
+                     persistent=True, read_only=True, external=True)
+    recycling = capture.declare_loop('recycling', 11)
+    for recycle in range(2):
+      with recycling.iteration(recycle, role='prologue' if recycle==0 else 'steady_sample'):
+        layers = capture.declare_loop('layers', 4)
+        for i, weight in enumerate(weights):
+          with layers.iteration(i, role='prologue' if i==0 else 'steady_sample'):
+            capture.record_operator('read', inputs=[(weight, graph.AccessKind.read, 'weight')], outputs=[])
+        layers.close()
+    recycling.close()
+  execution = capture.finish()
+  plan = planner.plan_memory(execution, _machine(1024),
+      config=planner.PlannerConfig(minimum_fast_bytes=1))
+  for weight in weights:
+    storage = execution.tensors[capture.tensor_id(weight)].storage_id
+    assert plan.placements[storage].weighted_accesses == 11
+    assert plan.placements[storage].tier == planner.MemoryTier.fast

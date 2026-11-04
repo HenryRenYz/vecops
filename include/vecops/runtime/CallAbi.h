@@ -223,6 +223,21 @@ typedef int32_t (*VecopsWorkspaceArenaAllocateFn)(void* context, uint32_t tier, 
 typedef void (*VecopsWorkspaceArenaReleaseFn)(void* context, void* owner);
 typedef void (*VecopsWorkspaceArenaContextFn)(void* context);
 
+/** Pointer-free buffer contracts for prepare-time placement; lifetimes are
+ * half-open dependency-ordered intervals, never wall-clock estimates. */
+typedef struct VecopsBufferLifetimeV1 { uint64_t begin, end; } VecopsBufferLifetimeV1;
+typedef struct VecopsBufferRequirementV1 {
+  const char* name;
+  uint64_t bytes, alignment, replicas;
+  uint32_t domain, placement;
+  double estimated_traffic_bytes;
+  const VecopsBufferLifetimeV1* lifetimes;
+  size_t lifetime_count;
+} VecopsBufferRequirementV1;
+typedef struct VecopsBufferPlacementV1 { uint64_t offset; uint32_t tier; } VecopsBufferPlacementV1;
+typedef int32_t (*VecopsBufferPlaceFnV1)(void* context, const VecopsBufferRequirementV1* requirements,
+                                       size_t count, VecopsBufferPlacementV1* placements, VecopsError* error);
+
 /**
  * Versioned allocation callbacks passed to generated source-kernel DSOs.
  *
@@ -243,6 +258,8 @@ typedef struct VecopsWorkspaceArenaProvider {
   VecopsWorkspaceArenaContextFn release_context;
   /** Provider capabilities; consumers ignore unknown bits. */
   uint64_t flags;
+  /** Optional prepare-time buffer placement. Absent in older records. */
+  VecopsBufferPlaceFnV1 place_buffers;
 } VecopsWorkspaceArenaProvider;
 
 /** One logical task in a synchronous embedding-owned parallel region. */
