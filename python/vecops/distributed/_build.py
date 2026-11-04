@@ -44,12 +44,14 @@ def load():
                   for p in sorted((sdk/'include').rglob('*')) if p.is_file())
   compiler = shlex.split(os.environ.get('VECOPS_COMM_CXX') or os.environ.get('CXX') or 'g++')
   compiler[0] = shutil.which(compiler[0]) or compiler[0]
+  compile_flags = shlex.split(os.environ.get('VECOPS_COMM_CXXFLAGS', os.environ.get('CXXFLAGS', '')))
+  link_flags = shlex.split(os.environ.get('VECOPS_COMM_LDFLAGS', os.environ.get('LDFLAGS', '')))
   copy_text, dispatch_text = copy_source.read_bytes(), copy_dispatch.read_bytes()
   identity = (source.read_bytes(), core.read_bytes(), header.read_bytes(),
               (sdk/'include/vecops/runtime/CallAbi.h').read_bytes(),
               torch.__version__, torch.compiled_with_cxx11_abi(), compiler,
               subprocess.check_output(compiler + ['--version']),
-              copy_text, dispatch_text, variants, headers)
+              copy_text, dispatch_text, variants, headers, compile_flags, link_flags)
   key = hashlib.sha256(repr(identity).encode()).hexdigest()[:24]
   directory = default_cache_dir() / 'communication' / key
   directory.mkdir(parents=True, exist_ok=True)
@@ -71,17 +73,17 @@ def load():
       (frozen/'comm/Communication.h').write_bytes(identity[2])
       (frozen/'runtime/CallAbi.h').write_bytes(identity[3])
       import sysconfig
-      command = compiler + ['-std=c++20', '-O3', '-shared', '-fPIC', '-pthread',
+      command = compiler + compile_flags + ['-std=c++20', '-O3', '-shared', '-fPIC', '-pthread',
           '-DTORCH_EXTENSION_NAME=_vecops_comm',
           f'-D_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}',
           '-I'+str(directory/'include'), '-I'+str(directory/'include/vecops'), '-I'+sysconfig.get_path('include'),
           *['-I'+p for p in include_paths('cpu')], str(directory/'torch.cpp'), str(directory/'core.cpp'), str(directory/'copy_dispatch.cpp'), '-o', str(temporary),
           *['-L'+p for p in library_paths('cpu')],
           *['-Wl,-rpath,'+p for p in library_paths('cpu')],
-          '-ltorch_python', '-ltorch_cpu', '-ltorch', '-lc10', '-lrt']
+          '-ltorch_python', '-ltorch_cpu', '-ltorch', '-lc10', '-lrt', *link_flags]
       try:
         for variant, flags in variants:
-          copy_command=compiler+['-std=c++20','-O3','-fPIC','-Wno-ignored-attributes',
+          copy_command=compiler+compile_flags+['-std=c++20','-O3','-fPIC','-Wno-ignored-attributes',
               '-fvisibility=hidden','-fvisibility-inlines-hidden',
               f'-D_GLIBCXX_USE_CXX11_ABI={int(torch.compiled_with_cxx11_abi())}',
               '-DVECOPS_COMM_COPY_VARIANT='+variant,*flags,
