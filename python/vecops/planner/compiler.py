@@ -650,6 +650,8 @@ class GraphMemoryCompiler:
         self._endpoint_keys={}
         self._endpoints={}
         self._score_context=None
+        self._executable_agents=frozenset(self.view.executable_agents)
+        self._pool_members=frozenset(self.pool_order)
         self._score_context_key=(self.view.epoch,
             tuple(sorted(self.view.execution_slots.items())),False)
         # Snapshot properties cross the binding boundary. Freeze their scalar
@@ -743,7 +745,7 @@ class GraphMemoryCompiler:
             endpoint_key=entry[1]
         context_key=self._score_context_key
         for agent in agents:
-            if agent not in self.view.executable_agents:
+            if agent not in self._executable_agents:
                 raise ValueError(f'buffer consumer is not executable: {agent}')
             for mode, amount in ((m.AccessMode.read, requirement.read_bytes),
                                  (m.AccessMode.write, requirement.write_bytes)):
@@ -765,24 +767,29 @@ class GraphMemoryCompiler:
                                   payload_bytes=payload)
                     self.query_counts['access_queries']+=1
                     try:
-                        self._access_cache[key]=(True,self.costs.estimate_access(self.view,query,context))
+                        estimate=self.costs.estimate_access(self.view,query,context)
                     except RuntimeError as error:
                         # Keep text, never a traceback that retains compiler roots.
-                        self._access_cache[key]=(False,str(error))
+                        self._access_cache[key]=(False,str(error),0.0)
+                    else:
+                        # Binding properties may copy vectors. Freeze one exact
+                        # query's value, not the native estimate owner, on miss.
+                        cost_unknown=bool(estimate.quality == m.CostQuality.incomplete
+                                          or estimate.missing_facts)
+                        self._access_cache[key]=(True,cost_unknown,estimate.total_us)
                 else:
                     self.query_counts['access_hits']+=1
-                ok,estimate=self._access_cache[key]
+                ok,cost_unknown,cost_us=self._access_cache[key]
                 if not ok:
-                    raise ValueError(f'no usable access cost for {agent}: {estimate}')
-                if estimate.quality == m.CostQuality.incomplete or estimate.missing_facts:
-                    unknown = True
-                total += estimate.total_us * (amount / payload)
+                    raise ValueError(f'no usable access cost for {agent}: {cost_unknown}')
+                unknown = unknown or cost_unknown
+                total += cost_us * (amount / payload)
         return unknown, total
 
     def _candidates(self, requirement):
         m = self.native
         allowed = requirement.allowed_pools or self.pool_order
-        if any(pool not in self.pool_order for pool in allowed):
+        if any(pool not in self._pool_members for pool in allowed):
             raise ValueError(f'placement contains an unavailable pool for {requirement.id}')
         if requirement.placement is not None:
             mode = self._backing_mode(requirement, requirement.placement)
@@ -926,7 +933,7 @@ class GraphMemoryCompiler:
         sharing = {}
         for requirement in requirements:
             requirement.validate()
-            if not set(requirement.consumers)<=set(self.view.executable_agents):
+            if not self._executable_agents.issuperset(requirement.consumers):
                 raise ValueError('buffer consumer is outside the executable resource view')
             contract = requirement.sharing_contract
             if contract is not None:

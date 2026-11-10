@@ -1764,3 +1764,93 @@ def test_reserve_physical_proof_uses_last_actual_snapshot_and_no_exception_conte
     def primitive(value):
         return type(value)in(str,int,bool,type(None))or type(value)is tuple and all(primitive(v)for v in value)
     assert primitive(got.value.evidence)
+
+
+@pytest.mark.parametrize('incomplete,missing', [(False, False), (True, False), (False, True)])
+def test_access_cache_freezes_values_and_view_membership_per_compile(runtime, incomplete, missing):
+    """Cache hits need no native estimate owner or repeated binding getters."""
+    import weakref
+    from collections import Counter
+    value, view = runtime
+    reads, owners = Counter(), []
+    class View:
+        agents = ['compute']
+        def __getattr__(self, name):return getattr(view, name)
+        @property
+        def executable_agents(self):
+            reads['agents'] += 1
+            return list(self.agents)
+    current = View()
+    class Estimate:
+        def __init__(self, estimate):self.estimate = estimate
+        @property
+        def quality(self):
+            reads['quality'] += 1
+            return native.CostQuality.incomplete if incomplete else self.estimate.quality
+        @property
+        def missing_facts(self):
+            reads['missing'] += 1
+            return ['unmeasured'] if missing else self.estimate.missing_facts
+        @property
+        def total_us(self):
+            reads['total'] += 1
+            return self.estimate.total_us
+    class Costs:
+        def estimate_access(self, unused, query, context):
+            reads['query'] += 1
+            estimate = Estimate(value.costs.estimate_access(view, query, context))
+            owners.append(weakref.ref(estimate))
+            return estimate
+    class Queries:
+        costs = Costs()
+        def __getattr__(self, name):return getattr(value, name)
+    engine = compiler.GraphMemoryCompiler(Queries(), current, value.snapshot(view), native_module=native)
+    requirement = Buffer('traffic', Q, read_bytes=Q, write_bytes=2*Q, consumers=('compute',))
+    plan = obj('PlacementPlan', address_space='host', stripe_bytes=Q, weights={'uma':1})
+    resolved = value.resolve_placement(view, plan, Q, native.BackingMode.shareable_remappable,
+                                       [native.AccessMode.read, native.AccessMode.write])
+    expected = engine._score(requirement, resolved)
+    assert expected[0] is (incomplete or missing)
+    for _ in range(12):assert engine._score(requirement, resolved) == expected
+    assert reads == dict(agents=1, query=2, quality=2, total=2,
+                         **({'missing':2} if not incomplete else {}))
+    assert all(owner() is None for owner in owners)
+    engine._reset_queries()
+    assert engine._score(requirement, resolved) == expected
+    assert reads['agents'] == 2 and reads['query'] == 4
+    # A later compilation must revalidate membership, even at the same epoch.
+    current.agents = []
+    with pytest.raises(ValueError, match='outside the executable resource view'):
+        engine.compile([requirement])
+    assert reads['agents'] == 3
+
+
+def test_access_cache_preserves_query_and_property_error_boundaries(runtime):
+    value, view = runtime
+    class Costs:
+        calls = 0
+        error = 'query'
+        def estimate_access(self, unused, query, context):
+            self.calls += 1
+            if self.error == 'query':raise RuntimeError('query unavailable')
+            class BrokenEstimate:
+                @property
+                def quality(self):raise RuntimeError('estimate property unavailable')
+            return BrokenEstimate()
+    costs = Costs()
+    class Queries:
+        def __getattr__(self, name):return getattr(value, name)
+    queries = Queries();queries.costs = costs
+    engine = compiler.GraphMemoryCompiler(queries, view, value.snapshot(view), native_module=native)
+    requirement = Buffer('traffic', Q, read_bytes=Q, consumers=('compute',))
+    plan = obj('PlacementPlan', address_space='host', stripe_bytes=Q, weights={'uma':1})
+    resolved = value.resolve_placement(view, plan, Q, native.BackingMode.shareable_remappable,
+                                       [native.AccessMode.read, native.AccessMode.write])
+    for _ in range(2):
+        with pytest.raises(ValueError, match='no usable access cost for compute: query unavailable'):
+            engine._score(requirement, resolved)
+    assert costs.calls == 1
+    costs.error = 'property';engine._reset_queries()
+    with pytest.raises(RuntimeError, match='estimate property unavailable'):
+        engine._score(requirement, resolved)
+    assert costs.calls == 2
