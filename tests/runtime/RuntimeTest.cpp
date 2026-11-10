@@ -16,12 +16,16 @@
 #include <cstdlib>
 #include <filesystem>
 #include <future>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 #ifndef VECOPS_TEST_KERNEL
 #  error "VECOPS_TEST_KERNEL must identify TestKernel.cpp"
@@ -283,7 +287,8 @@ struct RuntimeArenaProvider {
     return VECOPS_STATUS_OK;
   }
 
-  static void release_arena(void*, void* owner) {
+  static void release_arena(void* context, void* owner) {
+    static_cast<RuntimeArenaProvider*>(context)->releases.fetch_add(1);
     delete static_cast<vecops::execution::WorkspaceArena*>(owner);
   }
 
@@ -299,6 +304,7 @@ struct RuntimeArenaProvider {
 
   std::atomic<unsigned> references{1};
   std::atomic<unsigned> allocations{0};
+  std::atomic<unsigned> releases{0};
   std::shared_ptr<vecops::execution::WorkspaceArenaProvider> heap = vecops::execution::default_workspace_arena_provider();
   VecopsWorkspaceArenaProvider abi{};
 };
@@ -350,14 +356,97 @@ void test_kernel_call_workspace_and_context_forwarding() {
           "legacy KernelCall overload must retain null-workspace behavior");
 }
 
+BoundKernelRecipe publication_recipe() {
+  return {.recipe_id = "publication-race", .specialization_key = "workspace-context-v1",
+          .artifact_key = "publication-race-v1"};
+}
+
+int publication_worker(const fs::path& cache, const std::string& id) {
+  auto executable = Executable::load(VECOPS_WORKSPACE_CONTEXT_FIXTURE);
+  require(executable.ok(), "publication worker fixture load");
+  std::ofstream(cache / ("ready-" + id)).put('1');
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (!fs::exists(cache / "release") && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  require(fs::exists(cache / "release"), "publication worker release timeout");
+  ArtifactExecutableProvider provider({.mode = ArtifactCacheMode::ReadWrite,
+      .cache_directory = cache, .namespace_key = "publication-race"});
+  auto result = provider.adopt(publication_recipe(), executable.value());
+  require(result.ok(), "independent process publication: " + result.status().message());
+  require(provider.lookup(publication_recipe()).ok(), "published worker lookup");
+  return 0;
+}
+
+void test_independent_process_publication(const fs::path& self, const fs::path& root) {
+  auto executable = Executable::load(VECOPS_WORKSPACE_CONTEXT_FIXTURE);
+  require(executable.ok(), "publication fixture load");
+  ArtifactExecutableProvider seed({.mode = ArtifactCacheMode::ReadWrite,
+      .cache_directory = root / "seed", .namespace_key = "publication-race"});
+  auto published = seed.adopt(publication_recipe(), executable.value());
+  require(published.ok(), "publication seed: " + published.status().message());
+  // Obtain the public on-disk entry name from a published artifact rather than
+  // duplicating the provider's private hash algorithm in this regression.
+  const auto entry = published.value()->module()->path().parent_path();
+  const auto cache = root / "competing";
+  const auto space = cache / entry.parent_path().filename();
+  const auto legacy = space / (entry.filename().string() + ".tmp-0");
+  fs::create_directories(legacy);
+  std::ofstream(legacy / "keep").put('x');
+  std::vector<pid_t> children;
+  bool spawned = true;
+  for (unsigned index = 0; index < 4; ++index) {
+    const auto id = std::to_string(index);
+    const auto child = fork();
+    if (child == 0) {
+      execl(self.c_str(), self.c_str(), "--publication-worker", cache.c_str(), id.c_str(),
+            static_cast<char*>(nullptr));
+      _exit(127);
+    }
+    if (child < 0) { spawned = false; break; }
+    children.push_back(child);
+  }
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool ready = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    ready = true;
+    for (std::size_t index = 0; index < children.size(); ++index)
+      ready = ready && fs::exists(cache / ("ready-" + std::to_string(index)));
+    if (ready) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::ofstream(cache / "release").put('1');
+  bool succeeded = true;
+  for (auto child : children) {
+    int outcome = 0;
+    const auto waited = waitpid(child, &outcome, 0);
+    succeeded = succeeded && waited == child && WIFEXITED(outcome) && WEXITSTATUS(outcome) == 0;
+  }
+  require(spawned && ready && succeeded, "all independent publishers must succeed with a legacy staging entry");
+  ArtifactExecutableProvider reader({.mode = ArtifactCacheMode::CacheOnly,
+      .cache_directory = cache, .namespace_key = "publication-race"});
+  require(reader.lookup(publication_recipe()).ok(), "complete winning artifact remains readable");
+  require(std::ifstream(legacy / "keep").get() == 'x', "legacy staging content must remain untouched");
+  require(std::distance(fs::directory_iterator(space), fs::directory_iterator{}) == 2,
+          "only the complete artifact and pre-existing staging directory remain");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 4 && std::string_view(argv[1]) == "--publication-worker")
+    return publication_worker(argv[2], argv[3]);
+  if (argc == 3 && std::string_view(argv[1]) == "--publication-test") {
+    test_independent_process_publication(fs::absolute(argv[0]), argv[2]);
+    std::cout << "RuntimeTest publication PASS\n";
+    return 0;
+  }
   static_assert(dtype_bit(static_cast<DType>(100)) == 0);
   if (argc != 2)
     fail("usage: RuntimeTest <work-directory>");
   const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
   const fs::path work_directory = fs::path(argv[1]) / unique;
+
+  test_independent_process_publication(fs::absolute(argv[0]), work_directory / "publication");
 
   auto definition = kernel_definition();
   require(definition.validate().ok(), "kernel definition validation");
@@ -429,9 +518,14 @@ int main(int argc, char** argv) {
   std::fill(output.begin(), output.end(), 0);
   require(executable.value()->invoke(call.arguments(), nullptr, 0, &arena_context).ok(),
           "source kernel arena-provider invocation");
+  require(arena_provider->allocations.load() == 1 && arena_provider->releases.load() == 1,
+          "dynamic source scratch must use and release its explicit arena provider");
   require(executable.value()->invoke(call.arguments(), nullptr, 0, &arena_context).ok(),
           "source kernel arena-provider replay");
-  require(arena_provider->allocations.load() == 1, "arena provider must allocate once and replay from its cache");
+  // This source uses dynamic WorkspaceContext requests, rather than a
+  // recordable KernelPlan. Each invocation returns its scratch to the provider.
+  require(arena_provider->allocations.load() == 2 && arena_provider->releases.load() == 2,
+          "dynamic source scratch must not retain an implicit arena cache");
   RuntimeArenaProvider::release_context(arena_provider);
 
   auto dynamic_definition = named_dynamic_kernel_definition();

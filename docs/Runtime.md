@@ -83,7 +83,11 @@ application namespace; applications must use distinct namespaces for
 incompatible target, compiler, or SDK populations. Resolution is coordinated
 per persistent key: identical concurrent misses share one in-flight result,
 while different specializations may load or compile concurrently through the
-same provider.
+same provider. ReadWrite publication atomically claims a randomized staging
+name and retries existing names, including abandoned staging entries; independent
+processes/providers can publish the same key without sharing a counter or
+removing another publisher's staging directory. Other filesystem errors fail
+immediately, and the final rename still selects the complete winning artifact.
 
 Batch preparation separates this boundary into `lookup()` and `adopt()`.
 `lookup()` performs only memory/persistent-cache resolution and never invokes

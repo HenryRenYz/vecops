@@ -15,6 +15,7 @@
 #include <exception>
 #include <fstream>
 #include <iomanip>
+#include <random>
 #include <sstream>
 #include <system_error>
 
@@ -117,11 +118,28 @@ Result<std::shared_ptr<Executable>> ArtifactExecutableProvider::publish(const Bo
   if (fs::exists(destination, error))
     return load_cached(recipe, cache_key);
 
-  const auto temporary =
-    namespace_directory /
-    (std::string(cache_key) + ".tmp-" + std::to_string(temporary_counter.fetch_add(1, std::memory_order_relaxed)));
-  if (!fs::create_directory(temporary, error) || error)
-    return status(StatusCode::InternalError, "cannot create cache staging directory: " + error.message());
+  fs::path temporary;
+  try {
+    std::random_device nonce;
+    for (unsigned attempt = 0; attempt < 128; ++attempt) {
+      std::ostringstream suffix;
+      suffix << std::hex << nonce() << '-' << nonce() << '-'
+             << temporary_counter.fetch_add(1, std::memory_order_relaxed);
+      auto candidate = namespace_directory / (std::string(cache_key) + ".tmp-" + suffix.str());
+      // Only an atomic successful create grants ownership. Another process,
+      // DSO or an abandoned staging entry may already own this candidate.
+      if (fs::create_directory(candidate, error)) {
+        temporary = std::move(candidate);
+        break;
+      }
+      if (error && error != std::errc::file_exists)
+        return status(StatusCode::InternalError, "cannot create cache staging directory: " + error.message());
+    }
+  } catch (const std::exception& exception) {
+    return status(StatusCode::InternalError, "cannot name cache staging directory: " + std::string(exception.what()));
+  }
+  if (temporary.empty())
+    return status(StatusCode::InternalError, "cache staging directory collision retry limit exceeded");
   {
     std::ofstream manifest(temporary / "vecops-cache-identity.txt", std::ios::binary);
     manifest << input_identity(config_, recipe);
