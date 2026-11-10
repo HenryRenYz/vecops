@@ -1980,9 +1980,15 @@ used by that estimate, rather than a later snapshot.
 
 During `prepare_model`, a typed group shortfall can also teach a temporary
 fresh-allocation margin equal to the observed physical sample loss. Learning
-requires identical accounting and untruncated pool allowances. A new grant,
-constraint or independent pool limit clears the margin. Idle cache remains
-available, public snapshots and runtime limits stay unchanged, and all temporary
+requires the identical complete accounting fingerprint, including epoch, and
+untruncated pool allowances. Already proved margins are retained per connected
+capacity-group/pool/overlapping-constraint component. An unrelated resource
+change or global epoch advance does not clear that margin; a changed balance,
+cache, pool quota or membership within its component does. An incomplete closure
+with an unavailable group or constraint also requires an unchanged epoch.
+Endpoint equality across an epoch change never teaches a new typed loss, since
+it cannot exclude a temporary peer grant. Idle cache remains available, public
+snapshots and runtime limits stay unchanged, and all temporary
 policy state is restored on success or failure. Once a typed physical rejection
 establishes that observation, every untruncated group's measured decline across
 the same-accounting snapshots can contribute its own maximum margin. No margin

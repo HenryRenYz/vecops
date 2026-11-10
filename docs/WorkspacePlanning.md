@@ -448,9 +448,14 @@ all local proposals and refunds their pending capacity.
 If a final estimate observes less physical free space than the planning sample,
 preparation can leave the observed loss as fresh-allocation headroom on its next
 attempt. Ordinary observations require unchanged accounting, epoch and independent pool limits;
-pool allowances must equal their complete group allowance. The guard preserves
-reusable cache capacity and disappears when accounting changes or preparation
-ends. A typed physical rejection also learns each other untruncated group's
+pool allowances must equal their complete group allowance. An already proved
+margin survives unrelated resource accounting or global epoch changes. It is
+invalidated by balance, cache, pool-quota or membership changes in the connected
+capacity-group/pool/overlapping-constraint component; an incomplete component
+also retains epoch protection. New typed learning still requires the original
+complete same-epoch fingerprint, so temporary peer-grant ABA cannot teach a
+spurious physical margin. The guard preserves reusable idle cache capacity and
+ends with preparation. A typed physical rejection also learns each other untruncated group's
 observed physical decline between those same-accounting snapshots, so several
 declining pools need not fail one at a time. Per-group observations take a
 maximum, never a sum. It changes only the compiler's private fit bound; native

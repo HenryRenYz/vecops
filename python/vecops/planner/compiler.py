@@ -27,13 +27,15 @@ from typing import Any, Mapping, Sequence
 class _ColdPhysicalHeadroom:
     """Primitive, prepare-local observations; no native snapshot/error ownership.
 
-    Only same-accounting physical loss becomes a private fresh-byte guard.
-    Ordinary epoch or accounting changes invalidate observations; only a known
-    rejected reserve may rebase epoch with complete accounting unchanged.
+    New typed loss requires the complete, same-epoch accounting fingerprint.
+    Proved margins survive unrelated changes, but not changed accounting in
+    their pool/overlapping-constraint component. Incomplete components also
+    depend on epoch. Reserve proofs retain their stricter complete accounting.
     """
     def __init__(self):
         self.accounting = None
         self.losses = {}
+        self._components = {}
 
     @staticmethod
     def fingerprint(snapshot):
@@ -74,11 +76,64 @@ class _ColdPhysicalHeadroom:
         available=group.idle_available_bytes+_ColdPhysicalHeadroom.fresh(group)
         return all(p.allocatable_bytes==available for p in pools)
 
+    @staticmethod
+    def _component_keys(signature):
+        """Primitive dependency closures; unknown members keep epoch protection."""
+        epoch,groups,pools,constraints=signature
+        group_rows={row[0]:row for row in groups}
+        constraint_rows={row[0]:row for row in constraints}
+        links={name:set() for name in group_rows}
+        missing_constraints={}
+        for _identity,members,_remaining in constraints:
+            for name in members:
+                links.setdefault(name,set()).update(members)
+        for _pool,group,_cached,identities,_bound in pools:
+            for identity in identities:
+                if identity not in constraint_rows:
+                    missing_constraints.setdefault(group,set()).add(identity)
+                    continue
+                members=constraint_rows[identity][1]
+                for name in (group,)+members:
+                    links.setdefault(name,set()).update((group,)+members)
+        result={}
+        for name in group_rows:
+            if name in result:
+                continue
+            members,pending=set(),[name]
+            while pending:
+                member=pending.pop()
+                if member not in members:
+                    members.add(member)
+                    pending.extend(links[member]-members)
+            selected_pools=tuple(row for row in pools if row[1] in members)
+            referenced={identity for row in selected_pools for identity in row[3]}
+            selected_constraints=tuple(row for row in constraints
+                if row[0] in referenced or members.intersection(row[1]))
+            absent_groups=tuple(sorted(members-group_rows.keys()))
+            absent_constraints=tuple(sorted({identity for member in members
+                for identity in missing_constraints.get(member,())}))
+            key=(tuple(group_rows[g] for g in sorted(members) if g in group_rows),
+                 selected_pools,selected_constraints,absent_groups,absent_constraints,
+                 epoch if absent_groups or absent_constraints else None)
+            result.update((g,key) for g in members if g in group_rows)
+        return result
+
+    def _sync(self, snapshot, signature=None):
+        signature=self.fingerprint(snapshot) if signature is None else signature
+        components=self._component_keys(signature)
+        for identity in tuple(self.losses):
+            if identity not in components or self._components.get(identity)!=components[identity]:
+                del self.losses[identity]
+        self._components=components
+        # Keep the full fingerprint for reserve proof/diagnostic compatibility;
+        # only retention of an already proved loss uses a narrower component.
+        self.accounting=signature
+
     def observe(self, shortfalls, planned, current):
         old,new=self.fingerprint(planned),self.fingerprint(current)
-        if self.accounting != new:
-            self.losses.clear()
-            self.accounting=new
+        self._sync(current,new)
+        # Endpoint equality within a component cannot rule out peer-grant ABA.
+        # Learning a new loss therefore still requires the full original key.
         if old != new:
             return False
         previous=dict(self.losses)
@@ -125,6 +180,7 @@ class _ColdPhysicalHeadroom:
         """
         fingerprint, identity, requested, available, allowances = error.evidence
         before, after = self.fingerprint(planned), self.fingerprint(current)
+        self._sync(current,after)
         if (before[1:] != fingerprint[1:] or fingerprint[1:] != after[1:]
                 or not before[0] <= fingerprint[0] < after[0]):
             return False
@@ -139,21 +195,15 @@ class _ColdPhysicalHeadroom:
                 or not 0 < requested <= count or not available < requested):
             return False
         previous = dict(self.losses)
-        if self.accounting is not None and self.accounting[1:] != before[1:]:
-            self.losses.clear()
-        # Rebase only this proved rejection/complete-accounting rollback path.
-        # Ordinary estimate/epoch handling is unchanged.
-        self.accounting = after
+        # The strict three-snapshot proof above is unchanged. Synchronization
+        # preserves only unrelated, previously proved component margins.
         self.losses[identity] = max(self.losses.get(identity, 0), count-available)
         return self.losses != previous
 
     def apply(self, snapshot, groups):
         self.unadjusted_groups=dict(groups)
         self.adjusted_groups_id=id(groups)
-        signature=self.fingerprint(snapshot)
-        if self.accounting != signature:
-            self.losses.clear()
-            self.accounting=signature
+        self._sync(snapshot)
         for identity,loss in self.losses.items():
             if identity in groups:
                 total,idle=groups[identity]
@@ -1179,7 +1229,9 @@ class GraphMemoryCompiler:
         reusable. A known unaccepted reserve can rebase a rollback epoch only
         when compile, last-reserve and current nonphysical accounting agree.
         The private guard never changes native admission limits and is
-        discarded when accounting changes or this call exits. Compiler
+        discarded when its related pool/constraint component changes or this
+        call exits. Unrelated accounting changes retain proved margins; new
+        typed learning still requires the full same-epoch fingerprint. Compiler
         instances retain their existing non-reentrant preparation contract.
         """
         if type(admission_attempts) is not int or not 1 <= admission_attempts <= 64:

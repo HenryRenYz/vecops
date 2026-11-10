@@ -1952,3 +1952,194 @@ def test_whole_score_consumer_order_preserves_float_accumulation(runtime):
     assert engine._score(reordered, endpoints[0]) == (False, float(2**53+2))
     assert engine._score(request, endpoints[0]) == (False, float(2**53))
     assert engine.query_counts == dict(access_queries=3, access_hits=6)
+
+
+def _component_margin_fixture(*, edges=(), missing_pool_constraint=False, idle=0):
+    """Prove one loss with unchanged complete accounting, then vary dependencies."""
+    before = _all_group_headroom_snapshot(dict(a=8*Q, b=8*Q, c=8*Q, d=8*Q), idle=idle)
+    after = _all_group_headroom_snapshot(dict(a=6*Q, b=8*Q, c=8*Q, d=8*Q), idle=idle)
+    for sample in (before, after):
+        sample.constraints = [SimpleNamespace(id=name, capacity_groups=list(members), remaining_bytes=24*Q)
+                              for name, members in edges]
+        if missing_pool_constraint:
+            sample.pools[0].shared_constraints = ['unavailable-cut']
+    policy = compiler._ColdPhysicalHeadroom()
+    assert policy.observe((('capacity_group', 'a', 8*Q, 6*Q),), before, after)
+    assert policy.losses == {'a': 2*Q}
+    return policy, before, after
+
+
+def _component_apply(policy, sample):
+    H = compiler._ColdPhysicalHeadroom
+    available = {g.capacity_group: (g.idle_available_bytes + H.fresh(g), g.idle_available_bytes)
+                 for g in sample.groups}
+    policy.apply(sample, available)
+    return available
+
+
+@pytest.mark.parametrize('foreign', ['epoch_only', 'pending', 'cache'])
+def test_component_headroom_retains_proved_margin_across_foreign_change(foreign):
+    policy, _, sample = _component_margin_fixture(idle=3*Q)
+    sample.epoch += 1
+    if foreign == 'pending':
+        sample.groups[1].unbacked_reserved_bytes = Q
+        sample.groups[1].shared_remaining_bytes = 31*Q
+    if foreign == 'cache':
+        sample.pools[1].largest_cached_block_bytes = Q
+    available = _component_apply(policy, sample)
+    assert policy.losses == {'a': 2*Q}
+    assert available['a'] == (7*Q, 3*Q)  # Only fresh bytes are guarded; idle stays reusable.
+    assert policy.accounting == policy.fingerprint(sample)
+
+
+@pytest.mark.parametrize('change', ['pending', 'quota', 'cache', 'idle', 'pool', 'constraint', 'hard'])
+def test_component_headroom_related_change_invalidates_margin(change):
+    policy, _, sample = _component_margin_fixture()
+    sample.epoch += 1
+    if change == 'pending': sample.groups[0].unbacked_reserved_bytes = Q
+    if change == 'quota': sample.pools[0].allocatable_bytes = 5*Q
+    if change == 'cache': sample.pools[0].largest_cached_block_bytes = Q
+    if change == 'idle':
+        sample.groups[0].idle_available_bytes = Q
+        sample.pools[0].allocatable_bytes = 7*Q
+    if change == 'pool':
+        sample.pools.append(SimpleNamespace(pool='alias-a', capacity_group='a',
+            largest_cached_block_bytes=0, shared_constraints=[], allocatable_bytes=6*Q))
+    if change == 'constraint':
+        sample.constraints = [SimpleNamespace(id='new-cut', capacity_groups=['a'], remaining_bytes=24*Q)]
+    if change == 'hard': sample.groups[0].hard_limit_bytes -= Q
+    available = _component_apply(policy, sample)
+    assert policy.losses == {}
+    expected = (7*Q, Q) if change == 'idle' else (6*Q, 0)
+    assert available['a'] == expected
+
+
+@pytest.mark.parametrize('changed_group,retained', [('b', False), ('c', False), ('d', True)])
+def test_component_headroom_overlap_transitive_closure(changed_group, retained):
+    policy, _, sample = _component_margin_fixture(edges=(('ab', ('a', 'b')), ('bc', ('b', 'c'))))
+    sample.epoch += 1
+    next(g for g in sample.groups if g.capacity_group == changed_group).unbacked_reserved_bytes = Q
+    available = _component_apply(policy, sample)
+    assert policy.losses == ({'a': 2*Q} if retained else {})
+    assert available['a'] == ((4*Q, 0) if retained else (6*Q, 0))
+
+
+def test_component_headroom_overlap_remaining_and_membership_invalidate():
+    for change in ('remaining', 'membership'):
+        policy, _, sample = _component_margin_fixture(edges=(('ab', ('a', 'b')),))
+        sample.epoch += 1
+        if change == 'remaining': sample.constraints[0].remaining_bytes -= Q
+        else: sample.constraints[0].capacity_groups.append('c')
+        _component_apply(policy, sample)
+        assert policy.losses == {}
+
+
+@pytest.mark.parametrize('partial', ['missing_group', 'missing_constraint'])
+def test_component_headroom_partial_closure_retains_epoch_protection(partial):
+    policy, _, sample = _component_margin_fixture(
+        edges=(('outside', ('a', 'unseen')),) if partial == 'missing_group' else (),
+        missing_pool_constraint=partial == 'missing_constraint')
+    assert _component_apply(policy, sample)['a'] == (4*Q, 0)
+    sample.epoch += 1
+    assert _component_apply(policy, sample)['a'] == (6*Q, 0)
+    assert policy.losses == {}
+
+
+@pytest.mark.parametrize('already_proved', [False, True])
+def test_component_headroom_epoch_aba_never_teaches_new_typed_loss(already_proved):
+    proved, _, before = _component_margin_fixture()
+    policy = proved if already_proved else compiler._ColdPhysicalHeadroom()
+    after = _all_group_headroom_snapshot(dict(a=5*Q, b=8*Q, c=8*Q, d=8*Q), epoch=2)
+    # End balances are equal, but peer pending may have appeared during estimate
+    # and disappeared before this sample. Component equality cannot disprove ABA.
+    assert not policy.observe((('capacity_group', 'a', 6*Q, 5*Q),), before, after)
+    assert policy.losses == ({'a': 2*Q} if already_proved else {})
+
+
+@pytest.mark.parametrize('changed_peer', [False, True])
+def test_component_headroom_reserve_keeps_strict_proof_and_unrelated_margin(changed_peer):
+    policy, _, before = _component_margin_fixture()
+    after = _all_group_headroom_snapshot(dict(a=6*Q, b=7*Q, c=8*Q, d=8*Q), epoch=2)
+    if changed_peer: after.groups[1].unbacked_reserved_bytes = Q
+    message = ('shared_capacity.physical_free: physical free sample minus pending reservations is exhausted: '
+               f'group=b, requested_bytes={8*Q}, sampled_free_bytes={7*Q}, pending_bytes=0')
+    failure = compiler._ReservePhysicalCapacityError(message, compiler._reserve_physical_evidence(message, before))
+    assert policy.observe_reserve(failure, before, after) is (not changed_peer)
+    assert policy.losses == ({'a': 2*Q} if changed_peer else {'a': 2*Q, 'b': Q})
+    assert _component_apply(policy, after)['a'] == (4*Q, 0)
+
+
+def test_component_headroom_keeps_only_primitive_keys_without_snapshot_owners():
+    import weakref
+    class Owner: pass
+    class Snapshot(SimpleNamespace): pass
+    def observe():
+        policy, before, after = _component_margin_fixture(edges=(('ab', ('a', 'b')),))
+        owner = Owner()
+        snapshot = Snapshot(**after.__dict__, owner=owner)
+        refs = (weakref.ref(snapshot), weakref.ref(owner))
+        _component_apply(policy, snapshot)
+        return policy, refs
+    policy, refs = observe()
+    assert all(ref() is None for ref in refs)  # No gc.collect or traceback cleanup needed.
+    def primitive(value):
+        return type(value) in (str, int, bool, type(None)) or (
+            type(value) is tuple and all(primitive(v) for v in value)) or (
+            type(value) is dict and all(primitive(k) and primitive(v) for k, v in value.items()))
+    assert all(primitive(value) for value in vars(policy).values())
+    assert policy.losses == {'a': 2*Q}
+
+
+def test_component_headroom_foreign_finalizer_growth_avoids_relearning_real_runtime(runtime):
+    value, view = runtime
+    peer = compile_buffers(runtime, [Buffer('foreign-resource', Q, allowed_pools=('cowos_superdie',))]).prepare(value, view)
+    class Samples:
+        free = 8*Q
+        estimates = 0
+        finalizations = 0
+        def __getattr__(self, name): return getattr(value, name)
+        def snapshot(self, v, caches): return _sample_headroom_snapshot(value, v, caches, self.free)
+        def estimate(self, v, recipe, caches):
+            self.estimates += 1
+            self.free -= 2*Q if self.estimates == 1 else Q
+            return _headroom_reject(value, v, recipe, caches, self.free)
+        def finalize(self, prepared):
+            self.finalizations += 1
+            if self.finalizations == 1:
+                peer.admit()  # Actual unrelated native pending grant advances epoch.
+                return True
+            return False
+    samples = Samples()
+    engine = compiler.GraphMemoryCompiler(samples, view, samples.snapshot(view, []), native_module=native)
+    prepared = None
+    try:
+        prepared = engine.prepare_model({'region': [Buffer(f'page:{i}', Q, read_bytes=8*Q) for i in range(8)]},
+            [compiler.ProgramCall('call', 'region')], serialized=True,
+            finalize_resources=samples.finalize, admission_attempts=4)
+        assert samples.estimates == 3 and samples.finalizations == 2
+        assert dict(prepared.program.peak_bytes_by_capacity_group) == {
+            'capacity:uma': 3*Q, 'capacity:cowos_superdie': 5*Q}
+        assert prepared.binding is None and prepared.backings is None
+        assert not hasattr(engine, '_cold_physical_headroom')
+        assert sum(g.unbacked_reserved_bytes for g in value.snapshot(view).groups) == 9*Q
+    finally:
+        if prepared is not None: prepared.close()
+        peer.close()
+    assert all(g.committed_bytes == g.unbacked_reserved_bytes == 0 for g in value.snapshot(view).groups)
+
+
+@pytest.mark.parametrize('changed_group,retained', [('c', False), ('d', True)])
+def test_component_headroom_pool_constraint_reference_joins_omitted_group(changed_group, retained):
+    # A pool can supply a dependency even if its group is not in the constraint's
+    # explicit member list. Retention must conservatively join both sources.
+    before = _all_group_headroom_snapshot(dict(a=8*Q, b=8*Q, c=8*Q, d=8*Q))
+    after = _all_group_headroom_snapshot(dict(a=6*Q, b=8*Q, c=8*Q, d=8*Q))
+    for sample in (before, after):
+        sample.constraints = [SimpleNamespace(id='bc', capacity_groups=['b', 'c'], remaining_bytes=24*Q)]
+        sample.pools[0].shared_constraints = ['bc']
+    policy = compiler._ColdPhysicalHeadroom()
+    assert policy.observe((('capacity_group', 'a', 8*Q, 6*Q),), before, after)
+    after.epoch += 1
+    next(g for g in after.groups if g.capacity_group == changed_group).unbacked_reserved_bytes = Q
+    _component_apply(policy, after)
+    assert policy.losses == ({'a': 2*Q} if retained else {})
