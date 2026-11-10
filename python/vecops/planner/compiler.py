@@ -647,6 +647,7 @@ class GraphMemoryCompiler:
         self._placement_cache={}
         self._capability_cache={}
         self._access_cache={}
+        self._score_cache={}
         self._endpoint_keys={}
         self._endpoints={}
         self._score_context=None
@@ -744,6 +745,14 @@ class GraphMemoryCompiler:
         else:
             endpoint_key=entry[1]
         context_key=self._score_context_key
+        score_key=(endpoint_key,tuple(agents),requirement.bytes,
+                   requirement.read_bytes,requirement.write_bytes,context_key)
+        cached=self._score_cache.get(score_key)
+        if cached is not None:
+            # Every access of a previously successful score is an exact hit.
+            self.query_counts['access_hits']+=len(agents)*(bool(requirement.read_bytes)
+                                                         +bool(requirement.write_bytes))
+            return cached
         for agent in agents:
             if agent not in self._executable_agents:
                 raise ValueError(f'buffer consumer is not executable: {agent}')
@@ -784,7 +793,9 @@ class GraphMemoryCompiler:
                     raise ValueError(f'no usable access cost for {agent}: {cost_unknown}')
                 unknown = unknown or cost_unknown
                 total += cost_us * (amount / payload)
-        return unknown, total
+        result=unknown,total
+        self._score_cache[score_key]=result
+        return result
 
     def _candidates(self, requirement):
         m = self.native

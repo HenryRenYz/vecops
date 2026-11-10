@@ -1854,3 +1854,101 @@ def test_access_cache_preserves_query_and_property_error_boundaries(runtime):
     with pytest.raises(RuntimeError, match='estimate property unavailable'):
         engine._score(requirement, resolved)
     assert costs.calls == 2
+
+
+def _whole_score_fixture(runtime, *, ordered_costs=None):
+    """Native query values with observable enum lookups and deterministic costs."""
+    from collections import Counter
+    value, view = runtime
+    counts = Counter()
+    class Native:
+        def __getattr__(self, name):return getattr(native, name)
+        @property
+        def AccessMode(self):
+            counts['mode_lookup'] += 1
+            return native.AccessMode
+    agents = ('compute', 'one', 'other', 'large')
+    current = SimpleNamespace(graph=view.graph, allocatable_pools=view.allocatable_pools,
+        executable_agents=agents, epoch=view.epoch, execution_slots={agent:1 for agent in agents})
+    class Costs:
+        def estimate_access(self, unused, query, context):
+            counts['queries'] += 1
+            if ordered_costs is not None:
+                total = ordered_costs[query.agent]
+            else:
+                rate = {'compute':1., 'one':2., 'other':4.}[query.agent]
+                pool = 1 if query.memory.segments[0].pool == 'uma' else 3
+                mode = 1 if query.access == native.AccessMode.read else 2
+                total = (rate*pool*mode + query.payload_bytes/Q + context.view_epoch
+                         + sum(context.execution_slots.values()) + 16*context.include_preparation)
+            return obj('CostEstimate', total_us=total, quality=native.CostQuality.reference)
+    class Queries:
+        costs = Costs()
+        def __getattr__(self, name):return getattr(value, name)
+    engine = compiler.GraphMemoryCompiler(Queries(), current, value.snapshot(view), native_module=Native())
+    endpoints = []
+    for pool in ('uma', 'cowos_superdie'):
+        plan = obj('PlacementPlan', address_space='host', stripe_bytes=Q, weights={pool:1})
+        endpoints.append(value.resolve_placement(view, plan, 2*Q, native.BackingMode.shareable_remappable,
+                                                [native.AccessMode.read, native.AccessMode.write]))
+    return engine, endpoints, counts
+
+
+def test_whole_score_cache_skips_repeated_agent_mode_work(runtime):
+    engine, endpoints, counts = _whole_score_fixture(runtime)
+    request = Buffer('x', Q, consumers=('compute','one'), read_bytes=3*Q, write_bytes=2*Q)
+    expected = engine._score(request, endpoints[0])
+    before = dict(counts)
+    for _ in range(5):assert engine._score(request, endpoints[0]) == expected
+    assert dict(counts) == before
+    assert engine.query_counts == dict(access_queries=4, access_hits=20)
+    engine._reset_queries()
+    assert engine._score(request, endpoints[0]) == expected
+    assert counts['queries'] == 8
+
+
+@pytest.mark.parametrize('change', ['consumer', 'read', 'write', 'extent', 'endpoint',
+                                    'epoch', 'slots', 'preparation'])
+def test_whole_score_keys_preserve_values_and_access_counters(runtime, change):
+    from dataclasses import replace
+    class Uncached(dict):
+        def get(self, *args):return None
+        def __setitem__(self, *args):pass
+    engine, endpoints, _ = _whole_score_fixture(runtime)
+    reference, reference_endpoints, _ = _whole_score_fixture(runtime)
+    reference._score_cache = Uncached()
+    request = Buffer('x', Q, consumers=('compute','one'), read_bytes=3*Q, write_bytes=2*Q)
+    original = engine._score(request, endpoints[0])
+    assert original == reference._score(request, reference_endpoints[0])
+    endpoint_index = 0
+    if change == 'consumer':request = replace(request, consumers=('compute','other'))
+    if change == 'read':request = replace(request, read_bytes=4*Q)
+    if change == 'write':request = replace(request, write_bytes=3*Q)
+    if change == 'extent':request = replace(request, bytes=2*Q)
+    if change == 'endpoint':endpoint_index = 1
+    if change in ('epoch', 'slots', 'preparation'):
+        epoch, slots, preparation = engine._score_context_key
+        if change == 'epoch':epoch += 1
+        if change == 'slots':slots = tuple((agent,n+1)for agent,n in slots)
+        if change == 'preparation':preparation = True
+        for target in (engine, reference):
+            target._score_context_key = epoch,slots,preparation
+            target._score_context = None
+    changed = reference._score(request, reference_endpoints[endpoint_index])
+    assert changed != original
+    assert engine._score(request, endpoints[endpoint_index]) == changed
+    assert engine._score(request, endpoints[endpoint_index]) == reference._score(request, reference_endpoints[endpoint_index])
+    assert engine.query_counts == reference.query_counts
+
+
+def test_whole_score_consumer_order_preserves_float_accumulation(runtime):
+    from dataclasses import replace
+    engine, endpoints, _ = _whole_score_fixture(runtime,
+        ordered_costs={'large':float(2**53), 'one':1., 'other':1.})
+    request = Buffer('ordered', Q, consumers=('large','one','other'), read_bytes=Q)
+    request.validate()
+    assert engine._score(request, endpoints[0]) == (False, float(2**53))
+    reordered = replace(request, consumers=('one','other','large'))
+    assert engine._score(reordered, endpoints[0]) == (False, float(2**53+2))
+    assert engine._score(request, endpoints[0]) == (False, float(2**53))
+    assert engine.query_counts == dict(access_queries=3, access_hits=6)

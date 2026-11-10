@@ -206,7 +206,9 @@ shared bandwidth, latency, contention, interleave and SDMA paths. Its
 Measured calibration and hardware specifications retain distinct provenance;
 unknown model costs remain unknown.
 The graph compiler caches exact access-query costs as primitive values and freezes
-resource-view membership within each compile attempt. Every new compilation
+resource-view membership within each compile attempt. Whole successful scores
+also reuse the original ordered-consumer sum for identical endpoints, extents,
+traffic and cost contexts. Every new compilation
 refreshes these cold caches; admission still uses fresh ledger snapshots.
 
 
