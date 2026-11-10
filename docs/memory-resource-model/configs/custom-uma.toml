@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+
+schema = "memory-model/0.3"
+name = "custom UMA fabric"
+
+# 带宽数值统一为 GiB/s；大小与时间显式标注。
+
+[units]
+bandwidth = "GiB/s"
+
+[require]
+
+[groups]
+cowos_superdie = { per = "uma", count = 3 }
+uma = { count = "runtime" }
+
+[agents]
+compute = { per = "cowos_superdie", bind = "custom-executor" }
+
+[pools]
+memory = { per = "cowos_superdie", capacity = "discover", bind = "custom-pool", service = "bank" }
+
+[resources]
+bank = { per = "cowos_superdie", bandwidth = 200 }
+infinity_fabric = { between = "cowos_superdie", within = "uma", edges = [[0, 1], [1, 0], [1, 2], [2, 1]], bandwidth = [100, 90, 80, 70] }
+
+[paths]
+access = { agent = "compute", pool = "memory", where = "any", within = "uma", use_fabric = true }
+
+[transfers]

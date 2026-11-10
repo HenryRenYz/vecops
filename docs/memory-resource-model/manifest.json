@@ -1,0 +1,235 @@
+{
+  "spdx": {
+    "copyright": "2026 HenryRenYz and vecops contributors",
+    "license": "MIT"
+  },
+  "schema": "memory-model/0.3",
+  "design_version": "0.7",
+  "inputs": {
+    "flat-hbm-summary.json": "bdaa5df421a6ea8bb5095c3d28812b1702ed5156f4282a9af65d3f26ffb73588",
+    "final-fit.json": "446212b544d3923bbe490dc3513a1fab30cf0c83744776c707d48e65e7a8027f",
+    "flat-hbm-fit.json": "a464cba6120b41d839bae07ff22c34dfc0b5fe92628a46643b114b53dffdf759",
+    "flat-overlap-followup-fit.json": "aafc9f0f77a9b7f49f22554edb78ea928445f52f12c7c18d1f99a2286c59cacd",
+    "mpi-flat-hbm-fit.json": "90008b3f72690215751ca9363c88d4bda81e6c20312d4ef971841ca0a657a84d",
+    "gpu8-fit.json": "c629d4652e9355bfb305a139beeeb20bd58a6fa607d0908e9c4ee2faab73e168",
+    "h800-fit.json": "721db7b3ed7c08bfdab8abccd28453e69a500540f6850002df363730c2da5e59"
+  },
+  "source_sha256": {
+    "BuildMemoryDesign.py": "7909d1a6c15ed54879b9cded1b8c4d237cd1b93bda52a29dbc973ac4c98d25f7",
+    "MemoryModelTypes.py": "2e90bbdc6e0c6770c59b66659a8187b2f84c736056e42ce7be0f0573a6a3b538",
+    "MemoryModelSchema.py": "39c31c9e48a60f42b295b5fe2b3b1295f713358e7a6e9cd89cead0f46bbb6d4f",
+    "MemoryModelTemplates.py": "0db792d8bd217eee8c4aaf9d82718a4ab20cd5cc69edbecd728603af63a0fb13",
+    "CheckMemoryTemplates.py": "b7db6269babd0b2d5342c79778a2e96a98a158e91f3ae3c028954f6eb0d31358",
+    "MemoryRuntimeModel.py": "ca14fc36227a41f323e207078ef052d32963410bcd643de210fd6dd4ded92d73",
+    "CheckMemoryRuntimeModel.py": "d3a9a7e950b219e202b0ee273dd8e2647e580a40bc7a4ecbf4d3cbf1f79166c9",
+    "GraphPlanningModel.py": "e050b5bce29615cbcd199d9684ffbeffbdda68e2b32eaf96ae559c8dc2bff4e3",
+    "CheckGraphPlanning.py": "26cd076fc273cd05674823c07bee85031c9c268cd95fd85b56835c4f0676fc3d",
+    "CheckMemoryBindings.py": "3698a77e4e14adcf8b6279dc78f3dfe02af3fc4ff21ca5e042f9bc1c6efe4b3c",
+    "MemoryDesignFigures.py": "9d7b16e591d45b8455d4cf04f578c0319df88d3a7c81fc1276ad2291efcbe37d",
+    "CheckMemoryDesign.mjs": "f67857e13660ae38371c7db56a4ca47c7842e44f62ffdb7a3b5520ecf83b1743",
+    "memory-design.html": "84c34e84bea31c24a1f7c2c86bf4c4ee267ea3532c36aebc06146111a4947452",
+    "api/MemoryModel.h": "442e63137d62e3b9c686bcdb8715bfc490c5cd290622f89f227f0d08fd727c74",
+    "api/Examples.cpp": "0d2405b0b6084b74192f051638e663f226e38abd766a2fa0d39c8804cb797950",
+    "api/GraphPlanning.h": "7e2ac1e4e93981940fb5e78aac52c267ddab3bafd5a9344a1cad5094673b4653",
+    "api/GraphExamples.cpp": "d142db89a1d62a5f34808e1014c7ebfc00c335d2146a85b9e6e5b2e1efe62faa",
+    "examples/offset-audit.txt": "bebaa78aa3025fc7d63b0b32dd3e03e1d998a58ca665b8446a6400e1344ec4f3",
+    "references/local-sources.toml": "a7898628848c90519e5c5e46107a28633e1997e17335b28f1e881b2975636674",
+    "references/audit-review.toml": "31782816e941900d7d5bf73db8372c3ce9dc07dcf26bd0eba3b534caf60f1513",
+    "policies/eager.toml": "1ec0367283ef6c1b06a8b6fefbef88a6dd58d48f26f7a0c416a91e1a9fcdbb3a",
+    "policies/planned.toml": "e1aa04dc3f8fbd6d0265c51ab0f8d7f3156a1867af77320509efbc759ca82de9"
+  },
+  "files": [
+    {
+      "path": "ARTIFACTS.license",
+      "bytes": 710,
+      "sha256": "18bfd8ea4fa6a180658d4f2b19dae9f7079d41a4013884bb2cbb10785f60659d"
+    },
+    {
+      "path": "README.txt",
+      "bytes": 2850,
+      "sha256": "6f41837584c9000defb5725db5697c065aa5ca146e8a8c9f113b19f030e9a9c1"
+    },
+    {
+      "path": "api/Examples.cpp",
+      "bytes": 5351,
+      "sha256": "0d2405b0b6084b74192f051638e663f226e38abd766a2fa0d39c8804cb797950"
+    },
+    {
+      "path": "api/GraphExamples.cpp",
+      "bytes": 2710,
+      "sha256": "d142db89a1d62a5f34808e1014c7ebfc00c335d2146a85b9e6e5b2e1efe62faa"
+    },
+    {
+      "path": "api/GraphPlanning.h",
+      "bytes": 13692,
+      "sha256": "00f32d8a17f6868d5390686852b8a546246299fc5ea3aa91d6fe0881856ffb71"
+    },
+    {
+      "path": "api/MemoryModel.h",
+      "bytes": 28824,
+      "sha256": "a27cd6ea86774e37af483d58e3d7ca878895c6a83bde1bf5b33eb87d49a47d3a"
+    },
+    {
+      "path": "calibration/920f-lx.toml",
+      "bytes": 5813,
+      "sha256": "ccf3a2e69e81f8cc56098adb2df6b2ef2533b98f40e9edf941e9f006cfad95ca"
+    },
+    {
+      "path": "calibration/README.md",
+      "bytes": 1264,
+      "sha256": "4f1cf756463efb8a4f966d9dbce0573c0089e17e54d182bb8fbf89034f1a0a5b"
+    },
+    {
+      "path": "calibration/a800.toml",
+      "bytes": 861,
+      "sha256": "253de5a9dbb37d4659e1cf11cc219f6a314422f2f0721fb9fe0643050efd5037"
+    },
+    {
+      "path": "calibration/h800.toml",
+      "bytes": 865,
+      "sha256": "b06b6ec8c926de142b4b207497ede53b61684cfece6c97aeb7cb0964ba2c0004"
+    },
+    {
+      "path": "configs/920f-lx.toml",
+      "bytes": 3061,
+      "sha256": "589f4033a79ece12255c337aa8c15e56106a444b1d516f40ff03998e564c7272"
+    },
+    {
+      "path": "configs/a800.toml",
+      "bytes": 1356,
+      "sha256": "a01df81edff8a3fea80d9683011c03da9d952adbe4eb0b5a825ec69b8e0ccf1d"
+    },
+    {
+      "path": "configs/custom-uma.toml",
+      "bytes": 842,
+      "sha256": "6d6d346d164424c848b44b4bdcb0902c1c2ce46c784510c4992281f97a7c3886"
+    },
+    {
+      "path": "configs/h800.toml",
+      "bytes": 1454,
+      "sha256": "90c51d8d8c5e04e80cf7f093723b1ef79652212fe9382dd1ff5f2790fe41a0ee"
+    },
+    {
+      "path": "examples/offset-audit.txt",
+      "bytes": 1070,
+      "sha256": "bebaa78aa3025fc7d63b0b32dd3e03e1d998a58ca665b8446a6400e1344ec4f3"
+    },
+    {
+      "path": "figures/address-lifecycle.drawio.svg",
+      "bytes": 36446,
+      "sha256": "55a69e6c82b9a46e5d221342acda39f01b8c27fbe28bf77a32398cc86f93b734"
+    },
+    {
+      "path": "figures/execution-plan.drawio.svg",
+      "bytes": 31026,
+      "sha256": "54aa10e0c15bc4fb4bb937288b4091a787424c3a93ac7093ccbc9b396430671d"
+    },
+    {
+      "path": "figures/gpu-resources.drawio.svg",
+      "bytes": 26220,
+      "sha256": "e46c663fb922423b8cce434b00e02afa496f2e1c496bc2121d29da0554636071"
+    },
+    {
+      "path": "figures/graph-pipeline.drawio.svg",
+      "bytes": 31923,
+      "sha256": "8429e68b0ca935887b49a4411b264453afbbe883f71b59d56aa6f7d8fea3b86f"
+    },
+    {
+      "path": "figures/lx-hierarchy.drawio.svg",
+      "bytes": 58303,
+      "sha256": "3fd7a9f71e46776cb0dc7ff7c900e5e1672a70ace5a318f325f27177dfa90cd6"
+    },
+    {
+      "path": "figures/memory-api.drawio.svg",
+      "bytes": 33630,
+      "sha256": "77ee070adf10fa395e1b51398818fb14b0f58ff88aef0d21110bfca1384dec61"
+    },
+    {
+      "path": "figures/model-overview.drawio.svg",
+      "bytes": 35173,
+      "sha256": "242635e35c6ee6e7975c0ce35c0a08036e3f3da5634c3e067a95ea454125a01d"
+    },
+    {
+      "path": "figures/template-binding.drawio.svg",
+      "bytes": 26378,
+      "sha256": "85a7851e6a360fd94282a67c9dda105df2d0fa212fee821866bade58bc2ab216"
+    },
+    {
+      "path": "index.html",
+      "bytes": 586003,
+      "sha256": "14492c57ed100b9a9ff3d0a7566d8181d56258454591ca57e91eed68ea0caf31"
+    },
+    {
+      "path": "policies/eager.toml",
+      "bytes": 470,
+      "sha256": "1ec0367283ef6c1b06a8b6fefbef88a6dd58d48f26f7a0c416a91e1a9fcdbb3a"
+    },
+    {
+      "path": "policies/planned.toml",
+      "bytes": 385,
+      "sha256": "e1aa04dc3f8fbd6d0265c51ab0f8d7f3156a1867af77320509efbc759ca82de9"
+    },
+    {
+      "path": "references/audit-review.toml",
+      "bytes": 2146,
+      "sha256": "31782816e941900d7d5bf73db8372c3ce9dc07dcf26bd0eba3b534caf60f1513"
+    },
+    {
+      "path": "references/local-sources.toml",
+      "bytes": 2575,
+      "sha256": "a7898628848c90519e5c5e46107a28633e1997e17335b28f1e881b2975636674"
+    }
+  ],
+  "template_counts": {
+    "920f-lx": {
+      "lines": 57,
+      "calibration_lines": 83,
+      "agents": 20,
+      "pools": 32,
+      "resources": 28
+    },
+    "a800": {
+      "lines": 40,
+      "calibration_lines": 39,
+      "agents": 2,
+      "pools": 3,
+      "resources": 8
+    },
+    "h800": {
+      "lines": 42,
+      "calibration_lines": 39,
+      "agents": 8,
+      "pools": 9,
+      "resources": 42
+    }
+  },
+  "aggregation": "median within calibrated symmetric roles; largest sampled CPU core count for reference access rates; optional method curves retained; GiB/s rounded to 0.01",
+  "implementation_contract_updates": {
+    "date": "2026-11-07",
+    "changes": [
+      "Graph compiler implementation may remain Python; memory infrastructure is C++",
+      "EventService.release with independent runtime completion references",
+      "MemoryRuntime.refresh_available sampling boundary",
+      "Shared physical authority headroom is explicit in PoolBudget and respects per-process allocation views",
+      "Explicit launch-local capacity_authority identity for sharing participants; independent accounting is distinguishable",
+      "Actual external page-placement observation ignores caller hints and preserves unknown gaps"
+    ],
+    "files_sha256": {
+      "index.html": "505d476a0e3685d8565e03c7e48e719b2e9179d59875bc249a8c50a4295f7448",
+      "api/MemoryModel.h": "d543f879501426c6cfac3b14c9ccecfea2c6fe470082f09e3190f695133f1953"
+    }
+  },
+  "documentation_alignment": {
+    "date": "2026-11-08",
+    "canonical_api": "include/vecops/memory/Model.h",
+    "planner_implementation": "python/vecops/planner/compiler.py",
+    "historical_inputs_and_source_hashes_preserved": true,
+    "files_sha256": {
+      "README.txt": "6f41837584c9000defb5725db5697c065aa5ca146e8a8c9f113b19f030e9a9c1",
+      "api/MemoryModel.h": "a27cd6ea86774e37af483d58e3d7ca878895c6a83bde1bf5b33eb87d49a47d3a",
+      "api/GraphPlanning.h": "00f32d8a17f6868d5390686852b8a546246299fc5ea3aa91d6fe0881856ffb71",
+      "calibration/README.md": "4f1cf756463efb8a4f966d9dbce0573c0089e17e54d182bb8fbf89034f1a0a5b",
+      "index.html": "14492c57ed100b9a9ff3d0a7566d8181d56258454591ca57e91eed68ea0caf31"
+    }
+  }
+}

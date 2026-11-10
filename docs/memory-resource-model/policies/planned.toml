@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+schema = "memory-runtime/0.1"
+
+[arena]
+domain_rule = "ddr_domain"
+hard_limit_fraction = 0.80
+preallocate_bytes = "0 B" # 最终物化时按计划的物理峰值获取 backing
+grow_by = "1 GiB"
+retain_idle = "2 GiB"
+page_size = "2 MiB"
+backing = "shareable_remappable"
+allow_growth = true

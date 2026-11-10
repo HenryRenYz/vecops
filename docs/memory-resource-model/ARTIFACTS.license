@@ -1,0 +1,26 @@
+SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+SPDX-License-Identifier: MIT
+
+Exact-path attribution, relative to this directory:
+configs/920f-lx.toml
+configs/a800.toml
+configs/custom-uma.toml
+configs/h800.toml
+calibration/920f-lx.toml
+calibration/a800.toml
+calibration/h800.toml
+policies/eager.toml
+policies/planned.toml
+references/audit-review.toml
+references/local-sources.toml
+manifest.json
+figures/address-lifecycle.drawio.svg
+figures/execution-plan.drawio.svg
+figures/gpu-resources.drawio.svg
+figures/graph-pipeline.drawio.svg
+figures/lx-hierarchy.drawio.svg
+figures/memory-api.drawio.svg
+figures/model-overview.drawio.svg
+figures/template-binding.drawio.svg
+
+Full license: ../../LICENSE

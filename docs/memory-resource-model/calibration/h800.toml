@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+
+schema = "memory-calibration/0.4"
+name = "8x H800 NVLink"
+
+# 带宽数值统一为 GiB/s；大小与时间显式标注。
+
+[units]
+bandwidth = "GiB/s"
+
+[models]
+"transfer:p2p" = "p2p"
+"transfer:h2d" = "h2d"
+"transfer:d2h" = "d2h"
+
+[methods]
+read = { profile = "hbm_read", extra_write = "256 KiB" }
+copy = { profile = "hbm_copy" }
+
+[profiles.p2p]
+size = ["64 KiB", "1 MiB", "16 MiB", "128 MiB"]
+bandwidth = [25.6, 119.6, 160.96, 163.74]
+
+[profiles.h2d]
+size = ["64 KiB", "1 MiB", "16 MiB", "128 MiB"]
+bandwidth = [9.37, 23.08, 49.72, 51.38]
+
+[profiles.d2h]
+size = ["64 KiB", "1 MiB", "16 MiB", "128 MiB"]
+bandwidth = [17.39, 43.3, 50.29, 50.67]
+
+[profiles.hbm_read]
+size = ["256 MiB"]
+bandwidth = [629.29]
+
+[profiles.hbm_copy]
+size = ["256 MiB"]
+bandwidth = [1111.84]

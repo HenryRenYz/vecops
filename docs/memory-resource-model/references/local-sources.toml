@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+schema = "design-source-snapshot/1"
+date = "2026-11-07"
+# Exact inspected working-file hashes; revision identifies repository context.
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "include/vecops/execution/BufferPlan.h"
+sha256 = "8731dedccb09e50fdf533cdacf480be9382c84d2ebf2d6a75946604e3f1e0820"
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "include/vecops/execution/WorkspacePlan.h"
+sha256 = "bd494445747be5fbbe2fdb91f75ea0f57894a1d03abad82149d2c096d947cfa1"
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "python/vecops/planner/ir.py"
+sha256 = "92a4cdcb5f1963d3573bfc96c9d909c2ff31dc7d56d54f088ad9ad929a6d1625"
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "python/vecops/planner/core.py"
+sha256 = "917ef718a92d887b37e4a6da303658c919374ad2a57e1e66d2991d4f73646fb7"
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "python/vecops/graph/_donation.py"
+sha256 = "d24b47ace9df419965478b185bb29b238da6a664f26bcf77330f6c4b6d8e5e2c"
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "include/vecops/comm/Communication.h"
+sha256 = "b7c14a2d6f63ec58eb963faef3092070efe697cc5da03e5d919c6ff1fc0df63a"
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "include/vecops/comm/details/ReplicaRouting.h"
+sha256 = "a0e8e42efb3dcf9b54684afc93fc09a108335431a0d32a7f6ac069afd1bab8f9"
+
+[[sources]]
+repository = "vecops-neo"
+revision = "c3f6e4edb5221f9fda495098beaf04155a119260"
+path = "src/comm/Communication.cpp"
+sha256 = "c59b78b07edd09f8735f2a4d6a1fe061d840e32c4aada9ff72b73208b654b33b"
+
+[[sources]]
+repository = "af3-torchneo"
+revision = "f361750e67ad064d20f60adb12324dbd5d3a6545"
+path = "src/alphafold3/torch/prepared_graph.py"
+sha256 = "1eea0912ed296c149dca733ebd8af4169dc39e07530a5e27efe52ce24053c7d7"
+
+[[sources]]
+repository = "af3-torchneo"
+revision = "f361750e67ad064d20f60adb12324dbd5d3a6545"
+path = "src/alphafold3/torch/graph_replay.py"
+sha256 = "e17212e177b903a960f67e4672028b4b3fdc827caaded864d641b533a6c603df"
+
+[[sources]]
+repository = "af3-torchneo"
+revision = "f361750e67ad064d20f60adb12324dbd5d3a6545"
+path = "scripts/run_alphafold.py"
+sha256 = "a74dccb0911d4da31f2bc5fd18526d57899fc4bcf89a6a1b2f4498afcc8725ec"

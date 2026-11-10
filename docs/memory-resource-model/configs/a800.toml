@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+
+schema = "memory-model/0.3"
+name = "2x A800 PCIe"
+
+# 带宽数值统一为 GiB/s；大小与时间显式标注。
+
+[units]
+bandwidth = "GiB/s"
+
+[require]
+gpu_model = "A800"
+gpu_count = 2
+peer_fabric = "pcie"
+
+[groups]
+node = { count = "runtime" }
+
+[agents]
+gpu = { per = "node", count = 2, bind = "gpu" }
+
+[pools]
+hbm = { per = "gpu", capacity = "discover", bind = "device-memory", service = "hbm" }
+host = { per = "node", capacity = "discover", bind = "pinned-host-memory", read_service = "host_read", write_service = "host_write" }
+
+[resources]
+hbm = { per = "gpu", bandwidth = 1074.18 }
+pcie_tx = { per = "gpu", bandwidth = 25.06 }
+pcie_rx = { per = "gpu", bandwidth = 23.37 }
+host_read = { per = "node", bandwidth = 46.73 }
+host_write = { per = "node", bandwidth = 46.23 }
+
+[paths]
+device_access = { agent = "gpu", pool = "hbm", where = "local" }
+
+[transfers]
+p2p = { from = "hbm", to = "hbm", by = "source.gpu", where = "different(gpu)", within = "node", use = ["source.pcie_tx", "target.pcie_rx"], bandwidth = 21.16 }
+h2d = { from = "host", to = "hbm", by = "target.gpu", within = "node", use = ["target.pcie_rx"], bandwidth = 23.37 }
+d2h = { from = "hbm", to = "host", by = "source.gpu", within = "node", use = ["source.pcie_tx"], bandwidth = 25.06 }

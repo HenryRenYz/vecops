@@ -1,0 +1,17 @@
+SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+SPDX-License-Identifier: MIT
+
+Illustrative offset-only all-to-all layout; Q = 2 MiB.
+
+participant region va_offset length owner backing backing_offset pool access generation
+p0          recv           0      2 p0    A                    0 HBM24 read       1
+p0          recv           2      2 p1    B                    0 HBM25 read       1
+p0          send           0      4 p0    A                    0 HBM24 read/write 1
+p1          recv           0      2 p0    A                    2 HBM24 read       1
+p1          recv           2      2 p1    B                    2 HBM25 read       1
+p1          send           0      4 p1    B                    0 HBM25 read/write 1
+
+Offsets/lengths above are in MiB; HBM24/HBM25 are distinct owner memory pools.
+Unique physical backing: 8 MiB. VA across send/recv regions: 16 MiB.
+Sharing contract: exchange. Layout generation: 1. Data epoch is supplied per invocation.
+Canonical layout digest: ad414cb5c6b957222ac2bf79941adf0f5d2caf59e11c531e6c4ad07e1e494053

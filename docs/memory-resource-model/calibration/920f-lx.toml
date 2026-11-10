@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+
+schema = "memory-calibration/0.4"
+name = "LX2 flat + RoCE"
+
+# 带宽数值统一为 GiB/s；大小与时间显式标注。
+
+[units]
+bandwidth = "GiB/s"
+
+[models]
+"resource:hbm" = "hbm_write_cost"
+"resource:ddr" = "ddr_write_cost"
+"access:hbm_local" = "hbm_local"
+"access:hbm_peer" = "hbm_peer"
+"access:hbm_other_die" = "hbm_other_die"
+"access:hbm_other_socket" = "hbm_other_socket"
+"access:ddr_local" = "ddr_local"
+"access:ddr_peer" = "ddr_peer"
+"access:ddr_other_die" = "ddr_other_die"
+"transfer:cpu_copy" = "cpu_pairs"
+"transfer:sdma_0" = "sdma"
+"transfer:sdma_1" = "sdma"
+"transfer:sdma_2" = "sdma"
+"transfer:sdma_3" = "sdma"
+
+[methods]
+cpu_copy = { profile = "cpu_pairs", fallback = "same-pool-only" }
+
+[profiles.ddr_local]
+read = { cpu_cores = [16, 37], bandwidth = [149.29, 148.75] }
+write = { cpu_cores = [16, 37], bandwidth = [141.13, 137.48] }
+copy = { cpu_cores = [16, 37], bandwidth = [66.35, 64.86] }
+triad = { cpu_cores = [16, 37], bandwidth = [45.66, 46.06] }
+
+[profiles.ddr_other_die]
+read = { cpu_cores = [16], bandwidth = [75.9] }
+write = { cpu_cores = [16], bandwidth = [132.37] }
+copy = { cpu_cores = [16], bandwidth = [46.33] }
+triad = { cpu_cores = [16], bandwidth = [28.98] }
+
+[profiles.ddr_peer]
+read = { cpu_cores = [16], bandwidth = [102.76] }
+write = { cpu_cores = [16], bandwidth = [141.2] }
+copy = { cpu_cores = [16], bandwidth = [60.03] }
+triad = { cpu_cores = [16], bandwidth = [39.19] }
+
+[profiles.hbm_local]
+read = { cpu_cores = [12, 16, 37], bandwidth = [162.7, 158.9, 286.68] }
+write = { cpu_cores = [16, 37], bandwidth = [176.55, 303.55] }
+copy = { cpu_cores = [16, 37], bandwidth = [80.05, 136.01] }
+triad = { cpu_cores = [16, 37], bandwidth = [50.71, 89.82] }
+
+[profiles.hbm_other_die]
+read = { cpu_cores = [16], bandwidth = [81.35] }
+write = { cpu_cores = [16], bandwidth = [131.54] }
+copy = { cpu_cores = [16], bandwidth = [59.35] }
+triad = { cpu_cores = [16], bandwidth = [33.63] }
+
+[profiles.hbm_other_socket]
+read = { cpu_cores = [16], bandwidth = [31.65] }
+write = { cpu_cores = [16], bandwidth = [36.25] }
+copy = { cpu_cores = [16], bandwidth = [23.53] }
+triad = { cpu_cores = [16], bandwidth = [13.52] }
+
+[profiles.hbm_peer]
+read = { cpu_cores = [16, 37], bandwidth = [113.59, 179.29] }
+write = { cpu_cores = [16, 37], bandwidth = [169.16, 309.34] }
+copy = { cpu_cores = [16, 37], bandwidth = [83.28, 151.4] }
+triad = { cpu_cores = [16, 37], bandwidth = [53.12, 82.1] }
+
+[profiles.cpu_pairs]
+samples = [{ method = "cpu_copy", executor = "cpu[8]", source = "ddr:local", target = "hbm:local", operation = "copy", cpu_cores = 16, bandwidth = 80.54 }, { method = "cpu_copy", executor = "cpu[8]", source = "hbm:local", target = "ddr:local", operation = "copy", cpu_cores = 16, bandwidth = 79.91 }, { method = "cpu_copy", executor = "cpu[8]", source = "hbm:local", target = "hbm:same(die)&!local", operation = "copy", cpu_cores = 16, bandwidth = 79.14 }, { method = "cpu_copy", executor = "cpu[8]", source = "hbm:same(die)&!local", target = "hbm:local", operation = "copy", cpu_cores = 16, bandwidth = 82.7 }, { method = "cpu_copy", executor = "cpu[8]", source = "hbm:same(die)&!local", target = "hbm:same(die)&!local", operation = "copy", cpu_cores = 16, bandwidth = 70.22 }, { method = "cpu_copy", executor = "cpu[8]", source = "ddr:local", target = "hbm:local", operation = "triad", cpu_cores = 16, bandwidth = 51.31 }, { method = "cpu_copy", executor = "cpu[8]", source = "hbm:local", target = "ddr:local", operation = "triad", cpu_cores = 16, bandwidth = 50.39 }]
+
+[profiles.sdma]
+samples = [{ method = "sdma_0", executor = "cpu[8]", source = "ddr:local", target = "hbm:local", operation = "copy", bandwidth = 14.9 }, { method = "sdma_0", executor = "cpu[8]", source = "hbm:local", target = "ddr:local", operation = "copy", bandwidth = 15.99 }, { method = "sdma_0", executor = "cpu[8]", source = "hbm:local", target = "hbm:local", operation = "copy", bandwidth = 15.55 }, { method = "sdma_0", executor = "cpu[8]", source = "hbm:local", target = "hbm[12]:any", operation = "copy", bandwidth = 15.41 }, { method = "sdma_1", executor = "cpu[8]", source = "ddr:local", target = "hbm:local", operation = "copy", bandwidth = 14.26 }, { method = "sdma_1", executor = "cpu[8]", source = "hbm:local", target = "ddr:local", operation = "copy", bandwidth = 15.04 }, { method = "sdma_1", executor = "cpu[8]", source = "hbm:local", target = "hbm:local", operation = "copy", bandwidth = 15.01 }, { method = "sdma_1", executor = "cpu[8]", source = "hbm:local", target = "hbm[12]:any", operation = "copy", bandwidth = 14.88 }, { method = "sdma_2", executor = "cpu[8]", source = "ddr:local", target = "hbm:local", operation = "copy", bandwidth = 29.02 }, { method = "sdma_2", executor = "cpu[8]", source = "hbm:local", target = "ddr:local", operation = "copy", bandwidth = 32.51 }, { method = "sdma_2", executor = "cpu[8]", source = "hbm:local", target = "hbm:local", operation = "copy", bandwidth = 37.99 }, { method = "sdma_2", executor = "cpu[8]", source = "hbm:local", target = "hbm[12]:any", operation = "copy", bandwidth = 30.45 }, { method = "sdma_3", executor = "cpu[8]", source = "ddr:local", target = "hbm:local", operation = "copy", bandwidth = 21.52 }, { method = "sdma_3", executor = "cpu[8]", source = "hbm:local", target = "ddr:local", operation = "copy", bandwidth = 23.04 }, { method = "sdma_3", executor = "cpu[8]", source = "hbm:local", target = "hbm:local", operation = "copy", bandwidth = 22.86 }, { method = "sdma_3", executor = "cpu[8]", source = "hbm:local", target = "hbm[12]:any", operation = "copy", bandwidth = 28.94 }]
+
+[profiles.hbm_write_cost]
+write_cost = { copy = 1.12, triad = 1.33 }
+
+[profiles.ddr_write_cost]
+write_cost = { copy = 1.32, triad = 1.29 }

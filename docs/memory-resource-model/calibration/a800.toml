@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+
+schema = "memory-calibration/0.4"
+name = "2x A800 PCIe"
+
+# 带宽数值统一为 GiB/s；大小与时间显式标注。
+
+[units]
+bandwidth = "GiB/s"
+
+[models]
+"transfer:p2p" = "p2p"
+"transfer:h2d" = "h2d"
+"transfer:d2h" = "d2h"
+
+[methods]
+read = { profile = "hbm_read", extra_write = "256 KiB" }
+copy = { profile = "hbm_copy" }
+
+[profiles.p2p]
+size = ["64 KiB", "1 MiB", "16 MiB", "128 MiB"]
+bandwidth = [13.95, 20.51, 21.12, 21.16]
+
+[profiles.h2d]
+size = ["64 KiB", "1 MiB", "16 MiB", "128 MiB"]
+bandwidth = [9.34, 18.73, 22.98, 23.37]
+
+[profiles.d2h]
+size = ["64 KiB", "1 MiB", "16 MiB", "128 MiB"]
+bandwidth = [15.57, 24.0, 25.01, 25.06]
+
+[profiles.hbm_read]
+size = ["256 MiB"]
+bandwidth = [448.96]
+
+[profiles.hbm_copy]
+size = ["256 MiB"]
+bandwidth = [536.76]

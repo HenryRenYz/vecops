@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+schema = "design-audit-review/1"
+date = "2026-11-07"
+design_version = "0.7"
+v06_followup_turn = "01a1b559-b900-70d0-8f32-41a1f9d7ae10"
+independent_audit_thread = "01a1b53d-b266-7201-b500-8e750efa57ed"
+af3_analysis_thread = "01a1a49e-e7e2-7400-bd43-fc72e6ca843c"
+
+# Historical pre-migration source hashes bind the inspected audit evidence.
+# Paths may have been removed by the migration; these are not current API references.
+
+[[sources]]
+path = "/home/renyz/project/vecops-neo/include/vecops/execution/BufferMemorySession.h"
+sha256 = "1fadbbe2cc537b9ce02b7f161534dd85558435ac19d491ae9af3e40673964c32"
+revision = "c5308c3080a128a7c881a707074cf9f3b2bfc61d"
+
+[[sources]]
+path = "/home/renyz/project/vecops-neo/python/vecops/graph/_replay_scratch.py"
+sha256 = "c420732cbd4dd68ced4ef55c52983d75c1a368301160aa97c099d17a9699ff00"
+revision = "c5308c3080a128a7c881a707074cf9f3b2bfc61d"
+
+[[sources]]
+path = "/home/renyz/project/vecops-neo/python/vecops/distributed/__init__.py"
+sha256 = "20cb738ee6136d29b786911ddc68cb1d5ca6f83b1b4e63b22f362c0b334daf27"
+revision = "c5308c3080a128a7c881a707074cf9f3b2bfc61d"
+
+[[sources]]
+path = "/home/renyz/project/af3-torchneo/src/alphafold3/torch/metadata_prepare.py"
+sha256 = "4b19dacbe4a4fcfdd831d034a722fcc6730527a4cd7274d6bf974fbad6d49cf7"
+revision = "f361750e67ad064d20f60adb12324dbd5d3a6545"
+
+[[sources]]
+path = "/home/renyz/project/af3-torchneo/src/alphafold3/torch/prepared_graph.py"
+sha256 = "1eea0912ed296c149dca733ebd8af4169dc39e07530a5e27efe52ce24053c7d7"
+revision = "f361750e67ad064d20f60adb12324dbd5d3a6545"
+
+[[sources]]
+path = "/home/renyz/project/af3-torchneo/benchmark-results/t1044-inference-audit-20261107/final-status.json"
+sha256 = "05097e9803bb60c81c10d2c605efba708082b448c583cac48efd8b5147d3e7e6"
+revision = "f361750e67ad064d20f60adb12324dbd5d3a6545"
+
+[[sources]]
+path = "/home/renyz/tmp/memory-resource-audit-20261107/counterexamples.json"
+sha256 = "fc7d5e74e063798ae0130823dbdcb6515999c539e0903ea932281b6ca54e7f55"
+
+[[sources]]
+path = "/home/renyz/tmp/memory-resource-audit-20261107-v06/counterexamples.json"
+sha256 = "9b9b849723572779f531322935cc4d23a638dd00b20d80bfdcd7a8cb6e2e5c9c"

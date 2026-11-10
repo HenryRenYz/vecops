@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+schema = "memory-runtime/0.1"
+
+# 为视图中每个匹配的分配域创建一个 arena；共享预算由运行时协调。
+[arena]
+domain_rule = "ddr_domain"
+hard_limit_fraction = 0.80
+preallocate_fraction = 0.75 # hard limit 的 75%，即域可管理容量的 60%
+grow_by = "1 GiB"
+retain_idle = "2 GiB"
+page_size = "2 MiB"
+backing = "private_memory"
+allow_growth = true

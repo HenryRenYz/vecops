@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+
+schema = "memory-model/0.3"
+name = "LX2 flat + RoCE"
+
+# 带宽数值统一为 GiB/s；大小与时间显式标注。
+
+[units]
+bandwidth = "GiB/s"
+
+[require]
+cpu_model = "LX2"
+cpu_groups = 16
+cores_per_group = 38
+hbm_mode = "flat"
+
+[groups]
+node = { count = "runtime" }
+socket = { per = "node", count = 2 }
+die = { per = "socket", count = 2 }
+
+[agents]
+cpu = { per = "die", count = 4, bind = "cpu-group" }
+dma = { per = "node", count = 4, bind = "sdma-role" }
+
+[pools]
+hbm = { per = "cpu", capacity = "4 GiB", bind = "local-hbm", service = "hbm" }
+ddr = { per = "cpu", capacity = "discover", bind = "local-ddr", service = "ddr" }
+
+[domains]
+ddr_domain = { per = "die", members = "ddr" }
+
+[resources]
+hbm = { per = "cpu", read = 291.11, write = 347.89, sharing = "read_write" }
+ddr = { per = "die", read = 149.92, write = 141.37, sharing = "read_write" }
+die_link = { between = "die", within = "socket", bandwidth = [148.84, 144.42] }
+socket_link = { between = "socket", within = "node", bandwidth = [32.08, 36.26] }
+network_tx = { per = "node", bandwidth = 22.51 }
+network_rx = { per = "node", bandwidth = 22.51 }
+
+[paths]
+hbm_local = { agent = "cpu", pool = "hbm", within = "node", use_fabric = true, where = "local", bandwidth = { read = 286.68, write = 303.55 } }
+hbm_peer = { agent = "cpu", pool = "hbm", within = "node", use_fabric = true, where = "same(die)", bandwidth = { read = 179.29, write = 309.34 } }
+hbm_other_die = { agent = "cpu", pool = "hbm", within = "node", use_fabric = true, where = "same(socket)", bandwidth = { read = 81.35, write = 131.54 } }
+hbm_other_socket = { agent = "cpu", pool = "hbm", within = "node", use_fabric = true, where = "any", bandwidth = { read = 31.65, write = 36.25 } }
+ddr_local = { agent = "cpu", pool = "ddr", within = "node", use_fabric = true, where = "local", bandwidth = { read = 148.75, write = 137.48 } }
+ddr_peer = { agent = "cpu", pool = "ddr", within = "node", use_fabric = true, where = "same(die)", bandwidth = { read = 102.76, write = 141.2 } }
+ddr_other_die = { agent = "cpu", pool = "ddr", within = "node", use_fabric = true, where = "same(socket)", bandwidth = { read = 75.9, write = 132.37 } }
+
+[transfers]
+cpu_copy = { from = ["hbm", "ddr"], to = ["hbm", "ddr"], by = "request.agent", within = "node" }
+sdma_0 = { from = ["hbm", "ddr"], to = ["hbm", "ddr"], by = "dma[0]", controller = "cpu[8]", registration_bits = 32, within = "node" }
+sdma_1 = { from = ["hbm", "ddr"], to = ["hbm", "ddr"], by = "dma[1]", controller = "cpu[8]", registration_bits = 32, within = "node" }
+sdma_2 = { from = ["hbm", "ddr"], to = ["hbm", "ddr"], by = "dma[2]", controller = "cpu[8]", registration_bits = 32, within = "node" }
+sdma_3 = { from = ["hbm", "ddr"], to = ["hbm", "ddr"], by = "dma[3]", controller = "cpu[8]", registration_bits = 32, within = "node" }
+network = { from = ["hbm", "ddr"], to = ["hbm", "ddr"], by = "request.agent", where = "different(node)", use = ["source.network_tx", "target.network_rx"] }
