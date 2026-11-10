@@ -3,7 +3,9 @@
 
 find_package(Threads REQUIRED)
 add_executable(vecops-memory-bench
-    MemoryBench.cpp Support.cpp Runner.cpp
+    MemoryBench.cpp Support.cpp Runner.cpp Compute.cpp
+    ${VECOPS_SOURCE_DIR}/src/CacheInfo.cpp ${VECOPS_SOURCE_DIR}/src/Assertion.cpp
+    ${VECOPS_SOURCE_DIR}/src/MatmulRuntimeDispatch.cpp
     ScalarKernels.cpp VectorKernels.cpp LatencyKernels.cpp Sdma.cpp)
 set(VECOPS_MEMORY_SDMA "AUTO" CACHE STRING "SDMA SDK backend: AUTO, ON, OFF")
 set_property(CACHE VECOPS_MEMORY_SDMA PROPERTY STRINGS AUTO ON OFF)
@@ -48,7 +50,7 @@ else()
 endif()
 set(_MEMORY_BENCH_SOURCE_HASHES "")
 foreach(_SOURCE MemoryBench.cpp Bench.h Support.cpp Runner.cpp Kernels.h
-                ScalarKernels.cpp VectorKernels.cpp LatencyKernels.cpp Sdma.cpp CMakeLists.txt)
+                ScalarKernels.cpp VectorKernels.cpp LatencyKernels.cpp Sdma.cpp Compute.cpp CMakeLists.txt)
     file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${_SOURCE}" _SOURCE_HASH)
     string(APPEND _MEMORY_BENCH_SOURCE_HASHES "${_SOURCE}:${_SOURCE_HASH};")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_SOURCE}")
@@ -59,4 +61,13 @@ string(JOIN " " _MEMORY_BENCH_FLAGS ${_MEMORY_BENCH_FLAGS})
 target_compile_definitions(vecops-memory-bench PRIVATE
     VECOPS_MEMORY_BENCH_SOURCE_SHA="${_MEMORY_BENCH_SOURCE_SHA}"
     VECOPS_MEMORY_BENCH_FLAGS="${_MEMORY_BENCH_FLAGS}")
+# Real operators retain ordinary compiler optimization; only primitive kernels
+# intentionally disable automatic vectorization and unrolling.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(Compute.cpp PROPERTIES COMPILE_OPTIONS
+        "-ftree-vectorize;-ftree-slp-vectorize;-funroll-loops;-ftree-loop-distribute-patterns")
+else()
+    set_source_files_properties(Compute.cpp PROPERTIES COMPILE_OPTIONS
+        "-fvectorize;-fslp-vectorize;-funroll-loops")
+endif()
 install(TARGETS vecops-memory-bench RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

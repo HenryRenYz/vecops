@@ -84,7 +84,7 @@ using Fields = std::vector<std::pair<std::string, std::string>>;
 Fields fields(const Row& r, const Options& o, const Topology& t) {
   Fields f;
   const auto add = [&](const char* key, const auto& value) { f.emplace_back(key, number(value)); };
-  f.emplace_back("schema_version", o.engine == "sdma" ? "3" : "2");
+  f.emplace_back("schema_version", o.command == "compute" ? "4" : o.engine == "sdma" ? "3" : "2");
   f.emplace_back("engine", o.engine);
   f.emplace_back("cpu_clock", o.engine == "sdma" ? "CLOCK_THREAD_CPUTIME_ID" : "unavailable");
   f.emplace_back("host", t.hostname); f.emplace_back("cpu_model", t.model);
@@ -122,6 +122,17 @@ Fields fields(const Row& r, const Options& o, const Topology& t) {
   add("sdma_batch", r.dma_batch); add("sdma_chunk_bytes", r.dma_chunk);
   add("completed_descriptors", r.dma_descriptors); add("submissions", r.dma_submissions);
   add("drain_ns", r.drain_ns); add("cpu_seconds", r.cpu_seconds); add("setup_seconds", r.setup_seconds);
+  f.emplace_back("shape", r.shape); f.emplace_back("dtype", r.dtype);
+  f.emplace_back("compute_backend", r.compute_backend); f.emplace_back("verification", r.verification);
+  f.emplace_back("partition", o.command == "compute" ? "global-contiguous-output-rows" : "");
+  add("row_begin", r.row_begin); add("row_end", r.row_end); add("iterations", r.iterations);
+  add("tensor_input_bytes", r.tensor_input_bytes); add("tensor_output_bytes", r.tensor_output_bytes);
+  add("workspace_bytes", r.workspace_bytes); f.emplace_back("workspace_nodes", r.workspace_nodes);
+  f.emplace_back("workspace_page_counts", r.workspace_pages);
+  add("warmup_actual_seconds", r.warmup_actual_seconds); add("calibration_seconds", r.calibration_seconds);
+  add("operation_seconds", r.operation_seconds); add("GFLOP_s", r.gflops);
+  add("GElements_s", r.gelements); add("logical_io_GB_s", r.logical_gbs);
+  add("ln_affine", o.ln_affine ? 1 : 0); add("ln_eps", o.ln_eps);
   f.emplace_back("detail", r.detail);
   add("config", r.config); add("sample", r.sample); add("attempt", r.attempt);
   add("group", r.group); add("source_node", r.src); add("destination_node", r.dst); add("execution_node", r.exec);
@@ -194,7 +205,7 @@ Operation operation(const std::string& text) {
 }
 Options parse_options(int argc, char** argv) {
   Options o;
-  bool explicit_op = false, cpu_policy = false, sdma_option = false;
+  bool explicit_op = false, cpu_policy = false, sdma_option = false, explicit_size = false, compute_option = false;
   int i = 1;
   if (i < argc && argv[i][0] != '-') o.command = argv[i++];
   for (; i < argc; ++i) {
@@ -208,6 +219,17 @@ Options parse_options(int argc, char** argv) {
     const std::string value = argv[++i];
     if (key == "--kernel" || key == "--access" || key == "--load-policy" || key == "--store-policy" || key == "--fma") cpu_policy = true;
     if (key == "--op") { o.operations = split(value, ','); explicit_op = true; }
+    else if (key == "--shape") {
+      o.shape.clear(); for (const auto& x : split(value, ',')) { auto n = integer(x); if (!n || n > 1000000000) throw std::runtime_error("Shape dimensions must be in [1,1000000000]"); o.shape.push_back(n); }
+      compute_option = true;
+    }
+    else if (key == "--input-nodes" || key == "--output-nodes") {
+      auto& nodes = key == "--input-nodes" ? o.input_nodes : o.output_nodes;
+      nodes.clear(); for (const auto& x : split(value, ',')) nodes.push_back(index(x)); compute_option = true;
+    }
+    else if (key == "--workspace-node") { o.workspace_node = index(value); compute_option = true; }
+    else if (key == "--ln-affine") { choice(value, {"on", "off"}, "--ln-affine"); o.ln_affine = value == "on"; compute_option = true; }
+    else if (key == "--ln-eps") { o.ln_eps = real(value); if (o.ln_eps <= 0) throw std::runtime_error("LN epsilon must be positive"); compute_option = true; }
     else if (key == "--engine") o.engine = value;
     else if (key == "--sdma-device") { o.sdma_device = value; sdma_option = true; }
     else if (key == "--sdma-mode") { o.sdma_mode = value; sdma_option = true; }
@@ -242,10 +264,10 @@ Options parse_options(int argc, char** argv) {
     else if (key == "--peer-cpu") o.peer_cpu = index(value);
     else if (key == "--pattern") choice(value, {"chase"}, "--pattern");
     else if (key == "--fma") { choice(value, {"on", "off"}, "--fma"); o.fma = value == "on"; }
-    else if (key == "--size") { o.sizes.clear(); for (const auto& item : split(value, ',')) o.sizes.push_back(size_value(item)); }
+    else if (key == "--size") { explicit_size = true; o.sizes.clear(); for (const auto& item : split(value, ',')) o.sizes.push_back(size_value(item)); }
     else throw std::runtime_error("Unknown option: " + key);
   }
-  choice(o.command, {"bandwidth", "latency", "pingpong", "topology"}, "command");
+  choice(o.command, {"bandwidth", "latency", "pingpong", "topology", "compute"}, "command");
   choice(o.engine, {"cpu", "sdma"}, "--engine");
   choice(o.sdma_mode, {"shared", "exclusive"}, "--sdma-mode");
   if (o.engine == "cpu" && sdma_option) throw std::runtime_error("SDMA options require --engine sdma");
@@ -266,11 +288,19 @@ Options parse_options(int argc, char** argv) {
   choice(o.pages, {"base", "auto", "huge"}, "--pages");
   if (o.interleave && o.pages == "auto")
     throw std::runtime_error("--interleave requires --pages base or huge; THP has no fixed interleave unit");
-  if (o.interleave && o.command != "bandwidth" && o.command != "latency")
-    throw std::runtime_error("--interleave supports bandwidth and latency only");
+  if (o.interleave && o.command != "bandwidth" && o.command != "latency" && o.command != "compute")
+    throw std::runtime_error("--interleave supports bandwidth, latency and compute only");
   choice(o.load_policy, {"auto", "temporal", "nt"}, "--load-policy");
   choice(o.store_policy, {"auto", "temporal", "nt"}, "--store-policy");
-  for (auto& item : o.operations) operation(item);
+  if (o.command == "compute") {
+    if (!explicit_op || o.operations.size() != 1) throw std::runtime_error("compute requires exactly one --op gemm|ln");
+    choice(o.operations.front(), {"gemm", "ln"}, "--op");
+    if (o.shape.size() != (o.operations.front() == "gemm" ? 3UL : 2UL)) throw std::runtime_error("Use --shape M,N,K for GEMM or B,D for LN");
+    if (cpu_policy || explicit_size || o.loaded || o.size_scope != "thread-array") throw std::runtime_error("compute uses --shape and native operator policies; bandwidth size/kernel/access/FMA options do not apply");
+  } else {
+    if (compute_option) throw std::runtime_error("Compute shape/placement/LN options require compute");
+    for (auto& item : o.operations) operation(item);
+  }
   for (auto& item : o.kernels) choice(item, {"scalar16", "scalar32", "scalar64", "vec1", "vec2", "vec4"}, "--kernel");
   for (auto& item : o.accesses) choice(item, {"temporal", "stream"}, "--access");
   if (o.seconds < 0.01 || o.seconds > 3600 || o.warmup < 0 || o.warmup > 3600 ||
@@ -290,7 +320,7 @@ Options parse_options(int argc, char** argv) {
 void print_help() {
   std::cout << R"(vecops-memory-bench - NUMA-aware FP32 bandwidth and dependent-access latency
 
-Usage: vecops-memory-bench [bandwidth|latency|pingpong|topology] [options]
+Usage: vecops-memory-bench [bandwidth|latency|pingpong|topology|compute] [options]
 
   --engine ENGINE        cpu (default), sdma (copy only; requires sdma-dk SDK)
   --sdma-device IDS      Explicit device per group, separated by '|'; one ID broadcasts
@@ -327,6 +357,19 @@ Usage: vecops-memory-bench [bandwidth|latency|pingpong|topology] [options]
   --csv PATH            Raw sample CSV, including rejected attempts
   --json PATH           Raw sample JSON Lines, including rejected attempts
   --dry-run             Print mappings and configurations without allocating
+
+Compute (one global operation; persistent workers own disjoint output rows):
+  compute --op gemm --shape M,N,K   BF16 A[M,K] * B[N,K]^T -> BF16 C[M,N]
+  compute --op ln --shape B,D       FP32 last-axis LayerNorm of X[B,D]
+  --input-nodes LIST      Compute input pool (default: source route node)
+  --output-nodes LIST     Compute output pool (default: destination route node)
+  --workspace-node NODE   Worker scratch bind node (default: execution NUMA)
+  --ln-affine on|off      Shared FP32 gamma/beta (default: on)
+  --ln-eps VALUE          LayerNorm epsilon (default: 1e-5)
+  Multiple-node pools require --interleave; compute requires exactly one group.
+  --shape replaces --size. Packing is inside GEMM timing; allocation/planning is not.
+  Outputs: operation_seconds, GFLOP_s (GEMM), GElements_s (LN), logical_io_GB_s.
+  Logical IO counts each tensor once, NOT executed cache/controller traffic.
 
 Latency:
   --pattern chase       Random single-cycle dependent native-pointer loads
@@ -600,14 +643,16 @@ void Reporter::summary(const std::vector<Row>& rows, const std::string& label) {
     if (!rows.empty()) std::cout << ": " << rows.back().status << " " << rows.back().detail;
     std::cout << '\n'; failed_ = true; return;
   }
-  const bool latency = rows.front().kind != "bandwidth";
+  const bool compute = rows.front().kind == "compute";
+  const bool gemm = compute && rows.front().operation == "gemm";
+  const bool latency = !compute && rows.front().kind != "bandwidth";
   std::cout << "  " << std::left << std::setw(17) << "Scope" << std::right << std::setw(8) << "Valid"
-            << std::setw(13) << (latency ? "Median ns" : "Median GB/s") << std::setw(12) << "Min"
+            << std::setw(13) << (compute ? (gemm ? "Median GF/s" : "Median GE/s") : latency ? "Median ns" : "Median GB/s") << std::setw(12) << "Min"
             << std::setw(12) << "Max" << std::setw(12) << "Spread %" << '\n'
             << "  " << std::string(74, '-') << '\n';
   for (const auto& [scope, samples] : buckets) {
     std::vector<double> values;
-    for (auto* r : samples) values.push_back(latency ? r->ns : r->gbs);
+    for (auto* r : samples) values.push_back(compute ? (gemm ? r->gflops : r->gelements) : latency ? r->ns : r->gbs);
     std::sort(values.begin(), values.end());
     const auto n = values.size(); const double median = (values[(n - 1) / 2] + values[n / 2]) / 2;
     const double spread = median ? 100 * (values.back() - values.front()) / median : 0;

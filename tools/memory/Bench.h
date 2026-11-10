@@ -32,6 +32,12 @@ struct Options {
   std::vector<std::string> accesses{"temporal"};
   std::string numa = "0", exec = "auto", cpu = "0", cpu_kind = "logical";
   std::string group_cpus;
+  // Compute shapes describe one global operation, partitioned by output rows.
+  std::vector<std::size_t> shape;
+  std::vector<int> input_nodes, output_nodes;
+  int workspace_node = -1;
+  bool ln_affine = true;
+  double ln_eps = 1e-5;
   std::string size_scope = "thread-array", pages = "base";
   std::string load_policy = "auto", store_policy = "auto";
   std::string csv, json;
@@ -65,6 +71,11 @@ struct Row {
   std::uint64_t common_ns = 0, minor_faults = 0, major_faults = 0, switches = 0;
   double seconds = 0, read_gbs = 0, write_gbs = 0, gbs = 0, payload_gbs = 0, ns = 0;
   bool fma = true;
+  std::string shape, dtype, compute_backend, verification, workspace_nodes, workspace_pages;
+  std::size_t row_begin = 0, row_end = 0, workspace_bytes = 0;
+  std::uint64_t iterations = 0, tensor_input_bytes = 0, tensor_output_bytes = 0;
+  double warmup_actual_seconds = 0, calibration_seconds = 0;
+  double operation_seconds = 0, gflops = 0, gelements = 0, logical_gbs = 0;
   std::string sdma_devices, sdma_channel_ids, sdma_library;
   std::size_t dma_channels = 0, dma_depth = 0, dma_batch = 0, dma_chunk = 0;
   std::uint64_t dma_descriptors = 0, dma_submissions = 0, drain_ns = 0;
@@ -113,6 +124,7 @@ std::uint64_t now_ns();
 std::size_t checked_mul(std::size_t, std::size_t);
 std::string human_size(std::size_t);
 Operation operation(const std::string&);
+void run_compute(const Options&, const Topology&, Reporter&);
 void run_bandwidth(const Options&, const Topology&, Reporter&);
 void run_latency(const Options&, const Topology&, Reporter&);
 void run_pingpong(const Options&, const Topology&, Reporter&);

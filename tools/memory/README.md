@@ -522,3 +522,93 @@ The socket report builder includes the final supplement at
 separate from 920f-lx measurements. Retained runtime conditions and hashes are
 part of the report; physical engine counts and NUMA/device ownership are never
 inferred from device IDs or bandwidth.
+
+## Global tensor operator workloads
+
+`compute` executes the public vecops operators on **one global problem**:
+
+```sh
+vecops-memory-bench compute --op gemm --shape 4864,2048,2048 \
+  --numa 28 --exec-node 12 --cpu 0-37 --cpu-kind physical \
+  --input-nodes 28,29 --output-nodes 28,29 --interleave --pages base \
+  --workspace-node 28 --seconds .1 --warmup .2 --samples 7 --retries 20 \
+  --csv gemm.csv
+vecops-memory-bench compute --op ln --shape 38912,4096 \
+  --numa 28 --exec-node 12 --cpu 0-37 --cpu-kind physical \
+  --input-nodes 28,29,30,31 --output-nodes 28,29,30,31 --interleave \
+  --workspace-node 28 --ln-affine on --ln-eps 1e-5 --csv ln.csv
+```
+
+Shapes replace `--size`: GEMM is BF16 `C[M,N] = A[M,K] * B[N,K]^T`, with
+FP32 accumulation and BF16 output; LayerNorm is FP32 `X[B,D] -> Y[B,D]`,
+normalizing each last-axis row. LN uses optional shared FP32 gamma/beta,
+enabled by default. GEMM requires a native AMX-BF16 or SME build; unsupported
+builds reject GEMM instead of silently substituting another implementation.
+`--kernel`, `--access`, `--fma`, loaded latency, and size scopes do not apply.
+Operators retain their native access policies and ordinary compiler
+vectorization/unrolling; primitive scalar/vector kernel restrictions remain.
+
+Compute accepts one execution group. Explicit input/output node lists form
+independent sorted unique pools; multiple nodes require `--interleave`.
+Without a list, the corresponding source/destination route node is used.
+Every **global** array, including LN parameters, starts its own phase-zero
+cycle. Inputs and output can be placed differently without changing code.
+Workspace is private per worker, explicitly bound to `--workspace-node`
+(default: the execution NUMA). It is initialized and every page is verified;
+the admission ledger includes tensors and all private scratch. Keep scratch
+placement identical across comparisons. No global page pools are changed.
+
+Persistent pinned threads own contiguous disjoint output-row intervals
+`[M*t/T, M*(t+1)/T)` or `[B*t/T, B*(t+1)/T)`. Unequal intervals are supported;
+every worker must have at least one row. GEMM shares the read-only B operand
+and partitions A/C rows. Each worker invokes the public single-worker Matmul
+on its row slice, with separately planned scratch; this is explicit M-row
+parallelism, **not the library's global multi-worker tile scheduler**. Operand
+reuse and repeated online B packing therefore depend on the shard shape.
+LN partitions batch rows and shares read-only gamma/beta. No thread computes
+another thread's output, and there is no nested worker pool.
+
+Allocation, initialization, planning, initial reference check and warmup are
+outside retained timing. GEMM uses a prepared operator with fixed bindings;
+its normal online packing, compute, output conversion and hardware transitions
+remain inside every timed invocation. LN uses the caller-workspace form.
+Warmup accumulates actual worker-envelope time until the requested duration
+is reached, recalibrating after cold-start effects; `warmup_actual_seconds`
+and `calibration_seconds` are exported. One calibrated **common repeat count** is used by all workers, without a
+barrier between repeats; the reported whole-operation time is the amortized
+shared-start/last-finish envelope divided by that repeat count. This is steady
+throughput for repeated identical inputs, not cold single-call latency.
+`--seconds` is a calibration target, not an interruptible operator deadline.
+Start skew, faults, switches and migrations reject a whole attempt. End spread
+is reported as actual work imbalance and is included in the global envelope;
+it is not rejected using the primitive bandwidth end-skew rule. Rejected
+attempts are retained. Workspace and arithmetic checks run again before any
+successful sample is published.
+
+Compute schema 4 adds shape/dtype/backend, output row bounds, iterations,
+setup time, workspace bytes/pages, tensor sizes, `operation_seconds`,
+`GFLOP_s` (GEMM), `GElements_s` (LN), and `logical_io_GB_s`. The latter counts
+each global tensor once per operation, including shared operands once;
+it excludes packing scratch, LN's second input sweep, cache traffic and
+write allocation, and **is not measured HBM bandwidth**. The old primitive
+read/write bandwidth fields are unused for compute. Global tensor/page
+inventories occur only on total rows; never sum them across thread rows.
+
+Bounded, exactly representable, nonconstant hash-generated inputs are checked
+for mutation. LN validates every output against independent FP64 mean/variance
+and affine calculations (`abs <= 5e-4 + 2e-4*abs(reference)`). Small GEMMs
+(up to 8 million reference multiply-adds) validate every output; large GEMMs
+validate 1024 deterministic cells plus every worker's boundary-row corners
+against FP64 dot products rounded to BF16, and check every output is finite.
+The CSV distinguishes full and sampled checks. Large GEMM validation is not
+an exhaustive numerical proof. `ComputeTest.py` covers tails, unequal shards,
+full/sampled references, LN affine on/off, constant rows, page policy and
+exported timing/accounting. `SmokeTest.py` and `CheckAssembly.py` retain the
+primitive regression and instruction checks.
+
+The compute translation unit needs the full operators' C++20 standard library
+surface, including `std::bit_cast`. BiSheng can otherwise select an older
+system GCC 10 library. On the tested 920f-4 installation the build explicitly
+uses `-DCMAKE_CXX_FLAGS="--gcc-toolchain=$HOME/HPCKit/26.1.RC1/compiler/gcc"`
+(GCC 12) and `-DCMAKE_BUILD_RPATH="$HOME/HPCKit/26.1.RC1/compiler/gcc/lib64"`.
+This changes only that build, not shell configuration or shared libraries.

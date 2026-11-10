@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
       std::cout << "  Allowed CPUs: " << join_cpus(topology.allowed_cpus) << '\n';
       if (options.engine == "sdma") print_sdma_topology(topology);
     } else if (options.engine == "sdma") run_sdma(options, topology, reporter);
+    else if (options.command == "compute") run_compute(options, topology, reporter);
     else if (options.command == "bandwidth") run_bandwidth(options, topology, reporter);
     else if (options.command == "latency") run_latency(options, topology, reporter);
     else run_pingpong(options, topology, reporter);
