@@ -29,27 +29,46 @@ def nonoverlapping_layout(shape, strides):
   return True
 
 
-@lru_cache(None)
 def kernel(operation, a_shape, a_strides, a_dtype, b_shape, b_strides, b_dtype,
            output_shape, output_strides, output_dtype, parallelism, vector_token):
+  # Graph guards still check exact tensor metadata. Artifacts need only rank,
+  # dtype, broadcasting and layout contracts; runtime sizes/outer strides do
+  # not change the mathematical operation or its rounding boundaries.
+  def contract(shape, strides, dtype):
+    return (tuple(1 if dtype == 'bool' and axis == len(shape)-1 else None
+                  for axis in range(len(shape))),
+            tuple(stride if axis == len(strides)-1 else None
+                  for axis, stride in enumerate(strides)))
+  factory = _factory(operation, *contract(a_shape, a_strides, a_dtype), a_dtype,
+                 *contract(b_shape, b_strides, b_dtype), b_dtype,
+                 *contract(output_shape, output_strides, output_dtype), output_dtype,
+                 contiguous_layout(output_shape, output_strides), parallelism, vector_token)
+  compiled = factory()
+  compiled.explicit_torch_function()
+  return compiled
+
+
+@lru_cache(None)
+def _factory(operation, a_shape, a_strides, a_dtype, b_shape, b_strides, b_dtype,
+            output_shape, output_strides, output_dtype, output_contiguous, parallelism, vector_token):
   import vecops.language as T
 
   @T.jit(out_idx=[2])
   def factory():
     Operation = T.Const(operation)
-    OutputContiguous = T.Const(int(contiguous_layout(output_shape, output_strides)))
+    OutputContiguous = T.Const(int(output_contiguous))
+    def dimensions(values):
+      return tuple(T.dynamic(lower=0) if x is None else x for x in values)
 
-    @T.template(source='_Pointwise.cpp', recipe_id='graph-pointwise-v4')
-    def entry(a: T.Tensor(a_shape, a_strides, a_dtype),
-              b: T.Tensor(b_shape, b_strides, b_dtype),
-              output: T.Tensor(output_shape, output_strides, output_dtype),
+    @T.template(source='_Pointwise.cpp', recipe_id='graph-pointwise-v5-runtime-extents')
+    def entry(a: T.Tensor(dimensions(a_shape), dimensions(a_strides), a_dtype),
+              b: T.Tensor(dimensions(b_shape), dimensions(b_strides), b_dtype),
+              output: T.Tensor(dimensions(output_shape), dimensions(output_strides), output_dtype),
               alpha: T.float64):
       Operation, OutputContiguous
     return entry
 
-  compiled = factory()
-  compiled.explicit_torch_function()  # Declare the bridge; batch it with peers.
-  return compiled
+  return factory
 
 
 def select(schema, arguments, result, metadata):

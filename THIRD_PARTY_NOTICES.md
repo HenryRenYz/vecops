@@ -258,3 +258,17 @@ Before distributing an SDK, sdist, wheel, or linked benchmark executable,
 check the actual artifact contains the applicable license texts and notices.
 Adding these source-tree materials alone does not change installation or
 packaging rules, or prove that artifact-level requirements have been met.
+
+## toml++ (memory plan TOML codec)
+
+- Local material: `third_party/tomlplusplus/toml.hpp`, the unmodified upstream
+  amalgamated header from toml++ v3.4.0, full upstream commit
+  `30172438cee64926dc41fdd9c11fb3ba5b2ba9de`.
+- Source: [marzer/tomlplusplus, toml.hpp](https://github.com/marzer/tomlplusplus/blob/30172438cee64926dc41fdd9c11fb3ba5b2ba9de/toml.hpp).
+- License: MIT. The original header notices are retained. The complete,
+  unmodified upstream `LICENSE` is retained in
+  [LICENSES/tomlplusplus-MIT.txt](LICENSES/tomlplusplus-MIT.txt), including
+  `Copyright (c) Mark Gillard <mark.gillard@outlook.com.au>`.
+- Local changes to the imported header and license: none. The project-owned
+  adapter is `src/memory/Serialization.cpp`; it uses the upstream parser and
+  formatter and enforces the vecops recipe/layout schema separately.

@@ -163,13 +163,27 @@ inline void bind(KernelInstance&, tensor::nullopt_t, const VecopsValue&) {
 
 class PreparedBase {
 public:
-  explicit PreparedBase(const VecopsCall& call)
+  explicit PreparedBase(const VecopsCall& call, KernelPlan plan)
     : guard(call)
+    , plan_(std::move(plan))
     , vector_lengths_(current_thread_vector_lengths()) {
     if (call.context)
       std::memcpy(&context_, call.context, std::min<std::size_t>(sizeof(context_), call.context->struct_size));
     context_.struct_size = sizeof(context_);
     context_.thread_pool = CallGuard::pool(call);
+    const auto& logical = plan_.buffer_plan();
+    times_.reserve(logical.allocations.size());
+    requirements_.reserve(logical.allocations.size());
+    for (std::size_t i = 0; i < logical.allocations.size(); ++i) {
+      const auto& a = logical.allocations[i];
+      auto& times = times_.emplace_back();
+      for (const auto& t : a.lifetimes) times.push_back({t.begin,t.end});
+      const auto c = buffer_plan_details::candidate(logical,i);
+      requirements_.push_back({a.canonical_path.c_str(), static_cast<uint64_t>(a.request.bytes),
+        static_cast<uint64_t>(c.alignment), static_cast<uint64_t>(a.request.replicas),
+        static_cast<uint64_t>(c.stride), static_cast<uint32_t>(a.request.domain),
+        plan_.buffer_reusable(i) ? 0u : 1u, a.request.estimated_traffic_bytes,times.data(),times.size()});
+    }
     if (const auto* provider = CallGuard::provider(call)) {
       if (provider->struct_size < offsetof(VecopsWorkspaceArenaProvider, place_buffers))
         throw std::invalid_argument("workspace provider ABI is truncated");
@@ -181,15 +195,19 @@ public:
   virtual void bind_call(const VecopsCall&, bool validate = true) = 0;
   virtual KernelInstance& instance() = 0;
   virtual const std::vector<VecopsKernelInplaceV1>& inplace_contracts() const = 0;
+  virtual void activate(const VecopsKernelBufferBindingV1*, size_t, const VecopsBufferOwnerV1*) = 0;
+  virtual void suspend() = 0;
+  const KernelPlan& plan() const { return plan_; }
+  const VecopsExecutionContext& context() const { return context_; }
   CallGuard guard;
   VecopsPreparedKernelV1 abi() {
     return {
       sizeof(VecopsPreparedKernelV1),
       1,
       this,
-      static_cast<uint32_t>(instance().plan().workers()),
-      static_cast<uint32_t>(instance().plan().grid_count()),
-      instance().thread_pool(),
+      static_cast<uint32_t>(plan_.workers()),
+      static_cast<uint32_t>(plan_.grid_count()),
+      context_.thread_pool,
       [](void* p, const VecopsCall* call, VecopsError* e) {
         return guarded(e, [&] {
           if (!call)
@@ -221,10 +239,21 @@ public:
       nullptr,
       &context_,
       static_cast<uint32_t>(inplace_contracts().size()),
-      inplace_contracts().data()};
+      inplace_contracts().data(),
+      static_cast<uint32_t>(requirements_.size()), requirements_.data(),
+      [](void* p, const VecopsKernelBufferBindingV1* buffers, size_t count,
+         const VecopsBufferOwnerV1* owner, VecopsError* e) {
+        return guarded(e,[&] { static_cast<PreparedBase*>(p)->activate(buffers,count,owner); });
+      },
+      [](void* p, VecopsError* e) {
+        return guarded(e,[&] { static_cast<PreparedBase*>(p)->suspend(); });
+      }};
   }
 
 private:
+  KernelPlan plan_;
+  std::vector<std::vector<VecopsBufferLifetimeV1>> times_;
+  std::vector<VecopsKernelBufferRequirementV1> requirements_;
   VecopsExecutionContext context_{};
   VecopsWorkspaceArenaProvider provider_{};
   ArmVectorLengths vector_lengths_;
@@ -234,14 +263,11 @@ template <typename Arguments>
 class Prepared final : public PreparedBase {
 public:
   Prepared(const VecopsCall& call, KernelPlan plan, Arguments arguments)
-    : PreparedBase(call)
-    , arguments_(std::move(arguments))
-    , instance_(std::move(plan), CallGuard::pool(call),
-                CallGuard::provider(call) ? workspace_arena_provider_from_abi(*CallGuard::provider(call))
-                                          : default_workspace_arena_provider()) {
+    : PreparedBase(call, std::move(plan))
+    , arguments_(std::move(arguments)) {
     // Symbolic slots omit nullopt arguments. Export call-value indices,
     // never the private frame-slot indices used inside KernelBuilder.
-    for (const auto& contract : instance_.plan().inplace_contracts()) {
+    for (const auto& contract : this->plan().inplace_contracts()) {
       VecopsKernelInplaceV1 mapped{UINT32_MAX, UINT32_MAX};
       [&]<std::size_t... I>(std::index_sequence<I...>) {
         auto map = [&](const auto& arg, std::size_t index) {
@@ -256,23 +282,53 @@ public:
         throw std::logic_error("inplace contract does not refer to call arguments");
       inplace_.push_back(mapped);
     }
-    bind_call(call);
+    const bool deferred = call.context && call.context->struct_size >=
+      offsetof(VecopsExecutionContext,defer_buffer_binding)+sizeof(call.context->defer_buffer_binding) &&
+      call.context->defer_buffer_binding;
+    if (!deferred) {
+      instance_ = std::make_unique<KernelInstance>(this->plan(), CallGuard::pool(call),
+        CallGuard::provider(call) ? workspace_arena_provider_from_abi(*CallGuard::provider(call))
+                                   : default_workspace_arena_provider());
+      bind_call(call);
+    }
+  }
+  void activate(const VecopsKernelBufferBindingV1* bindings, size_t count,
+                 const VecopsBufferOwnerV1* owner) override {
+    if (instance_) throw std::logic_error("kernel buffers already active");
+    if ((count && !bindings) || !owner || !owner->context || !owner->retain || !owner->release)
+      throw std::invalid_argument("kernel buffer owner/bindings are incomplete");
+    // Build the complete retained owner before making any prepared state.
+    owner->retain(owner->context);
+    std::shared_ptr<void> lifetime(owner->context,[release=owner->release](void* p) { release(p); });
+    std::vector<KernelBufferBinding> buffers;
+    buffers.reserve(count);
+    for (size_t i=0; i<count; ++i) {
+      if (!bindings[i].name) throw std::invalid_argument("kernel buffer name is null");
+      const auto& b = bindings[i];
+      buffers.push_back({b.name,b.address,b.bytes,b.replica_stride,lifetime});
+    }
+    instance_ = std::make_unique<KernelInstance>(this->plan(),this->context().thread_pool,std::move(buffers));
+  }
+  void suspend() override {
+    if (instance_ && instance_->running()) throw std::logic_error("kernel instance is running");
+    instance_.reset();
   }
   const std::vector<VecopsKernelInplaceV1>& inplace_contracts() const override { return inplace_; }
   KernelInstance& instance() override {
-    return instance_;
+    if (!instance_) throw std::logic_error("kernel buffers are not active");
+    return *instance_;
   }
   void bind_call(const VecopsCall& call, bool validate = true) override {
     if (validate && !guard.matches(call))
       throw std::invalid_argument("prepared kernel metadata/context changed; instantiate another plan");
     [&]<std::size_t... I>(std::index_sequence<I...>) {
-      (source_plan_details::bind(instance_, std::get<I>(arguments_), call.values[I]), ...);
+      (source_plan_details::bind(instance(), std::get<I>(arguments_), call.values[I]), ...);
     }(std::make_index_sequence<std::tuple_size_v<Arguments>>{});
   }
 
 private:
   Arguments arguments_;
-  KernelInstance instance_;
+  std::unique_ptr<KernelInstance> instance_;
   std::vector<VecopsKernelInplaceV1> inplace_;
 };
 

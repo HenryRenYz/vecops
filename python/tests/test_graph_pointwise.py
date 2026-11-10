@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
 """Static broadcast lowering, dtype boundaries, aliases and native islands."""
+from dataclasses import replace
+
 import torch
 import pytest
 from vecops.graph import GraphCapture
+from vecops.memory import Runtime
+from vecops.planner import GraphMemoryCompiler, ProgramCall
 
 
 @pytest.fixture(autouse=True)
@@ -11,21 +15,38 @@ def native_pool(monkeypatch):
   monkeypatch.setenv('VECOPS_THREAD_POOL', 'native')
 
 
-def test_shared_preallocated_scratch_is_compile_only_and_outputs_are_independent():
-  arena = torch.empty(4096, dtype=torch.uint8)
-  requests = []
-  def allocate(size):
-    requests.append(size)
-    return arena
+def compile_serial_plans(plans):
+  runtime = Runtime.discover()
+  view = runtime.view()
+  names = tuple(f'graph-{index}' for index in range(len(plans)))
+  # Escaped outputs stay live across every linked call; only scratch is shared.
+  requirements = {name: tuple(replace(req, retained=True) if req.external_role == 'output' else req
+                             for req in plan.managed_requirements)
+                  for name, plan in zip(names, plans)}
+  calls = [ProgramCall(name, name) for name in names]
+  compiled = GraphMemoryCompiler(runtime, view, runtime.snapshot(view)).compile_model(
+      requirements, calls, serialized=True)
+  prepared = compiled.prepare(runtime, view).materialize()
+  programs = [plan.compile(runtime=runtime, view=view, memory_program=prepared, memory_call=name)
+              for name, plan in zip(names, plans)]
+  return programs, prepared
+
+
+def test_shared_resource_scratch_is_compile_only_and_outputs_are_independent():
   functions = (lambda x: ((x + 1).relu() * 2).sum(-1),
                lambda x: ((x - 3).relu() * .5).sum(-1))
-  programs = []
   with torch.inference_mode():
+    plans = []
     for function in functions:
-      capture = GraphCapture('shared-static-arena')
+      capture = GraphCapture('shared-resource-scratch')
       capture.capture_torch(function, torch.ones(3, 17))
-      programs.append(capture.compile_torch(native_pointwise=True, scratch_allocator=allocate))
-    assert len(requests) == 2 and all(size <= arena.numel() for size in requests)
+      plans.append(capture.prepare_torch(native_pointwise=True))
+    programs, prepared = compile_serial_plans(plans)
+    bindings = prepared.program.bindings
+    call_slots = [{bindings[key].slot for key in local.values()}
+                  for local in prepared.program.call_bindings.values()]
+    assert call_slots[0] & call_slots[1]
+    original_recipe = prepared.program.dumps()
     previous = []
     for index in range(4):
       for function, program in zip(functions, programs):
@@ -33,19 +54,28 @@ def test_shared_preallocated_scratch_is_compile_only_and_outputs_are_independent
         result = program(x)
         torch.testing.assert_close(result, function(x))
         previous.append((result, result.clone()))
-    assert len(requests) == 2
+    assert prepared.program.dumps() == original_recipe
     for result, saved in previous:
       torch.testing.assert_close(result, saved)
-    assert all(p.allocator_policy['static_scratch_arena_bytes'] == 4096 for p in programs)
+    assert all(p.memory_program is prepared for p in programs)
 
 
-def test_preallocated_scratch_capacity_is_checked_before_executor_construction():
+def test_resource_scratch_capacity_is_checked_before_executor_construction():
   with torch.inference_mode():
-    capture = GraphCapture('short-static-arena')
+    capture = GraphCapture('short-resource-budget')
     capture.capture_torch(lambda x: (x + 1).sum(-1), torch.ones(3, 17))
-    with pytest.raises(ValueError, match='sufficient capacity'):
-      capture.compile_torch(native_pointwise=True,
-          scratch_allocator=lambda _: torch.empty(1, dtype=torch.uint8))
+    plan = capture.prepare_torch(native_pointwise=True)
+    runtime = Runtime.discover()
+    view = runtime.view()
+    budgets = runtime.snapshot(view)
+    pools = budgets.pools
+    for pool in pools:
+      pool.allocatable_bytes = 0
+    budgets.pools = pools
+    with pytest.raises(MemoryError, match='no feasible placement'):
+      GraphMemoryCompiler(runtime, view, budgets).compile(plan.managed_requirements)
+    assert not plan._compiled
+    assert not any(group.committed_bytes for group in runtime.snapshot(view).groups)
 
 
 def test_borrowed_outputs_preserve_aliases_and_avoid_hot_factories():
@@ -78,20 +108,21 @@ def test_borrowed_outputs_preserve_aliases_and_avoid_hot_factories():
       program(last)
 
 
-def test_borrowed_outputs_are_separate_from_shared_temporary_scratch():
-  arena = torch.empty(4096, dtype=torch.uint8)
+def test_borrowed_outputs_are_separate_in_shared_resource_program():
   with torch.inference_mode():
-    programs = []
+    plans = []
     for offset in (1, 3):
       capture = GraphCapture('private-borrowed-output')
       capture.capture_torch(lambda x: (x + offset).relu(), torch.ones(3, 17))
-      programs.append(capture.compile_torch(native_pointwise=True, borrow_outputs=True,
-          scratch_allocator=lambda _: arena))
+      plans.append(capture.prepare_torch(native_pointwise=True, borrow_outputs=True))
+    programs, prepared = compile_serial_plans(plans)
     first = programs[0](torch.ones(3, 17))
     saved = first.clone()
-    for index in range(3): programs[1](torch.ones(3, 17) * index)
+    for index in range(3):
+      second = programs[1](torch.ones(3, 17) * index)
     torch.testing.assert_close(first, saved)
-    assert first.untyped_storage().data_ptr() != arena.untyped_storage().data_ptr()
+    assert first.data_ptr() != second.data_ptr()
+    assert all(program.memory_program is prepared for program in programs)
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
@@ -113,6 +144,37 @@ def test_pointwise_broadcast_rebinding_and_escaping_outputs(dtype):
       actual = replay(x + i, b - i * .1)
       torch.testing.assert_close(actual, function(x + i, b - i * .1), rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(first, saved, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('inference', [False, True])
+def test_bound_state_views_compile_outside_inference_scope(inference):
+  from contextlib import nullcontext
+  class Model(torch.nn.Module):
+    def forward(self, x):
+      return x + self.weight[2:10:2]
+  model = Model()
+  with torch.inference_mode() if inference else nullcontext():
+    backing = torch.arange(64, dtype=torch.float32)
+    model.register_buffer('weight', backing[3:27:2])
+  x = torch.arange(4, dtype=torch.float32)
+  capture = GraphCapture('bound-state-view-inference-scope')
+  with torch.inference_mode():
+    capture.capture_torch(model, x)
+  assert not torch.is_inference_mode_enabled()
+  replay = capture.compile_torch(native_pointwise=True, borrow_readonly_state=True)
+  assert not torch.is_inference_mode_enabled()
+  assert replay.allocator_policy['hoisted_static_views'] == 1
+  aliases = [value for value in replay._bound
+             if torch._C._is_alias_of(value, model.weight) and value.shape == (4,)]
+  assert len(aliases) == 1
+  alias = aliases[0]
+  assert alias.storage_offset() == 7 and alias.stride() == (4,)
+  assert torch.is_inference(alias) == inference
+  with torch.inference_mode():
+    for index in range(3):
+      model.weight.add_(index)
+      value = x + index
+      torch.testing.assert_close(replay(value), model(value), rtol=0, atol=0)
 
 
 def test_static_views_join_island_and_dynamic_aliases_follow_new_storage():

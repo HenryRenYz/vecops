@@ -274,10 +274,8 @@ def test_read_write_bridge_publishes_artifact_after_unchanged_validation(monkeyp
     (),
     (),
     "ATen parallel backend: native",
-    f"tree:{include_root}",
-    (),
-    (),
-    (str(native_library), "stable-file"),
+    *_schema_bridge._torch_content_identity((f"tree:{include_root}", (), (),
+                                             (str(native_library), "stable-file"))),
   )
   monkeypatch.setattr(
     _schema_bridge,

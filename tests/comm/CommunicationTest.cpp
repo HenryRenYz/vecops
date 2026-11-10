@@ -4,6 +4,11 @@
 #include "vecops/comm/Communication.h"
 #include "vecops/comm/details/ReplicaRouting.h"
 #include "vecops/comm/Copy.h"
+#include "vecops/memory/LinuxRuntime.h"
+#include "vecops/memory/details/SharedCapacityAuthority.h"
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <barrier>
@@ -14,9 +19,11 @@
 #include <stdexcept>
 #include <thread>
 #include <mutex>
+#include <source_location>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <linux/mempolicy.h>
 #include <unistd.h>
 using namespace vecops::comm;
@@ -28,8 +35,11 @@ namespace {
 constexpr int ranks=3, phases=128;
 struct Bootstrap {
   struct Record {std::atomic<int> ready{0};char value[1024]{};} values[ranks][phases];
+  std::atomic<int> cold_provision_entered{0},cold_reader_stopped{0};
 };
-void check(bool result){if(!result)throw std::runtime_error("standalone communication assertion");}
+void check(bool result,const std::source_location where=std::source_location::current()) {
+  if(!result)throw std::runtime_error("standalone communication assertion at line "+std::to_string(where.line()));
+}
 void replica_routing() {
   const std::vector<uint64_t> bytes(8,1024);
   const std::vector<int> contiguous{0,0,0,0,1,1,1,1};
@@ -94,7 +104,12 @@ void copy_boundaries(const detail::CopyBackend& copy) {
     }
   }
 }
-void worker(int rank,Bootstrap* store) {
+namespace mm=vecops::memory::model;
+template<class T>T take(mm::Result<T> result) {
+  if(!result){const auto& error=std::get<mm::Error>(result.state);throw std::runtime_error(error.code+": "+error.message);}
+  return std::move(result).value();
+}
+void worker(int rank,Bootstrap* store,const std::string& directory) {
   size_t phase=0;
   Exchange exchange=[&](const std::string& value) {
     check(phase<phases && value.size()<1024);
@@ -112,7 +127,29 @@ void worker(int rank,Bootstrap* store) {
     ++phase;return values;
   };
   Options options;options.early_snapshot=std::getenv("VECOPS_TEST_EARLY_SNAPSHOT")!=nullptr;options.timeout_ms=5000;options.relay_threshold=0;
-  if(auto* node=std::getenv("VECOPS_TEST_MEMORY_NODE")){options.memory_node=std::atoi(node);options.require_placement=true;}
+  const auto page=static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
+  mm::LinuxDiscovery discovery;
+  discovery.graph.agents={{"cpu",{"host_load_store"},"host"}};
+  discovery.graph.capacity_groups={{"physical",64ULL<<20}};
+  discovery.graph.pools={{"opaque-payload",64ULL<<20,"host",page,{page},{},{},"physical"}};
+  discovery.graph.access={{"direct","cpu-map","cpu","opaque-payload",{mm::AccessMode::read,mm::AccessMode::write},
+                           {},{},mm::MappingMode::direct,{},{},{},{},{}}};
+  discovery.scope={{"cpu"},{"opaque-payload"},{"opaque-payload"},{{"cpu",1}}};
+  std::vector<unsigned> nodes;
+  const auto* requested_node=std::getenv("VECOPS_TEST_MEMORY_NODE");
+  if(requested_node)nodes.push_back(std::stoul(requested_node));
+  discovery.pool_bindings={{"opaque-payload",nodes,"host"}};
+  discovery.pool_available_bytes={{"opaque-payload",64ULL<<20}};
+  mm::LinuxRuntimeOptions memory_options;
+  memory_options.participant="rank-"+std::to_string(rank);memory_options.capacity_directory=directory;
+  options.memory_runtime=take(mm::make_linux_runtime(std::move(discovery),memory_options));
+  options.payload_pool="opaque-payload";
+  auto authority=take(mm::details::SharedCapacityAuthority::open(directory,
+      {{"physical",64ULL<<20,64ULL<<20}},{},"audit-rank-"+std::to_string(rank)));
+  auto charged=[&] {
+    uint64_t bytes=0;for(const auto& group:take(authority->snapshot()).groups)bytes+=group.committed_bytes;
+    return bytes;
+  };
   options.replica_levels={{0,0,1},{0,1,2}};options.copy_levels={1,1};
   options.threads=4;
   VecopsThreadPoolV1 executor{};
@@ -144,7 +181,102 @@ void worker(int rank,Bootstrap* store) {
     for(uint32_t lane=1;lane<4;++lane)lanes.emplace_back(work,lane);
     work(0);for(auto& lane:lanes)lane.join();if(failure)std::rethrow_exception(failure);
   };
+  {
+    // A real payload broadcast, not just a control barrier, precedes metadata
+    // registration in applications that distribute weights/inputs cold.
+    auto cold_options=options;cold_options.initial_capacity=page;
+    cold_options.copy_levels={0,0};
+    auto cold=Communicator::create(rank,ranks,cold_options,exchange,&executor);
+    const auto before_consensus=cold->statistics();
+    check(cold->preparation_consensus(true));
+    check(!cold->preparation_consensus(rank!=1));
+    check(!cold->preparation_consensus(rank==0));
+    check(cold->preparation_consensus(true));
+    check(cold->statistics().calls==before_consensus.calls &&
+        cold->statistics().capacity_growths==before_consensus.capacity_growths);
+    Specification barrier;barrier.operation=Operation::Barrier;
+    auto control=cold->prepare(barrier);control->execute(nullptr,nullptr);
+    Specification broadcast;broadcast.operation=Operation::Broadcast;
+    broadcast.inputs={Layout{{17},{1},1}};broadcast.outputs=broadcast.inputs;
+    auto publication=cold->prepare(broadcast);
+    std::array<uint8_t,17> small{};if(!rank)small.fill(73);
+    const void* small_in[]{small.data()};void* small_out[]{small.data()};
+    publication->execute(small_out,small_in);for(auto byte:small)check(byte==73);
+    const size_t bytes=page*4+17;
+    Specification flat;flat.operation=Operation::AllGather;
+    flat.inputs={Layout{{static_cast<int64_t>(bytes)},{1},1}};
+    flat.outputs.assign(ranks,flat.inputs.front());flat.copy_levels={0,0};
+    auto gather=cold->prepare(flat);
+    auto relayed=flat;relayed.copy_levels={1,1};
+    auto relay=cold->prepare(relayed);
+    Specification borrowed=flat;borrowed.inputs=broadcast.inputs;
+    borrowed.outputs.assign(ranks,broadcast.inputs.front());
+    auto slow=cold->prepare(borrowed);
+    small.fill(static_cast<uint8_t>(rank+31));
+    slow->consume(small_in,[&](const void* const* sources,size_t count) {
+      check(count==ranks);
+      if(rank==2) {
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        while(!store->cold_provision_entered.load(std::memory_order_acquire)) {
+          if(std::chrono::steady_clock::now()>deadline)throw std::runtime_error("slow-reader preparation timeout");
+          std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      for(int peer=0;peer<ranks;++peer)for(size_t i=0;i<small.size();++i)
+        check(static_cast<const uint8_t*>(sources[peer])[i]==peer+31);
+      if(rank==2)store->cold_reader_stopped.store(1,std::memory_order_release);
+    });
+    if(!rank)store->cold_provision_entered.store(1,std::memory_order_release);
+    check(cold->provision_registered_capacity());
+    check(store->cold_reader_stopped.load(std::memory_order_acquire)==1);
+    check(!cold->provision_registered_capacity());
+    // A correct fixed point charges one source plus exactly the union of its
+    // registered relay segments. Previous generations/imports have all retired.
+    uint64_t expected=0;
+    for(int owner=0;owner<ranks;++owner) {
+      std::vector<bool> needed(ranks,false);
+      for(const auto& partition:cold_options.replica_levels) {
+        const auto targets=detail::balanced_relay_targets(partition,owner,std::vector<uint64_t>(ranks,bytes));
+        for(int source=0;source<ranks;++source)needed[source]=needed[source] || targets[source]==owner;
+      }
+      size_t rounded=page;while(rounded<bytes)rounded*=2;
+      expected+=rounded*(1+std::count(needed.begin(),needed.end(),true));
+    }
+    exchange("cold-exact-union-observed");check(charged()==expected);
+    std::shared_ptr<mm::Allocation> filler;
+    if(!rank) {
+      const auto remaining=take(authority->snapshot()).groups.front().hard_remaining_bytes;
+      check(remaining>page);
+      auto view=take(options.memory_runtime->view(take(options.memory_runtime->current_scope())));
+      mm::BackingRequest request{"cold-near-capacity",memory_options.participant,"opaque-payload",remaining-page,
+          page,mm::BackingMode::private_memory,{}};
+      filler=std::make_shared<mm::Allocation>(take(options.memory_runtime->allocate(view,request)));
+    }
+    exchange("cold-budget-nearly-full");check(take(authority->snapshot()).groups.front().hard_remaining_bytes==page);
+    cold->seal();check(!cold->provision_registered_capacity());
+    const auto growths=cold->statistics().capacity_growths;
+    std::vector<uint8_t> input(bytes),output(bytes*ranks);
+    for(size_t i=0;i<bytes;++i)input[i]=static_cast<uint8_t>(i+rank*17);
+    const void* in[]{input.data()};std::array<void*,ranks> out;
+    for(int peer=0;peer<ranks;++peer)out[peer]=output.data()+peer*bytes;
+    for(const auto& plan:{gather,relay}) {
+      plan->execute(out.data(),in);
+      for(int peer=0;peer<ranks;++peer)for(size_t i=0;i<bytes;++i)
+        check(output[peer*bytes+i]==static_cast<uint8_t>(i+peer*17));
+      check(cold->statistics().capacity_growths==growths);
+    }
+    cold->close();filler.reset();exchange("cold-publications-and-filler-refunded");
+    const auto snapshot=take(authority->snapshot());
+    check(snapshot.roots.empty() && snapshot.grants.empty());
+    check(snapshot.groups.front().committed_bytes==0 && snapshot.groups.front().pending_bytes==0);
+  }
   auto comm=Communicator::create(rank,ranks,options,exchange,&executor);
+  exchange("initial-source-roots");
+  // Bootstrap allocates one real source root/rank. Potential relay address
+  // space is sparse until a registered route actually requires its segment.
+  const auto initial_charge=charged();exchange("initial-source-roots-observed");
+  check(initial_charge==ranks*options.initial_capacity);
   // Three ranks, independent pointer rebinding, non-vector tails, empty and
   // single rows, canary padding, and unsupported large-run fallback.
   for(int run:{16,17,32,192,256,512})for(int rows:{0,1,13}) {
@@ -185,12 +317,12 @@ void worker(int rank,Bootstrap* store) {
   std::vector<std::shared_ptr<ExchangeBuffer>> buffers;
   for(auto placement:{PagePlacement::Source,PagePlacement::Destination}) {
     auto buffer=comm->prepare_exchange(17*sizeof(float),2,placement);
-    if(options.require_placement)for(int peer=0;peer<ranks;++peer) {
+    if(requested_node)for(int peer=0;peer<ranks;++peer) {
       int policy=0;unsigned long nodes[16]{};
       auto* address=static_cast<const char*>(buffer->consumer(0))+peer*buffer->block_stride();
       check(syscall(SYS_get_mempolicy,&policy,nodes,1024,address,MPOL_F_ADDR)==0);
       check((policy&~MPOL_F_STATIC_NODES)==MPOL_BIND);
-      check(nodes[options.memory_node/64] == (1UL<<(options.memory_node%64)));
+      check(nodes[std::stoul(requested_node)/64] == (1UL<<(std::stoul(requested_node)%64)));
     }
     for(int i=0;i<16;++i) {
       auto slot=i%2;buffer->begin(slot);
@@ -218,7 +350,22 @@ void worker(int rank,Bootstrap* store) {
   comm->seal();
   // All regions and plans remain usable after freezing; no new descriptors.
   for(auto& buffer:buffers) {buffer->begin(0);buffer->publish(0);buffer->retire(0);}
-  auto bad=buffers.back();
+  check(charged()>0);
+  comm->close();exchange("all-roots-refunded");
+  check(charged()==0);
+  try{comm->prepare(spec);check(false);}catch(const std::runtime_error&){}
+  // A shared planning failure can abort every otherwise idle group. Staggered
+  // cleanup must await stopped acknowledgements rather than reject the abort
+  // flags and leak named physical roots. Exercise page aliases as well.
+  auto idle=Communicator::create(rank,ranks,options,exchange,&executor);
+  auto idle_exchange=idle->prepare_exchange(17*sizeof(float),1,PagePlacement::Destination);
+  check(charged()>0);
+  idle->abort();idle_exchange->abort();exchange("idle-aborted");
+  if(rank==1)std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  idle->close();exchange("idle-aborted-roots-refunded");
+  check(charged()==0);
+  auto failing=Communicator::create(rank,ranks,options,exchange,&executor);
+  auto bad=failing->prepare_exchange(17*sizeof(float),1,PagePlacement::Destination);
   if(rank==0) {
     bad->begin(0);
     try{bad->begin(0);check(false);}catch(const std::runtime_error&){}
@@ -227,7 +374,8 @@ void worker(int rank,Bootstrap* store) {
   }
 }
 }
-int main() {
+int main(int argc,char** argv) {
+  (void)argc;
   try {
     replica_routing();
     copy_boundaries(detail::copy_backend());
@@ -239,13 +387,50 @@ int main() {
   auto* mapping=mmap(nullptr,sizeof(Bootstrap),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
   if(mapping==MAP_FAILED)return 1;
   auto* store=new(mapping) Bootstrap;
+  const auto directory=std::filesystem::absolute(argv[0]).parent_path()/("comm-capacity-"+std::to_string(getpid()));
+  std::filesystem::create_directory(directory);
+  std::filesystem::permissions(directory,std::filesystem::perms::owner_all,std::filesystem::perm_options::replace);
   std::array<pid_t,ranks> children;
   for(int rank=0;rank<ranks;++rank) {
     auto pid=fork();if(pid<0)return 1;
-    if(!pid) {try{worker(rank,store);_exit(0);}catch(const std::exception& e){std::cerr<<rank<<": "<<e.what()<<'\n';_exit(1);}}
+    if(!pid) {try{worker(rank,store,directory.string());_exit(0);}catch(const std::exception& e){std::cerr<<rank<<": "<<e.what()<<'\n';_exit(1);}}
     children[rank]=pid;
   }
   bool okay=true;
   for(auto pid:children){int status=0;waitpid(pid,&status,0);okay &= WIFEXITED(status) && WEXITSTATUS(status)==0;}
-  store->~Bootstrap();munmap(mapping,sizeof(Bootstrap));return okay?0:1;
+  if(okay) {
+    try {
+      auto authority=take(mm::details::SharedCapacityAuthority::open(directory,
+          {{"physical",64ULL<<20,64ULL<<20}},{},"audit"));
+      const auto snapshot=take(authority->snapshot());
+      check(!snapshot.roots.empty() && snapshot.groups.front().committed_bytes>0);
+      check(snapshot.groups.front().pending_bytes==0);
+      for(const auto& root:snapshot.roots)
+        check(root.owner.state==mm::details::SharedCapacityOwnerState::owner_dead);
+      std::cout<<"3-rank Runtime payload/relay/page-alias tests passed; normal shutdown refunded all roots; "
+               <<snapshot.roots.size()<<" aborted root receipts retained conservatively\n";
+      // Every test child has been joined. The active-lease negative case must
+      // retain receipts, but its named files must not leak into later tests.
+      // Match kernel identity and test-child creator, never unlink by prefix
+      // alone. Live production owners are deliberately not reclaimed this way.
+      std::string boot;std::ifstream("/proc/sys/kernel/random/boot_id")>>boot;
+      check(!boot.empty());
+      size_t removed=0;
+      for(const auto& entry:std::filesystem::directory_iterator("/dev/shm")) {
+        const auto name=entry.path().filename().string();
+        if(std::none_of(children.begin(),children.end(),[&](auto pid){return name.starts_with("vecops-"+std::to_string(pid)+"-");}))continue;
+        struct stat info{};check(lstat(entry.path().c_str(),&info)==0);
+        check(S_ISREG(info.st_mode) && info.st_uid==getuid());
+        const auto identity="linux:"+boot+":"+std::to_string(info.st_dev)+":"+std::to_string(info.st_ino);
+        const auto receipt=std::find_if(snapshot.roots.begin(),snapshot.roots.end(),[&](const auto& r){return r.physical_identity==identity;});
+        check(receipt!=snapshot.roots.end() && receipt->bytes==static_cast<uint64_t>(info.st_size));
+        check(unlink(entry.path().c_str())==0);++removed;
+      }
+      check(removed==snapshot.roots.size());
+    }catch(const std::exception& error){std::cerr<<error.what()<<'\n';okay=false;}
+  }
+  store->~Bootstrap();munmap(mapping,sizeof(Bootstrap));
+  if(okay)std::filesystem::remove_all(directory);
+  else std::cerr<<"Failed communication test metadata retained at "<<directory<<'\n';
+  return okay?0:1;
 }

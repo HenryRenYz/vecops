@@ -5,12 +5,19 @@
 Only a private planning IR changes. Storage lifetimes and accessed byte spans
 follow the union of every donated logical version. Eager schemas stay intact.
 """
-from copy import deepcopy
+from dataclasses import replace
 
 
 def plan_reuse(execution, instructions, pointwise, mutable, protected, spans,
                native_contracts=None, native_outputs=None, factories=()):
-  execution, spans = deepcopy(execution), dict(spans)
+  # Only storage membership, tensor.storage_id and storage lifetime/capacity
+  # change below. Events, metadata and annotations are read-only during replay
+  # lowering; recursively cloning them dominates large-graph binding time.
+  execution = replace(execution,
+      tensors={key:replace(value) for key,value in execution.tensors.items()},
+      storages={key:replace(value,tensors=list(value.tensors))
+                for key,value in execution.storages.items()})
+  spans = dict(spans)
   native_contracts, native_outputs = native_contracts or {}, native_outputs or {}
   events = {event.id: event.index for event in execution.events}
   owned, donations, replacements, rewritten = set(), {}, {}, {}
@@ -25,9 +32,13 @@ def plan_reuse(execution, instructions, pointwise, mutable, protected, spans,
     return (use.access.value not in {'alias', 'allocate'} and not (
         event.id in template_events and use.argument == 'other' and use.access.value == 'read'))
   last_data_use = {}
+  first_storage_use = {}
   for event in execution.events:
     for use in event.uses:
       if accesses_data(event, use):last_data_use[use.tensor_id] = event.index
+      if use.access.value not in {'alias','allocate'}:
+        storage = execution.tensors[use.tensor_id].storage_id
+        first_storage_use[storage] = min(first_storage_use.get(storage,event.index),event.index)
 
   def signature(tensor):
     m = tensor.metadata
@@ -79,9 +90,7 @@ def plan_reuse(execution, instructions, pointwise, mutable, protected, spans,
       # An out-style buffer may exist earlier, but must still be uninitialized.
       # Even metadata uses stay conservative here: redirecting an out buffer
       # before the input view is defined can create a forward SSA reference.
-      if not same_index and any(event.index < index and any(
-          execution.tensors[use.tensor_id].storage_id == result_storage.id and use.access.value not in {'alias', 'allocate'}
-          for use in event.uses) for event in execution.events):
+      if not same_index and first_storage_use.get(result_storage.id,index) < index:
         continue
       delta = spans[source.id][0] - spans[output.id][0]
       for identity in result_storage.tensors:
@@ -91,6 +100,9 @@ def plan_reuse(execution, instructions, pointwise, mutable, protected, spans,
       storage.tensors.extend(result_storage.tensors)
       storage.lifetime_end = max(storage.lifetime_end, result_storage.lifetime_end)
       storage.bytes = max(storage.bytes, result_storage.bytes)
+      if result_storage.id in first_storage_use:
+        first = first_storage_use.pop(result_storage.id)
+        first_storage_use[storage.id] = min(first_storage_use.get(storage.id,first),first)
       del execution.storages[result_storage.id]
       replacements[output.id] = source
       if same_index:

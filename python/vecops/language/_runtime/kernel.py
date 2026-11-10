@@ -40,6 +40,7 @@ class _CompiledCore:
         self.definition._native(),
         compiler=self.operator.compiler,
         spec_order=self.specialization_order,
+        source=str(self.operator.source),
       )
     return self.torch_wrapper
 

@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 SINK_OPTION = "-mllvm=-simplifycfg-sink-common=false"
@@ -24,16 +25,18 @@ def scalable_sink_flags(compiler) -> tuple[str, ...]:
   """Use the workaround only after this executable fails the exact probe.
 
   Both the original failure and the successful narrowly modified compilation
-  are required. Offline readers replay an attestation without finding tools.
+  are required. A BuildSession reuses each complete effective policy once;
+  wrapper and reported installed-driver bytes are rechecked at checkpoints.
+  Outside a session each snapshot rechecks the tool. Offline readers replay an attestation without finding tools.
   The selected option becomes an ordinary compiler flag before artifact keys
   are computed; it applies equally to generated DSL and source-C++ kernels.
   Clang crash reproducer files are disabled for this deliberate failure;
   its stderr remains in the attestation. Kernel compiler flags are unchanged.
   """
   from . import _C
-  from ._cache_lock import file_lock
   from ._compiler import _tool
-  from ._identity import digest, file_identity
+  from ._identity import digest
+  from ._build_session import snapshot_value
 
   if compiler.target.lower() == "scalar" or compiler.vector_state.sve_bytes is None:
     return ()
@@ -53,6 +56,30 @@ def scalable_sink_flags(compiler) -> tuple[str, ...]:
     return next(iter(choices))
   tool = _tool(compiler.cxx, "CXX", ("clang++", "g++"))
   environment = {**os.environ, **compiler.environment}
+  # The full effective environment is hashed, not logged. Wrapper routing,
+  # loaders and user instrumentation may all affect the resolved toolchain.
+  key = (policy, str(tool), str(compiler.definition_cwd), str(path),
+         digest(tuple(sorted(environment.items()))))
+  return snapshot_value("scalable-sink-policy", key,
+                        lambda: _probe_flags(compiler, tool, environment, directory, path))
+
+
+def _probe_flags(compiler, tool, environment, directory, path):
+  from ._build_session import current_build_session
+  started = time.perf_counter()
+  try:
+    return _probe_flags_uncached(compiler, tool, environment, directory, path)
+  finally:
+    if (session := current_build_session()) is not None:
+      session.events.append(dict(kind="toolchain-probe", probe="scalable-sink",
+          start_seconds=started-session._started, seconds=time.perf_counter()-started,
+          version_queries=1))
+
+
+def _probe_flags_uncached(compiler, tool, environment, directory, path):
+  from ._cache_lock import file_lock
+  from ._identity import digest, file_identity
+
   version = subprocess.run([str(tool), "--version"], capture_output=True, text=True,
                            timeout=5, check=True, env=environment, cwd=compiler.definition_cwd).stdout
   # A private wrapper may remain unchanged when its underlying Clang changes.
@@ -60,7 +87,7 @@ def scalable_sink_flags(compiler) -> tuple[str, ...]:
   match = re.search(r"^InstalledDir:\s*(.+)$", version, re.MULTILINE)
   installed = Path(match.group(1).strip()) / "clang" if match else None
   identity = digest((file_identity(tool), version,
-                     file_identity(installed) if installed is not None and installed.is_file() else None))
+                     file_identity(installed) if installed is not None else None))
   directory.mkdir(parents=True, exist_ok=True)
   with file_lock(path.with_suffix(".lock")):
     records = json.loads(path.read_text()) if path.is_file() else []

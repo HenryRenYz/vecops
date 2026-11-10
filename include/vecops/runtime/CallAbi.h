@@ -375,7 +375,7 @@ VECOPS_RUNTIME_EXPORT void vecops_native_thread_pool_end_active(void);
  * String members are owned by the reporting context and remain valid only
  * for the duration of the observer callback; collectors must copy them.
  * `tier` reports where the bytes actually came from: 0 = fast arena,
- * 1 = slow arena, 2 = separately owned heap allocation.
+ * 1 = slow arena, 2 = separately owned resource allocation.
  */
 typedef struct VecopsWorkspaceAllocationV1 {
   /** Size of this record known to the reporter. */
@@ -392,11 +392,11 @@ typedef struct VecopsWorkspaceAllocationV1 {
   uint64_t alignment;
   /** Replica count for worker-local sites, otherwise one. */
   uint64_t replicas;
-  /** `WorkspaceDomain` value: 0 global, 1 worker-local. */
+  /** `BufferDomain` value: 0 global, 1 worker-local. */
   int32_t domain;
-  /** `WorkspacePlacementPolicy` value. */
+  /** `BufferPlacementPolicy` value. */
   int32_t placement;
-  /** Actual backing: 0 fast, 1 slow, 2 heap. */
+  /** Actual backing: 0 fast, 1 slow, 2 separate resource allocation. */
   int32_t tier;
   /** Reserved; zero. */
   int32_t reserved;
@@ -451,6 +451,9 @@ typedef struct VecopsExecutionContext {
   const VecopsThreadPoolV1* thread_pool;
   /** Optional workspace allocation observer; absent from older records. */
   const VecopsAllocationObserverV1* allocation_observer;
+  /** Prepare only metadata. Buffer storage must subsequently be supplied using
+   * the prepared-kernel activate_buffers contract. No tensor computation runs. */
+  uint32_t defer_buffer_binding;
 } VecopsExecutionContext;
 
 /**

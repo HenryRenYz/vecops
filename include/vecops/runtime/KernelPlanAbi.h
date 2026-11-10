@@ -29,6 +29,35 @@ typedef struct VecopsKernelInplaceV1 {
   uint32_t output;
 } VecopsKernelInplaceV1;
 
+/** Buffer declaration owned by the prepared metadata. Offsets/lifetimes are
+ * local grid stages; no allocator, physical pool or tier is selected here. */
+typedef struct VecopsKernelBufferRequirementV1 {
+  /** Unique deterministic slot symbol, including its descriptive label.
+   * Consumers must preserve this exact string for activation; labels alone
+   * need not be unique within a kernel. */
+  const char* name;
+  uint64_t bytes, alignment, replicas, replica_stride;
+  uint32_t domain;
+  /** Prepared state may retain initialized contents between calls. A graph
+   * program must keep this range live until the prepared object is suspended. */
+  uint32_t retained;
+  double estimated_traffic_bytes;
+  const VecopsBufferLifetimeV1* lifetimes;
+  size_t lifetime_count;
+} VecopsKernelBufferRequirementV1;
+/** Explicit borrowed mapping plus a retained physical lifetime token. Owner
+ * callbacks are infrequent activation/suspension operations, never grid work. */
+typedef struct VecopsKernelBufferBindingV1 {
+  const char* name;
+  void* address;
+  uint64_t bytes, replica_stride;
+} VecopsKernelBufferBindingV1;
+typedef struct VecopsBufferOwnerV1 {
+  void* context;
+  void (*retain)(void*);
+  void (*release)(void*);
+} VecopsBufferOwnerV1;
+
 typedef struct VecopsPreparedKernelV1 {
   uint32_t struct_size;
   uint32_t abi_major;
@@ -52,6 +81,15 @@ typedef struct VecopsPreparedKernelV1 {
   /** Optional extension; inspect struct_size before reading these fields. */
   uint32_t inplace_count;
   const VecopsKernelInplaceV1* inplace;
+  /** Planning metadata stays valid through suspension and has no physical
+   * allocation side effect. Activation requires one exact complete binding set. */
+  uint32_t buffer_count;
+  const VecopsKernelBufferRequirementV1* buffers;
+  int32_t (*activate_buffers)(void*, const VecopsKernelBufferBindingV1*, size_t,
+                              const VecopsBufferOwnerV1*, VecopsError*);
+  /** Caller proves all graph/peer accesses stopped before suspension. Native
+   * running instances reject suspension. Destroy prepared state before unmap. */
+  int32_t (*suspend_buffers)(void*, VecopsError*);
 
 } VecopsPreparedKernelV1;
 

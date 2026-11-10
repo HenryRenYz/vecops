@@ -22,28 +22,28 @@ using namespace vecops::execution;
 
 class FailingFastArenaProvider final : public WorkspaceArenaProvider {
 public:
-  [[nodiscard]] nint_t capacity(WorkspaceTier) const noexcept override {
+  [[nodiscard]] nint_t capacity(BufferTier) const noexcept override {
     return std::numeric_limits<nint_t>::max();
   }
 
-  WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t alignment) override {
-    if (tier == WorkspaceTier::Fast && bytes != 0) {
+  WorkspaceArena allocate(BufferTier tier, nint_t bytes, nint_t alignment) override {
+    if (tier == BufferTier::Fast && bytes != 0) {
       ++fast_attempts;
       throw std::bad_alloc();
     }
-    if (tier == WorkspaceTier::Slow && bytes != 0)
+    if (tier == BufferTier::Slow && bytes != 0)
       ++slow_allocations;
-    return heap.allocate(tier, bytes, alignment);
+    return heap->allocate(tier, bytes, alignment);
   }
 
   int fast_attempts = 0;
   int slow_allocations = 0;
-  HeapWorkspaceArenaProvider heap;
+  std::shared_ptr<WorkspaceArenaProvider> heap = default_workspace_arena_provider();
 };
 
 class SharedArenaProvider final : public WorkspaceArenaProvider {
 public:
-  [[nodiscard]] nint_t capacity(WorkspaceTier) const noexcept override {
+  [[nodiscard]] nint_t capacity(BufferTier) const noexcept override {
     return 256;
   }
 
@@ -51,10 +51,10 @@ public:
     return true;
   }
 
-  WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t) override {
+  WorkspaceArena allocate(BufferTier tier, nint_t bytes, nint_t) override {
     if (bytes == 0)
       return {};
-    auto& storage = tier == WorkspaceTier::Fast ? fast : slow;
+    auto& storage = tier == BufferTier::Fast ? fast : slow;
     std::shared_ptr<void> owner(storage.data(), [](void*) {});
     return {storage.data(), nint_t(storage.size()), std::move(owner)};
   }
@@ -65,11 +65,11 @@ public:
 
 class UnavailableArenaProvider final : public WorkspaceArenaProvider {
 public:
-  [[nodiscard]] nint_t capacity(WorkspaceTier) const noexcept override {
+  [[nodiscard]] nint_t capacity(BufferTier) const noexcept override {
     return 4096;
   }
 
-  WorkspaceArena allocate(WorkspaceTier, nint_t bytes, nint_t) override {
+  WorkspaceArena allocate(BufferTier, nint_t bytes, nint_t) override {
     if (bytes != 0)
       throw WorkspaceArenaUnavailable("unavailable for cache retention");
     return {};
@@ -88,9 +88,9 @@ struct AbiArenaProviderState {
       *result = {sizeof(VecopsWorkspaceArena), 0, nullptr, 0, nullptr};
       return VECOPS_STATUS_OK;
     }
-    const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? WorkspaceTier::Fast : WorkspaceTier::Slow;
+    const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? BufferTier::Fast : BufferTier::Slow;
     auto* owner =
-      new WorkspaceArena(self.heap.allocate(logical_tier, static_cast<nint_t>(bytes), static_cast<nint_t>(alignment)));
+      new WorkspaceArena(self.heap->allocate(logical_tier, static_cast<nint_t>(bytes), static_cast<nint_t>(alignment)));
     *result = {sizeof(VecopsWorkspaceArena), 0, owner->data, static_cast<std::uint64_t>(owner->capacity), owner};
     ++self.allocations;
     return VECOPS_STATUS_OK;
@@ -109,7 +109,7 @@ struct AbiArenaProviderState {
     --static_cast<AbiArenaProviderState*>(context)->references;
   }
 
-  HeapWorkspaceArenaProvider heap;
+  std::shared_ptr<WorkspaceArenaProvider> heap = default_workspace_arena_provider();
   int references = 1;
   int allocations = 0;
   int releases = 0;
@@ -145,13 +145,13 @@ TEST(WorkspaceContextTest, DynamicModeUsesFastArenaAndRewindsScopes) {
   void* first = nullptr;
   {
     auto phase = workspace.serial_scope("phase");
-    auto slot = workspace.request("scratch", {.bytes = 128, .placement = WorkspacePlacementPolicy::FastRequired});
+    auto slot = workspace.request("scratch", {.bytes = 128, .placement = BufferPlacementPolicy::FastRequired});
     first = slot.replica();
     EXPECT_EQ(first, fast.data());
   }
   {
     auto phase = workspace.serial_scope("next");
-    auto slot = workspace.request("scratch", {.bytes = 128, .placement = WorkspacePlacementPolicy::FastRequired});
+    auto slot = workspace.request("scratch", {.bytes = 128, .placement = BufferPlacementPolicy::FastRequired});
     EXPECT_EQ(slot.replica(), first);
   }
 }
@@ -245,8 +245,8 @@ TEST(WorkspaceContextTest, PreferredRequestSpillsWithoutMovingLiveFastData) {
   alignas(64) std::array<std::byte, 64> fast{};
   WorkspaceContext workspace{"kernel", fast.data(), nint_t(fast.size())};
   auto phase = workspace.serial_scope("phase");
-  auto resident = workspace.request("resident", {.bytes = 64, .placement = WorkspacePlacementPolicy::FastRequired});
-  auto spilled = workspace.request("spilled", {.bytes = 128, .placement = WorkspacePlacementPolicy::FastPreferred});
+  auto resident = workspace.request("resident", {.bytes = 64, .placement = BufferPlacementPolicy::FastRequired});
+  auto spilled = workspace.request("spilled", {.bytes = 128, .placement = BufferPlacementPolicy::FastPreferred});
   EXPECT_EQ(resident.replica(), fast.data());
   EXPECT_NE(spilled.replica(), nullptr);
   EXPECT_NE(spilled.replica(), resident.replica());
@@ -282,7 +282,7 @@ TEST(WorkspaceContextTest, SerialUsesColorSequentialWorkerScratchToMaximum) {
 
   const auto logical = tracing.finish_trace();
   ASSERT_EQ(logical.allocations.size(), 2u);
-  const auto placement = place_workspace(logical);
+  const auto placement = place_buffers(logical);
   ASSERT_EQ(placement.entries.size(), 2u);
   EXPECT_EQ(placement.fast_bytes, 384);
   EXPECT_EQ(placement.entries[0].offset, placement.entries[1].offset);
@@ -299,7 +299,7 @@ TEST(WorkspaceContextTest, IndependentWorkerScratchInSameScopeAddsItsPeak) {
 
   const auto logical = tracing.finish_trace();
   ASSERT_EQ(logical.allocations.size(), 2u);
-  const auto placement = place_workspace(logical);
+  const auto placement = place_buffers(logical);
   ASSERT_EQ(placement.entries.size(), 2u);
   EXPECT_EQ(placement.fast_bytes, 640);
   EXPECT_NE(placement.entries[0].offset, placement.entries[1].offset);
@@ -344,20 +344,20 @@ TEST(WorkspaceContextTest, TracePlacementAndReplayShareStableSites) {
   {
     auto phase = tracing.serial_scope("projection");
     auto lane =
-      tracing.request("scratch", {.bytes = 33, .alignment = 16, .domain = WorkspaceDomain::WorkerLocal, .replicas = 4});
+      tracing.request("scratch", {.bytes = 33, .alignment = 16, .domain = BufferDomain::WorkerLocal, .replicas = 4});
     EXPECT_EQ(lane.replica_stride, 64);
   }
   auto logical = tracing.finish_trace();
-  auto placement = place_workspace(logical);
+  auto placement = place_buffers(logical);
   std::vector<std::byte> arena(static_cast<std::size_t>(placement.fast_bytes + 64));
-  BoundWorkspacePlan bound{placement, arena.data(), nint_t(arena.size()), nullptr, 0};
+  BoundBufferPlan bound{placement, arena.data(), nint_t(arena.size()), nullptr, 0};
   ASSERT_TRUE(bound.accepts({31, 47}, {192}));
 
   WorkspaceContext replay{"kernel", bound};
   replay.observe_axis(AxisContract::from(meta::dyn<8, 8, 256>(192), 192));
   auto phase = replay.serial_scope("projection");
   auto lane =
-    replay.request("scratch", {.bytes = 33, .alignment = 16, .domain = WorkspaceDomain::WorkerLocal, .replicas = 4});
+    replay.request("scratch", {.bytes = 33, .alignment = 16, .domain = BufferDomain::WorkerLocal, .replicas = 4});
   EXPECT_EQ(lane.replica_stride, 64);
   EXPECT_EQ(static_cast<std::byte*>(lane.replica(3)) - static_cast<std::byte*>(lane.replica()), 192);
   phase.close();
@@ -482,7 +482,7 @@ TEST(WorkspaceContextTest, ReplayCacheSeparatesAmbientParallelism) {
         const nint_t workers = max_parallelism();
         auto phase = workspace.serial_scope("phase");
         auto slot =
-          workspace.request("scratch", {.bytes = 64, .domain = WorkspaceDomain::WorkerLocal, .replicas = workers});
+          workspace.request("scratch", {.bytes = 64, .domain = BufferDomain::WorkerLocal, .replicas = workers});
         for (nint_t worker = 0; worker < workers; ++worker)
           EXPECT_NE(slot.replica(worker), nullptr);
       });
@@ -502,3 +502,27 @@ TEST(WorkspaceContextTest, ReplayCacheSeparatesAmbientParallelism) {
 #endif
 
 } // namespace
+
+TEST(WorkspaceContextTest, ExportedAbiAllocationRetainsItsAuthorityAfterProviderRetirement) {
+  struct Provider final : WorkspaceArenaProvider {
+    bool* destroyed;
+    explicit Provider(bool& flag):destroyed(&flag) {}
+    ~Provider() override {*destroyed=true;}
+    nint_t capacity(BufferTier) const noexcept override {return 4096;}
+    WorkspaceArena allocate(BufferTier,nint_t bytes,nint_t) override {
+      auto owner=std::shared_ptr<std::byte[]>(new std::byte[bytes]);
+      auto* data=owner.get();
+      return {data,bytes,std::shared_ptr<void>(owner,data)};
+    }
+  };
+  bool destroyed=false;
+  auto provider=std::make_shared<Provider>(destroyed);
+  auto exported=workspace_arena_provider_to_abi(provider);
+  auto consumer=workspace_arena_provider_from_abi(*exported);
+  auto arena=consumer->allocate(BufferTier::Slow,128,64);
+  exported.reset();consumer.reset();provider.reset();
+  EXPECT_FALSE(destroyed);
+  static_cast<std::byte*>(arena.data)[0]=std::byte{42};
+  arena={};
+  EXPECT_TRUE(destroyed);
+}

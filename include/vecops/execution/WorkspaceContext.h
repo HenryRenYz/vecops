@@ -38,7 +38,7 @@
 #include "vecops/Assertion.h"
 #include "vecops/execution/Parallel.h"
 #include "vecops/execution/WorkspaceArena.h"
-#include "vecops/execution/WorkspacePlan.h"
+#include "vecops/execution/BufferPlan.h"
 #include "vecops/execution/WorkspaceTensor.h"
 #include "vecops/kernel/Workspace.h"
 #include "vecops/runtime/CallAbi.h"
@@ -159,13 +159,13 @@ public:
     , recipe_(std::move(recipe))
     , fast_(fast_base, fast_capacity)
     , slow_(slow_base, slow_capacity)
-    , trace_(std::make_unique<WorkspaceTrace>(recipe_, fingerprint)) {
+    , trace_(std::make_unique<BufferTrace>(recipe_, fingerprint)) {
     bind_execution_context(execution_context);
     initialize_root();
   }
 
   /** Replay mode over an already placed and bound plan. */
-  WorkspaceContext(std::string recipe, const BoundWorkspacePlan& replay,
+  WorkspaceContext(std::string recipe, const BoundBufferPlan& replay,
                    const VecopsExecutionContext* execution_context = nullptr)
     : mode_(Mode::Replay)
     , recipe_(std::move(recipe))
@@ -184,11 +184,14 @@ public:
     requested_parallelism_ = 0;
     thread_pool_ = nullptr;
     allocation_observer_ = nullptr;
+    workspace_provider_ = nullptr;
     if (context == nullptr)
       return;
     if (context->struct_size >=
         offsetof(VecopsExecutionContext, requested_threads) + sizeof(context->requested_threads))
       requested_parallelism_ = static_cast<nint_t>(context->requested_threads);
+    if (context->struct_size >= offsetof(VecopsExecutionContext, workspace_provider)+sizeof(context->workspace_provider))
+      workspace_provider_=context->workspace_provider;
     if (context->struct_size >= offsetof(VecopsExecutionContext, thread_pool) + sizeof(context->thread_pool))
       thread_pool_ = context->thread_pool;
     if (context->struct_size >=
@@ -260,9 +263,9 @@ public:
   Scope serial_scope(std::string_view name) {
     VECOPS_ASSERT(!finished_, "cannot enter a finished workspace context");
     VECOPS_ASSERT(!name.empty(), "workspace scope name must not be empty");
-    auto path_hash = workspace_plan_details::hash("/", frames_.back().path_hash);
-    path_hash = workspace_plan_details::hash(name, path_hash);
-    std::optional<WorkspaceTrace::Scope> trace_scope;
+    auto path_hash = buffer_plan_details::hash("/", frames_.back().path_hash);
+    path_hash = buffer_plan_details::hash(name, path_hash);
+    std::optional<BufferTrace::Scope> trace_scope;
     if (trace_ != nullptr)
       trace_scope.emplace(trace_->serial_scope(name));
     frames_.push_back(Frame{path_hash, fast_.mark(), slow_.mark(), owned_.size(), std::move(trace_scope)});
@@ -289,7 +292,7 @@ public:
   }
 
   /** Allocate one stable semantic site in the active lexical scope. */
-  BoundWorkspaceSlot request(std::string_view local_name, WorkspaceAllocationRequest request) {
+  BoundBufferSlot request(std::string_view local_name, BufferAllocationRequest request) {
     return allocate_site(local_name, request, false);
   }
 
@@ -300,10 +303,10 @@ public:
     L stable_layout = std::forward<Layout>(layout);
     const nint_t bytes = workspace_tensor_details::storage_bytes<T>(stable_layout);
     const nint_t alignment = workspace_tensor_details::allocation_alignment<T>(options);
-    const auto slot = request(local_name, WorkspaceAllocationRequest{
+    const auto slot = request(local_name, BufferAllocationRequest{
                                             .bytes = bytes,
                                             .alignment = alignment,
-                                            .domain = WorkspaceDomain::Global,
+                                            .domain = BufferDomain::Global,
                                             .replicas = 1,
                                             .placement = options.placement,
                                             .estimated_traffic_bytes = options.estimated_traffic_bytes,
@@ -390,13 +393,13 @@ public:
    * dynamic mode a spilled block is owned until the context dies, because the
    * prepared object may outlive the construction scope that selected it.
    */
-  BoundWorkspaceSlot bind(std::string_view local_name, WorkspaceAllocationRequest request) {
+  BoundBufferSlot bind(std::string_view local_name, BufferAllocationRequest request) {
     return allocate_site(local_name, request, true);
   }
 
   /** Convenience binding for operators using the default scratch contract. */
-  BoundWorkspaceSlot bind(std::string_view local_name, nint_t bytes) {
-    return bind(local_name, WorkspaceAllocationRequest{.bytes = bytes});
+  BoundBufferSlot bind(std::string_view local_name, nint_t bytes) {
+    return bind(local_name, BufferAllocationRequest{.bytes = bytes});
   }
 
   /** Add one Meta axis contract to a trace before publishing it. */
@@ -421,7 +424,7 @@ public:
   }
 
   /** Finish and take the pointer-free trace. No later request is permitted. */
-  LogicalWorkspacePlan finish_trace() {
+  LogicalBufferPlan finish_trace() {
     VECOPS_ASSERT(trace_ != nullptr, "workspace context is not tracing");
     VECOPS_ASSERT(frames_.size() == 1, "workspace context still has an open scope");
     finished_ = true;
@@ -466,10 +469,10 @@ private:
     const nint_t bytes = workspace_tensor_details::storage_bytes<T>(stable_layout);
     const nint_t alignment = workspace_tensor_details::allocation_alignment<T>(options);
     const auto slot = allocate_site(local_name,
-                                    WorkspaceAllocationRequest{
+                                    BufferAllocationRequest{
                                       .bytes = bytes,
                                       .alignment = alignment,
-                                      .domain = WorkspaceDomain::WorkerLocal,
+                                      .domain = BufferDomain::WorkerLocal,
                                       .replicas = replica_count,
                                       .placement = options.placement,
                                       .estimated_traffic_bytes = options.estimated_traffic_bytes,
@@ -482,10 +485,10 @@ private:
     return ::vecops::tensor::make_tensor(static_cast<T*>(slot.replica()), std::move(worker_layout));
   }
 
-  BoundWorkspaceSlot allocate_site(std::string_view local_name, WorkspaceAllocationRequest request, bool persistent) {
+  BoundBufferSlot allocate_site(std::string_view local_name, BufferAllocationRequest request, bool persistent) {
     VECOPS_ASSERT(!finished_, "cannot allocate from a finished workspace context");
     validate_request(local_name, request);
-    const auto site = workspace_site_id(frames_.back().path_hash, local_name, request.domain);
+    const auto site = buffer_site_id(frames_.back().path_hash, local_name, request.domain);
     if (trace_ != nullptr) {
       const auto traced = trace_->request(local_name, request);
       VECOPS_ASSERT(traced == site, "workspace trace and execution site IDs differ");
@@ -497,42 +500,44 @@ private:
     }
 
     const nint_t allocation_alignment =
-      request.domain == WorkspaceDomain::WorkerLocal ? std::max(request.alignment, nint_t{64}) : request.alignment;
-    const nint_t stride = request.domain == WorkspaceDomain::WorkerLocal
-                            ? workspace_plan_details::checked_align_up(request.bytes, allocation_alignment)
-                            : workspace_plan_details::checked_align_up(request.bytes, request.alignment);
-    const nint_t total = request.domain == WorkspaceDomain::WorkerLocal
-                           ? workspace_plan_details::checked_mul(stride, request.replicas)
+      request.domain == BufferDomain::WorkerLocal ? std::max(request.alignment, nint_t{64}) : request.alignment;
+    const nint_t stride = request.domain == BufferDomain::WorkerLocal
+                            ? buffer_plan_details::checked_align_up(request.bytes, allocation_alignment)
+                            : buffer_plan_details::checked_align_up(request.bytes, request.alignment);
+    const nint_t total = request.domain == BufferDomain::WorkerLocal
+                           ? buffer_plan_details::checked_mul(stride, request.replicas)
                            : stride;
     if (total == 0)
       return {nullptr, request.bytes, stride, request.replicas};
 
-    if (request.placement != WorkspacePlacementPolicy::SlowAllowed && fast_.can_allocate(total, allocation_alignment)) {
+    if (request.placement != BufferPlacementPolicy::SlowAllowed && fast_.can_allocate(total, allocation_alignment)) {
       auto* data = static_cast<std::byte*>(fast_.allocate(total, allocation_alignment));
       notify_allocation(local_name, request, 0);
       return {data, request.bytes, stride, request.replicas};
     }
-    VECOPS_ASSERT(request.placement != WorkspacePlacementPolicy::FastRequired,
+    VECOPS_ASSERT(request.placement != BufferPlacementPolicy::FastRequired,
                   "required-fast workspace request does not fit in the fast arena");
     if (slow_.can_allocate(total, allocation_alignment)) {
       auto* data = static_cast<std::byte*>(slow_.allocate(total, allocation_alignment));
       notify_allocation(local_name, request, 1);
       return {data, request.bytes, stride, request.replicas};
     }
-    const nint_t heap_alignment = std::max(allocation_alignment, static_cast<nint_t>(alignof(std::max_align_t)));
+    const nint_t owned_alignment = std::max(allocation_alignment, static_cast<nint_t>(alignof(std::max_align_t)));
     VECOPS_ASSERT(static_cast<std::uint64_t>(total) <=
                     static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()),
                   "workspace request exceeds the host address space");
-    void* data =
-      ::operator new(static_cast<std::size_t>(total), std::align_val_t(static_cast<std::size_t>(heap_alignment)));
+    auto provider=workspace_provider_ ? workspace_arena_provider_from_abi(*workspace_provider_) :
+      default_workspace_arena_provider();
+    auto allocation = provider->allocate(BufferTier::Slow, total, owned_alignment);
+    auto* data = allocation.data;
     auto& owner = persistent ? persistent_owned_ : owned_;
-    owner.emplace_back(data, heap_alignment);
+    owner.emplace_back(std::move(allocation));
     notify_allocation(local_name, request, 2);
     return {static_cast<std::byte*>(data), request.bytes, stride, request.replicas};
   }
 
   /** Report one dynamic allocation to the attached observer, if any. */
-  void notify_allocation(std::string_view local_name, const WorkspaceAllocationRequest& request,
+  void notify_allocation(std::string_view local_name, const BufferAllocationRequest& request,
                          std::int32_t tier) const noexcept {
     if (allocation_observer_ == nullptr || allocation_observer_->on_workspace_allocation == nullptr)
       return;
@@ -556,24 +561,12 @@ private:
   }
 
   struct OwnedBlock {
-    OwnedBlock(void* pointer, nint_t alignment)
-      : pointer(pointer)
-      , alignment(alignment) {
-    }
+    explicit OwnedBlock(WorkspaceArena allocation) : allocation(std::move(allocation)) {}
     OwnedBlock(const OwnedBlock&) = delete;
     OwnedBlock& operator=(const OwnedBlock&) = delete;
-    OwnedBlock(OwnedBlock&& other) noexcept
-      : pointer(std::exchange(other.pointer, nullptr))
-      , alignment(other.alignment) {
-    }
+    OwnedBlock(OwnedBlock&&) noexcept = default;
     OwnedBlock& operator=(OwnedBlock&&) = delete;
-    ~OwnedBlock() {
-      if (pointer != nullptr) {
-        ::operator delete(pointer, std::align_val_t(static_cast<std::size_t>(alignment)));
-      }
-    }
-    void* pointer;
-    nint_t alignment;
+    WorkspaceArena allocation;
   };
 
   struct Frame {
@@ -581,23 +574,23 @@ private:
     kernel::WorkspaceView::Mark fast_mark;
     kernel::WorkspaceView::Mark slow_mark;
     std::size_t owned_mark;
-    std::optional<WorkspaceTrace::Scope> trace_scope;
+    std::optional<BufferTrace::Scope> trace_scope;
   };
 
   void initialize_root() {
     VECOPS_ASSERT(!recipe_.empty(), "workspace recipe name must not be empty");
     VECOPS_ASSERT(mode_ != Mode::Replay || replay_ != nullptr, "workspace replay plan is null");
-    frames_.push_back(Frame{workspace_plan_details::hash(recipe_), fast_.mark(), slow_.mark(), 0, std::nullopt});
+    frames_.push_back(Frame{buffer_plan_details::hash(recipe_), fast_.mark(), slow_.mark(), 0, std::nullopt});
   }
 
-  static void validate_request(std::string_view local_name, const WorkspaceAllocationRequest& request) {
+  static void validate_request(std::string_view local_name, const BufferAllocationRequest& request) {
     VECOPS_ASSERT(!local_name.empty(), "workspace allocation name must not be empty");
     VECOPS_ASSERT(request.bytes >= 0, "workspace allocation size must be non-negative");
     VECOPS_ASSERT(request.alignment > 0 && (request.alignment & (request.alignment - 1)) == 0,
                   "workspace allocation alignment must be a positive power of two");
     VECOPS_ASSERT(request.replicas > 0, "workspace replica count must be positive");
     VECOPS_ASSERT(request.estimated_traffic_bytes >= 0.0, "workspace estimated traffic must be non-negative");
-    if (request.domain == WorkspaceDomain::Global) {
+    if (request.domain == BufferDomain::Global) {
       VECOPS_ASSERT(request.replicas == 1, "global workspace request cannot have replicas");
     }
   }
@@ -618,8 +611,8 @@ private:
   std::string recipe_;
   kernel::WorkspaceView fast_;
   kernel::WorkspaceView slow_;
-  const BoundWorkspacePlan* replay_ = nullptr;
-  std::unique_ptr<WorkspaceTrace> trace_;
+  const BoundBufferPlan* replay_ = nullptr;
+  std::unique_ptr<BufferTrace> trace_;
   std::vector<OwnedBlock> owned_;
   std::vector<OwnedBlock> persistent_owned_;
   std::vector<Frame> frames_;
@@ -628,6 +621,7 @@ private:
   const VecopsThreadPoolV1* thread_pool_ = nullptr;
   nint_t requested_parallelism_ = 0;
   const VecopsAllocationObserverV1* allocation_observer_ = nullptr;
+  const VecopsWorkspaceArenaProvider* workspace_provider_ = nullptr;
 };
 
 /**
@@ -667,7 +661,7 @@ public:
     // Worker-local allocation counts commonly depend on the ambient OpenMP
     // team size. Tensor metadata alone therefore cannot identify a safe
     // replay plan when a framework changes its thread count between calls.
-    fingerprint.decision = workspace_plan_details::mix(
+    fingerprint.decision = buffer_plan_details::mix(
       fingerprint.decision, static_cast<std::uint64_t>(effective_parallelism(execution_context)));
     AxisCollector observed;
     setup(observed);
@@ -690,21 +684,24 @@ public:
       return;
     }
 
-    WorkspaceArena trace_fast;
-    WorkspaceArena trace_slow;
-    if (arena_provider_->shares_arenas_between_plans()) {
-      trace_fast = arena_provider_->allocate(WorkspaceTier::Fast, arena_provider_->capacity(WorkspaceTier::Fast),
-                                             vec::DEFAULT_ALIGNMENT);
-      trace_slow = arena_provider_->allocate(WorkspaceTier::Slow, arena_provider_->capacity(WorkspaceTier::Slow),
-                                             vec::DEFAULT_ALIGNMENT);
-    }
-    WorkspaceContext tracing{trace_workspace,     std::string(recipe), fingerprint,         trace_fast.data,
-                             trace_fast.capacity, trace_slow.data,     trace_slow.capacity, execution_context};
-    setup(tracing);
-    invoke(tracing);
-    auto logical = tracing.finish_trace();
-    VECOPS_ASSERT(logical.fingerprint == fingerprint && same_axes(logical.axes, observed),
-                  "workspace trace observations differ from the replay cache key");
+    LogicalBufferPlan logical;
+    {
+      WorkspaceArena trace_fast;
+      WorkspaceArena trace_slow;
+      if (arena_provider_->shares_arenas_between_plans()) {
+        trace_fast = arena_provider_->allocate(BufferTier::Fast, arena_provider_->capacity(BufferTier::Fast),
+                                               vec::DEFAULT_ALIGNMENT);
+        trace_slow = arena_provider_->allocate(BufferTier::Slow, arena_provider_->capacity(BufferTier::Slow),
+                                               vec::DEFAULT_ALIGNMENT);
+      }
+      WorkspaceContext tracing{trace_workspace,     std::string(recipe), fingerprint,         trace_fast.data,
+                               trace_fast.capacity, trace_slow.data,     trace_slow.capacity, execution_context};
+      setup(tracing);
+      invoke(tracing);
+      logical = tracing.finish_trace();
+      VECOPS_ASSERT(logical.fingerprint == fingerprint && same_axes(logical.axes, observed),
+                    "workspace trace observations differ from the replay cache key");
+    } // Release trace payloads before admitting the reusable cache arenas.
     // Cache construction is an optimization performed after the real kernel
     // has completed. Failure must not turn a successful, output-mutating call
     // into an error. A later call may trace again and retry.
@@ -763,7 +760,7 @@ private:
   };
 
   struct Entry {
-    Entry(std::string_view recipe, LogicalWorkspacePlan logical,
+    Entry(std::string_view recipe, LogicalBufferPlan logical,
           const std::shared_ptr<WorkspaceArenaProvider>& arena_provider)
       : fingerprint(logical.fingerprint)
       , axes(logical.axes)
@@ -783,7 +780,7 @@ private:
     Entry(Entry&&) = delete;
     Entry& operator=(Entry&&) = delete;
 
-    static nint_t tier_alignment(const WorkspacePlacement& placement, WorkspaceTier tier) {
+    static nint_t tier_alignment(const BufferPlacement& placement, BufferTier tier) {
       nint_t result = vec::DEFAULT_ALIGNMENT;
       for (const auto& entry : placement.entries) {
         if (entry.tier == tier)
@@ -792,25 +789,25 @@ private:
       return result;
     }
 
-    void fallback_to_slow(const LogicalWorkspacePlan& logical,
+    void fallback_to_slow(const LogicalBufferPlan& logical,
                           const std::shared_ptr<WorkspaceArenaProvider>& arena_provider) {
       const bool requires_fast =
         std::any_of(logical.allocations.begin(), logical.allocations.end(), [](const auto& allocation) {
-          return allocation.request.placement == WorkspacePlacementPolicy::FastRequired;
+          return allocation.request.placement == BufferPlacementPolicy::FastRequired;
         });
       if (requires_fast)
         throw;
-      placement = place_workspace(logical, 0, arena_provider->capacity(WorkspaceTier::Slow));
+      placement = place_buffers(logical, 0, arena_provider->capacity(BufferTier::Slow));
       fast = {};
       slow = {};
       reserve(arena_provider);
     }
 
     void reserve(const std::shared_ptr<WorkspaceArenaProvider>& arena_provider) {
-      fast = arena_provider->allocate(WorkspaceTier::Fast, placement.fast_bytes,
-                                      tier_alignment(placement, WorkspaceTier::Fast));
-      slow = arena_provider->allocate(WorkspaceTier::Slow, placement.slow_bytes,
-                                      tier_alignment(placement, WorkspaceTier::Slow));
+      fast = arena_provider->allocate(BufferTier::Fast, placement.fast_bytes,
+                                      tier_alignment(placement, BufferTier::Fast));
+      slow = arena_provider->allocate(BufferTier::Slow, placement.slow_bytes,
+                                      tier_alignment(placement, BufferTier::Slow));
       bound.emplace(placement, fast.data, fast.capacity, slow.data, slow.capacity);
     }
 
@@ -820,10 +817,10 @@ private:
 
     DecisionFingerprint fingerprint;
     std::vector<AxisContract> axes;
-    WorkspacePlacement placement;
+    BufferPlacement placement;
     WorkspaceArena fast;
     WorkspaceArena slow;
-    std::optional<BoundWorkspacePlan> bound;
+    std::optional<BoundBufferPlan> bound;
     std::unique_ptr<WorkspaceContext> replay;
   };
 

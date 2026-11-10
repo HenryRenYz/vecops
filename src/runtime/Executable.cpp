@@ -359,6 +359,14 @@ PreparedKernelLease::PreparedKernelLease(std::shared_ptr<PreparedKernel> kernel)
     auto* record = static_cast<Record*>(p);
     if (record->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete record;
   };
+  if (abi.activate_buffers) abi.activate_buffers = [](void* p, const VecopsKernelBufferBindingV1* b, size_t n,
+                                                      const VecopsBufferOwnerV1* o, VecopsError* e) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi();
+    return inner.activate_buffers(inner.context,b,n,o,e);
+  };
+  if (abi.suspend_buffers) abi.suspend_buffers = [](void* p, VecopsError* e) {
+    const auto& inner = static_cast<Record*>(p)->kernel->abi(); return inner.suspend_buffers(inner.context,e);
+  };
   abi.retain = [](void* p) { static_cast<Record*>(p)->refs.fetch_add(1, std::memory_order_relaxed); };
 }
 PreparedKernelLease::~PreparedKernelLease() { record_->exported.destroy(record_); }

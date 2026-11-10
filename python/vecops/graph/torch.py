@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import contextlib
 import math
-import traceback
+import sys
 import weakref
-from typing import Any, Iterable
+from typing import Any
 
 from .capture import GraphCapture
 from .ir import AccessKind, TensorKind, TensorMetadata
@@ -111,6 +111,10 @@ def register_tensor(
   # when an executable capture's TorchFunctionMode has become active again.
   # Keep dispatch semantics intact; suppress only Python function overrides.
   import torch
+  if (existing := capture._object_entry(tensor)) is not None:
+    return capture.tensor(tensor, capture.tensors[existing].metadata, name=name,
+        kind=kind, persistent=persistent, read_only=read_only, external=external,
+        annotations=annotations)
   with torch._C.DisableTorchFunction():
     metadata = tensor_metadata(tensor)
     storage_identity = _storage_identity(tensor)
@@ -145,18 +149,26 @@ def _schema_argument_values(
 
 
 def _source_location() -> dict[str, Any] | None:
-  """Return the nearest non-Torch/non-capture Python frame for an allocation."""
-  for frame in reversed(traceback.extract_stack(limit=48)[:-1]):
-    normalized = frame.filename.replace("\\", "/")
-    if (
-      "/site-packages/torch/" in normalized
-      or "/vecops/graph/" in normalized
-      or "/vecops/planner/" in normalized
-    ):
-      continue
-    if normalized.endswith("/vecops/_precompile.py"):
-      continue
-    return {"file": frame.filename, "line": frame.lineno, "function": frame.name}
+  """Find the nearest caller without extracting/formatting the entire stack.
+
+  Match the previous 48-frame bound and exclusions. Never retain live frame
+  objects in the graph: only immutable filename/line/function provenance.
+  """
+  frame = sys._getframe(1)
+  try:
+    for _ in range(47):
+      if frame is None:
+        break
+      filename = frame.f_code.co_filename
+      normalized = filename.replace("\\", "/")
+      if ("/site-packages/torch/" not in normalized
+          and "/vecops/graph/" not in normalized
+          and "/vecops/planner/" not in normalized
+          and not normalized.endswith("/vecops/_precompile.py")):
+        return {"file": filename, "line": frame.f_lineno, "function": frame.f_code.co_name}
+      frame = frame.f_back
+  finally:
+    del frame
   return None
 
 
@@ -184,6 +196,18 @@ class TorchDispatchRecorder:
 
     class _Mode(TorchDispatchMode):
       def __torch_dispatch__(self, function, types, args=(), kwargs=None):
+        # A regional instruction view can install this recorder above an
+        # existing router while sharing the same semantic capture. Lower
+        # recorders must not duplicate that outer operation/decomposition.
+        if getattr(capture, '_torch_recording_dispatch_depth', 0):
+          return function(*args, **(kwargs or {}))
+        capture._torch_recording_dispatch_depth = 1
+        try:
+          return self._record(function, types, args, kwargs)
+        finally:
+          capture._torch_recording_dispatch_depth = 0
+
+      def _record(self, function, types, args=(), kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         schema = getattr(function, "_schema", None)
         input_entries: list[tuple[Any, AccessKind, str | None]] = []

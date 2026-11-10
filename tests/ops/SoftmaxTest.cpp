@@ -17,7 +17,7 @@
 #include "MatmulTestArch.h"
 #include "vecops/execution/WorkspaceContext.h"
 #if defined(HAS_AMX_BF16) || defined(HAS_SME)
-#include "vecops/execution/WorkspacePlan.h"
+#include "vecops/execution/BufferPlan.h"
 #include "vecops/ops/MatmulPack.h"
 #endif
 #include "vecops/tensor/DataAccess.h"
@@ -666,12 +666,12 @@ run_prepared_softmax_pack_trace_replay(
       nullptr, 0, &execution_context};
   auto traced =
       run_prepared_softmax_pack_once<Parallelism>(tracing, logits);
-  auto placement = execution::place_workspace(tracing.finish_trace());
+  auto placement = execution::place_buffers(tracing.finish_trace());
   kernel::Workspace arena(placement.fast_bytes);
   auto arena_view = arena.view();
   void* arena_base = arena_view.allocate(
       placement.fast_bytes, vec::DEFAULT_ALIGNMENT);
-  execution::BoundWorkspacePlan bound{
+  execution::BoundBufferPlan bound{
       placement, arena_base, placement.fast_bytes, nullptr, 0};
   execution::WorkspaceContext replay{
       std::string{Recipe}, bound, &execution_context};
@@ -792,12 +792,12 @@ TEST(SoftmaxPreparedTest, SupportsRankTwoBfloat16InPlaceWithMaskedColumns) {
       tensor::unbind(tensor::input<float32_t>(tensor)),
       tensor::unbind(tensor::output<float32_t>(tensor)));
   trace_operation(execution::TaskContext<Parallelism>{0}, tensor, tensor);
-  auto placement = execution::place_workspace(tracing.finish_trace());
+  auto placement = execution::place_buffers(tracing.finish_trace());
   kernel::Workspace arena(placement.fast_bytes);
   auto arena_view = arena.view();
   void* arena_base = arena_view.allocate(
       placement.fast_bytes, vec::DEFAULT_ALIGNMENT);
-  execution::BoundWorkspacePlan bound{
+  execution::BoundBufferPlan bound{
       placement, arena_base, placement.fast_bytes, nullptr, 0};
   execution::WorkspaceContext replay{
       "prepared_softmax_rank2_in_place", bound};

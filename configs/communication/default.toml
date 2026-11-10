@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
+# SPDX-License-Identifier: MIT
+# Portable communication policy. Hardware/rank grants come from MemoryRuntime.
+schema = "communication-policy/0.1"
+
+[communication]
+algorithm = "auto"
+initial_capacity_bytes = 1048576 # 1 MiB per source
+relay_threshold_bytes = 1048576
+chunk_bytes = 262144 # 256 KiB
+copy_schedule = "auto"
+early_snapshot = false
+minimum_gain = 0.05
+sync_warmup = 3
+sync_rounds = 7
+# stage_us = 3.0 # optional measured synchronization cost override
+# calibration = "routes.json" # exact workload/profile context is checked

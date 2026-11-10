@@ -710,6 +710,9 @@ public:
     static_assert(Parallelism > 0,
                   "prepared attention parallelism must be positive");
     using ResourceRequirements = typename ScaledDotProductAttention::ResourceRequirements;
+    // Packed operands, scores and online-softmax accumulators are initialized
+    // within each call; no operand cache survives this prepared invocation.
+    static constexpr bool transient_workspace = true;
 
     VECOPS_INLINE PatternPrepared(
         Config config, QPattern q, KPattern k, VPattern v,

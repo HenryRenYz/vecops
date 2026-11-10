@@ -212,8 +212,8 @@ def test_compile_for_accepts_storage_free_tensor_meta(tmp_path: Path) -> None:
   )
 
 
-def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_path: Path) -> None:
-  """The process-local C bridge must preserve or enrich the complete call."""
+def test_framework_bridge_forwards_explicit_workspace_and_execution_context(tmp_path: Path) -> None:
+  """The process-local C bridge must preserve explicit workspace and caller context."""
 
   class TensorView(ctypes.Structure):
     _fields_ = [
@@ -313,12 +313,8 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
     ),
   )
 
-  direct_memory = vecops.memory.System()
-  with direct_memory.workspace_session(fast_capacity=4096, slow_capacity=4096):
-    kernel(input, output)
-    assert sum(item["managed_bytes"] for item in direct_memory.stats()) == 8192
+  kernel(input, output)
   np.testing.assert_array_equal(output, input * 2)
-  assert sum(item["managed_bytes"] for item in direct_memory.stats()) == 0
   output.fill(0)
 
   sizes = (ctypes.c_int64 * 2)(2, 4)
@@ -412,19 +408,6 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
   np.testing.assert_array_equal(output, input * 3 + 1)
   assert ctypes.c_float.from_address(workspace_address).value == 25.0
 
-  memory_system = vecops.memory.System()
-  output.fill(0)
-  with memory_system.workspace_session(fast_capacity=4096, slow_capacity=4096):
-    result = bridge(
-      kernel.native._handle,
-      ctypes.byref(call),
-      len(specialization),
-      specialization,
-      ctypes.byref(error),
-    )
-  assert result == 0, message.value.decode()
-  assert sum(item["managed_bytes"] for item in memory_system.stats()) == 0
-
   output.fill(0)
   managed_context = ExecutionContext(
     ctypes.sizeof(ExecutionContext),
@@ -442,18 +425,15 @@ def test_framework_bridge_forwards_workspace_context_and_memory_provider(tmp_pat
     0,
     ctypes.pointer(managed_context),
   )
-  with memory_system.workspace_session(fast_capacity=4096, slow_capacity=4096):
-    result = bridge(
-      kernel.native._handle,
-      ctypes.byref(managed_call),
-      len(specialization),
-      specialization,
-      ctypes.byref(error),
-    )
-    assert sum(item["managed_bytes"] for item in memory_system.stats()) == 8192
+  result = bridge(
+    kernel.native._handle,
+    ctypes.byref(managed_call),
+    len(specialization),
+    specialization,
+    ctypes.byref(error),
+  )
   assert result == 0, message.value.decode()
   np.testing.assert_array_equal(output, input * 3 + 1)
-  assert sum(item["managed_bytes"] for item in memory_system.stats()) == 0
 
 
 def test_cache_only_does_not_discover_tools_or_create_directories(tmp_path: Path) -> None:
@@ -598,7 +578,7 @@ def test_cache_only_torch_bridge_loads_existing_artifact_without_writes(monkeypa
     source,
     ("torch-identity",),
     "signature",
-    ("torch-bridge-v7", "compiler-attestation", (), None, None, "aten"),
+    ("torch-bridge-v8", "compiler-attestation", (), None, None, "aten"),
   )
   (directory / f"{output_name}.identity").write_text(repr(manifest_identity))
   before = sorted((path.relative_to(tmp_path), path.stat().st_mtime_ns) for path in tmp_path.rglob("*"))

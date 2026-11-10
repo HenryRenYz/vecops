@@ -299,6 +299,35 @@ VECOPS_ALWAYS_INLINE void gather_transpose(
     Destination& destination,
     tensor::Coord<std::remove_cvref_t<Destination>::Rank> dst_origin);
 
+/** A logical transpose whose source column and destination row axes are both
+ * contiguous is a physical line copy. Do not gather along the other axes or
+ * shuffle registers. DataAccess still performs any element conversion.
+ */
+template <int SrcRow, int SrcCol, int DstRow, int DstCol,
+          typename M, typename N, typename Source, typename Destination>
+VECOPS_ALWAYS_INLINE void contiguous_line_transpose(
+    M m, N n, Source& source,
+    tensor::Coord<std::remove_cvref_t<Source>::Rank> src_origin,
+    Destination& destination,
+    tensor::Coord<std::remove_cvref_t<Destination>::Rank> dst_origin) {
+  using Tag = vec::ScalableTag<ComputeOf<Source>, 0>;
+  const nint_t lanes = vec::size(Tag{});
+  for (nint_t row = 0; row < static_cast<nint_t>(m); ++row) {
+    for (nint_t col = 0; col < static_cast<nint_t>(n); col += lanes) {
+      const nint_t active = std::min(lanes, static_cast<nint_t>(n)-col);
+      auto src = src_origin;
+      src[SrcRow] += row;
+      src[SrcCol] += col;
+      auto dst = dst_origin;
+      dst[DstRow] += col;
+      dst[DstCol] += row;
+      const auto value = source.load(Tag{}, src, tensor::axis<SrcCol>,
+                                    vec::opt::first(active), vec::opt::zero);
+      destination.store(Tag{}, dst, tensor::axis<DstRow>, value, vec::opt::first(active));
+    }
+  }
+}
+
 template <nint_t Rows, nint_t Columns,
           typename M, typename N, typename Source, typename Destination,
           int SrcRow, int SrcCol, int DstRow, int DstCol>

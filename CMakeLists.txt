@@ -71,25 +71,6 @@ include(cmake/VecopsKernelOptimizations.cmake)
 # -------------------------------- Dependencies --------------------------------
 include(FetchContent)
 
-set(VECOPS_MEMORY_HAVE_HWLOC OFF)
-if(NOT VECOPS_BUILD_MEMORY STREQUAL "OFF")
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(HWLOC QUIET IMPORTED_TARGET hwloc>=2.7)
-    endif()
-    if(TARGET PkgConfig::HWLOC)
-        set(VECOPS_MEMORY_HAVE_HWLOC ON)
-        message(STATUS "Building vecops::memory with hwloc ${HWLOC_VERSION}")
-    elseif(VECOPS_BUILD_MEMORY STREQUAL "ON")
-        message(FATAL_ERROR
-            "VECOPS_BUILD_MEMORY=ON requires hwloc >= 2.7 development files")
-    else()
-        message(STATUS
-            "Building vecops::memory with the portable single-target backend; "
-            "hwloc >= 2.7 was not found")
-    endif()
-endif()
-
 if(VECOPS_ENABLE_OPENMP)
     find_package(OpenMP REQUIRED COMPONENTS CXX)
 endif()
@@ -162,10 +143,14 @@ if(VECOPS_BUILD_PYTHON)
         DESTINATION vecops/distributed RENAME _copy.cpp COMPONENT python)
     install(FILES src/comm/CopyDispatch.cpp
         DESTINATION vecops/distributed RENAME _copy_dispatch.cpp COMPONENT python)
-    install(DIRECTORY configs/platforms/
-        DESTINATION vecops/_sdk/share/vecops/platforms COMPONENT python)
+    install(DIRECTORY configs/communication/
+        DESTINATION vecops/_sdk/share/vecops/communication COMPONENT python)
     if(TARGET vecops_comm)
         install(FILES "$<TARGET_FILE:vecops_comm>"
+            DESTINATION vecops/_sdk/lib COMPONENT python)
+    endif()
+    if(TARGET vecops_memory)
+        install(FILES "$<TARGET_FILE:vecops_memory>"
             DESTINATION vecops/_sdk/lib COMPONENT python)
     endif()
     install(DIRECTORY LICENSES/
@@ -203,8 +188,8 @@ if(VECOPS_BUILD_BENCHMARKS)
 endif()
 
 # ------------------------------- Installation --------------------------------
-install(DIRECTORY configs/platforms/
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/vecops/platforms")
+install(DIRECTORY configs/communication/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vecops/communication")
 install(FILES LICENSE THIRD_PARTY_NOTICES.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/vecops")
 install(DIRECTORY LICENSES/

@@ -184,7 +184,11 @@ def test_native_config_and_identity_probe_use_frozen_absolute_include_roots(tmp_
   monkeypatch.setattr(compiler_module, "_sdk", lambda: (tmp_path, vecops._C.SdkLayout.package))
   monkeypatch.setattr(compiler_module, "_tool", lambda *_args: Path(sys.executable))
   config = compiler._native_config()
-  assert dict(config.toolchain.environment) == compiler.environment
+  native_environment = dict(config.toolchain.environment)
+  launchers = {f"CMAKE_{language}_{phase}_LAUNCHER"
+               for language in ("C", "CXX") for phase in ("COMPILER", "LINKER")}
+  assert {key: value for key, value in native_environment.items() if key not in launchers} == compiler.environment
+  assert set(native_environment) - set(compiler.environment) <= launchers
   assert str(project.resolve()) in compiler.environment["CPATH"].split(os.pathsep)
   assert str(include.resolve()) in compiler.environment["CPATH"].split(os.pathsep)
   assert f"-I{(project / 'relative').resolve()}" in compiler.environment["CXXFLAGS"]

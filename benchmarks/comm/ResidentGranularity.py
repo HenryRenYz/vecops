@@ -3,7 +3,7 @@
 """Compare real resident collective payloads under rotated chunk policies.
 
 Run with torchrun, one process per CPU list. All input/output and shared pages
-use the platform's memory pool. Excludes capture, allocation and first touch.
+use the resource runtime's selected memory pool. Excludes capture, allocation and first touch.
 This measures collective replay, not whole-model speedup or pure load/store.
 """
 import argparse
@@ -40,18 +40,12 @@ def main():
   import torch.distributed as dist
   import vecops.distributed as vd
   from vecops import memory
-  from vecops.distributed.config import Platform,current_cpu_node
   from vecops.graph import GraphCapture
   torch.set_num_threads(len(cpus));vd.register_backend()
   dist.init_process_group('gloo');world=dist.get_world_size()
-  platform=Platform.load(args.config);_,node=platform.resolve(current_cpu_node())
-  owners=[];system=memory.System()
-  def empty(shape):
-    count=1
-    for n in shape:count*=n
-    owner=system.allocate(count,os_numa_id=node if node>=0 else None,large_pages=not args.base_pages,fallback=None)
-    owners.append(owner)
-    return torch.frombuffer(owner,dtype=torch.uint8,count=count).reshape(shape)
+  from Memory import pool
+  factory,pool_id,runtime=pool(base_pages=args.base_pages)
+  def empty(shape):return factory.empty(tuple(shape),dtype=torch.uint8)
   tensors=[]
   for size,run in zip(args.bytes,args.row_bytes):
     if size%world:p.error('--bytes must be divisible by world size for AllToAll')
@@ -65,7 +59,7 @@ def main():
                     ('all_to_all',size,list(send.unbind()),list(target.unbind()),target)])
   programs={};groups=[]
   for chunk in args.chunks_kib:
-    path=output.parent/f'platform-chunk-{chunk}.toml'
+    path=output.parent/f'communication-chunk-{chunk}.toml'
     if rank==0:
       import re
       text=Path(args.config).read_text()

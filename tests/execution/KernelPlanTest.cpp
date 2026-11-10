@@ -276,13 +276,13 @@ public:
   };
   std::shared_ptr<Storage> storage = std::make_shared<Storage>();
   unsigned allocations = 0;
-  nint_t capacity(WorkspaceTier) const noexcept override {
+  nint_t capacity(BufferTier) const noexcept override {
     return 8192;
   }
   bool shares_arenas_between_plans() const noexcept override {
     return true;
   }
-  WorkspaceArena allocate(WorkspaceTier, nint_t bytes, nint_t) override {
+  WorkspaceArena allocate(BufferTier, nint_t bytes, nint_t) override {
     if (!bytes)
       return {};
     ++allocations;
@@ -316,19 +316,19 @@ TEST(KernelPlanTest, SharedProviderReceivesOneArenaAndDistinctBuffersDoNotOverla
 }
 
 class FailingFastArena final : public WorkspaceArenaProvider {
-  HeapWorkspaceArenaProvider heap;
+  std::shared_ptr<WorkspaceArenaProvider> heap = default_workspace_arena_provider();
 
 public:
   unsigned slow_allocations = 0;
-  nint_t capacity(WorkspaceTier) const noexcept override {
+  nint_t capacity(BufferTier) const noexcept override {
     return 8192;
   }
-  WorkspaceArena allocate(WorkspaceTier tier, nint_t bytes, nint_t alignment) override {
-    if (tier == WorkspaceTier::Fast && bytes)
+  WorkspaceArena allocate(BufferTier tier, nint_t bytes, nint_t alignment) override {
+    if (tier == BufferTier::Fast && bytes)
       throw WorkspaceArenaUnavailable("test unavailable fast tier");
-    if (tier == WorkspaceTier::Slow && bytes)
+    if (tier == BufferTier::Slow && bytes)
       ++slow_allocations;
-    return heap.allocate(tier, bytes, alignment);
+    return heap->allocate(tier, bytes, alignment);
   }
 };
 TEST(KernelPlanTest, PreferredFastStorageFallsBackButRequiredFastFails) {
@@ -341,7 +341,7 @@ TEST(KernelPlanTest, PreferredFastStorageFallsBackButRequiredFastFails) {
   EXPECT_NO_THROW(instance.replay());
   EXPECT_EQ(provider->slow_allocations, 1u);
   KernelBuilder required(4);
-  required.tensor<int>("required", make_shape(meta::cint<4>), {.placement = WorkspacePlacementPolicy::FastRequired});
+  required.tensor<int>("required", make_shape(meta::cint<4>), {.placement = BufferPlacementPolicy::FastRequired});
   auto plan = required.finish();
   EXPECT_THROW((KernelInstance{plan, &pool.abi, provider}), WorkspaceArenaUnavailable);
 }
@@ -566,6 +566,38 @@ TEST(KernelPlanMemoryTest, AuditedOperationScratchCanReuseGapsBetweenCalls) {
   }
 }
 
+TEST(KernelPlanMemoryTest, TensorCallTemporaryReinitializesActiveTailsAfterStorageReuse) {
+  CountingPool pool;
+  KernelBuilder builder(4);
+  std::array<int,17> output{};
+  auto out=builder.input(make_tensor(output.data(),make_shape(meta::cint<17>)));
+  auto scratch=builder.worker_tensor<int,4>("tile",make_shape(meta::cint<5>));
+  auto poison=builder.worker_tensor<int,4>("other",make_shape(meta::cint<5>));
+  auto record=[&] {
+    builder.grid<4>("tile",0,17,5,kernel_bind(call_temporary(scratch),out),
+      [](auto task,auto work,auto scratch,auto out) {
+        auto local=task.local(scratch);
+        for(auto i=work.begin();i<work.end();++i) local(i-work.begin())=int(i)+10;
+        for(auto i=work.begin();i<work.end();++i) out(i)+=local(i-work.begin());
+      });
+  };
+  record();
+  builder.grid<4>("poison",0,4,1,kernel_bind(call_temporary(poison)),
+    [](auto task,auto,auto poison) {
+      auto local=task.local(poison);
+      for(int i=0;i<5;++i) local(i)=-999;
+    });
+  record();
+  auto plan=builder.finish();
+  ASSERT_EQ(plan.buffer_plan().allocations[0].lifetimes.size(),2u);
+  EXPECT_EQ(place_buffers(plan.buffer_plan()).fast_bytes,256);
+  KernelInstance instance(plan,&pool.abi);instance.set(out,output.data());
+  for(int repeat=0;repeat<3;++repeat) {
+    instance.replay();
+    for(int i=0;i<17;++i) EXPECT_EQ(output[i],2*(repeat+1)*(i+10));
+  }
+}
+
 TEST(KernelPlanMemoryTest, OpaqueParentStatePinsTransientChildWorkspace) {
   KernelBuilder builder(1);
   auto a=builder.prepare_operation<1>("a",TemporaryOperation{});
@@ -578,3 +610,14 @@ TEST(KernelPlanMemoryTest, OpaqueParentStatePinsTransientChildWorkspace) {
 }
 
 } // namespace
+
+TEST(KernelPlanMemoryTest, RecordedGridRejectsUndeclaredOwningWorkspaceOnEveryReplay) {
+  KernelBuilder builder(1);
+  builder.grid<1>("undeclared",0,1,1,kernel_bind(),[](auto,auto) {
+    kernel::Workspace unplanned(64);
+    (void)unplanned;
+  });
+  KernelInstance instance(builder.finish());
+  for(int repeat=0;repeat<2;++repeat)
+    EXPECT_THROW(instance.replay(),WorkspaceArenaUnavailable);
+}

@@ -1,47 +1,15 @@
 # SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 # SPDX-License-Identifier: MIT
-"""Offline HBM/DDR planning over framework-neutral execution graphs."""
-
+"""Topology-independent tensor/workspace placement and offset compilation."""
+from .compiler import (BufferRequirement, BufferBinding, InitializationCopy, ProgramCall,
+    CompiledMemoryProgram, GraphMemoryCompiler, PreparedProgram, requirements_from_graph,
+    native_workspace_requirements, activate_native_buffers, reserve_recipe_latest, reserve_budget_latest, call_time_domains, ScopedNativeLease)
+from .core import graph_digest,plan_memory,storage_traffic
+from .validate import validate_plan,plan_summary
 from .audit import audit_plan
-from .core import PlannerConfig, graph_digest, load_or_plan, plan_memory
-from .ir import (
-  ActionKind,
-  MachineProfile,
-  MemoryPlan,
-  MemoryTier,
-  PLAN_FORMAT_VERSION,
-  PlanAction,
-  StorageClass,
-  StoragePlacement,
-)
-from .validate import plan_summary, validate_plan
-from .runtime import PlanSession, current_session, empty, empty_like, contiguous, executable_factories
-from .profile import profile_from_system
-
-__all__ = [
-  "ActionKind",
-  "MachineProfile",
-  "MemoryPlan",
-  "MemoryTier",
-  "PLAN_FORMAT_VERSION",
-  "PlanAction",
-  "PlanSession",
-  "PlannerConfig",
-  "StorageClass",
-  "StoragePlacement",
-  "audit_plan",
-  "graph_digest",
-  "load_or_plan",
-  "current_session",
-  "empty",
-  "empty_like",
-  "contiguous",
-  "executable_factories",
-  "plan_memory",
-  "plan_summary",
-  "profile_from_system",
-  "validate_plan",
-]
-
-from .buffers import BufferRequirement, plan_buffers
-__all__ += ["BufferRequirement", "plan_buffers"]
+from .profile import resource_snapshot
+__all__=['BufferRequirement','BufferBinding','InitializationCopy','ProgramCall','CompiledMemoryProgram',
+  'GraphMemoryCompiler','PreparedProgram','requirements_from_graph','native_workspace_requirements',
+  'activate_native_buffers','reserve_recipe_latest','reserve_budget_latest','call_time_domains','ScopedNativeLease',
+  'graph_digest','plan_memory','storage_traffic',
+  'validate_plan','plan_summary','audit_plan','resource_snapshot']

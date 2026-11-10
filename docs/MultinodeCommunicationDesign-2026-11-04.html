@@ -24,7 +24,7 @@
 <p>MPI/UCX/PMIx 自建线程全部计入代理 CPU 预算并核实每个 TID 的实际 affinity；不能只绑最外层线程。节点 launcher 在 MPI/verbs 初始化前启动本机计算进程，或使用独立调度 step；避免初始化 MPI/RDMA 后 fork 一个持续执行的子进程。启动器给非 MPI 计算子进程提供 RANK/LOCAL_RANK/LOCAL_WORLD_SIZE/WORLD_SIZE 与 agent endpoint，并移除继承的 MPI/PMIx rank 环境，防止误占代理的 MPI 身份。代理进程隔离也避免 Torch 内已有不同 MPI ABI 的库冲突。原生插件在构建/加载时记录实际 libmpi 路径、版本与符号，不假定任意同名 libmpi ABI 兼容。</p>
 <p>“两个通信核吃满”成立的前提是 NIC DMA 与减少软件复制。两个核不一定能同时承担所有计算 rank 的完整张量复制和网络推进；私有张量大规模 staging 若超过这两个核的实测复制能力，必须暴露回退成本，或显式允许更多通信核，不能悄悄借用计算核。</p>
 <h2>5. 必须与统一内存规划连接</h2>
-<p>独立代理不能解引用另一进程的 malloc/private anonymous Tensor。新增可导出的 BufferMemorySession region：memfd/shm backing、region ID、offset/span、generation、读写权限及 NUMA placement。通信张量在 prepare 阶段直接分配在可导出池；代理映射同一物理页，双方 VA 可以不同。通过本机控制 socket/SCM_RIGHTS 交换 fd，网络线上只传数据/协议 ID，绝不传本地 VA/fd。</p>
+<p>独立代理不能解引用另一进程的 malloc/private anonymous Tensor。使用 MemoryRuntime 的可导出共享 backing：memfd/shm backing、region ID、offset/span、generation、读写权限及 NUMA placement。通信张量在 prepare 阶段直接分配在可导出池；代理映射同一物理页，双方 VA 可以不同。通过本机控制 socket/SCM_RIGHTS 交换 fd，网络线上只传数据/协议 ID，绝不传本地 VA/fd。</p>
 <p>生产 kernel 直接写计划的共享 outbox；代理从其自身映射地址向 MPI 提交。接收缓冲区也是计算方可见的共享池，接收后无需先复制出代理进程。固定页面和 MPI/UCX 注册缓存预热均在准备阶段完成，持有 region 到所有网络请求和借用 reader 完成；热路径不做 shm_open/mmap/munmap 或重新注册搜索。MPI 内部是否还发生 registration/staging 需要计数与 profiling 证明。</p>
 <p>普通外部私有 Tensor、未知生命周期、未证明可导出的 stride/别名、无法注册的 HBM 路径都保留显式 staging。大非连续块优先让原生生产算子直接写 wire layout；其次用 vec pack/unpack，最后才考虑 derived datatype，并核实其内部有没有隐式 packing。HBM 被暴露为 CPU NUMA 内存不代表已经证明该 NIC 的注册和直达性能，必须测 DDR/HBM 与跨 die NIC 路径。</p>
 <h2>6. 集体算法与布局</h2>

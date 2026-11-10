@@ -89,41 +89,24 @@ def test_real_collectives(tmp_path, size):
   mp.spawn(_worker, args=(size, str(tmp_path/'store')), nprocs=size, join=True)
 
 
-def test_platform_validation(tmp_path):
-  from vecops.distributed import Platform
-  path = tmp_path/'platform.toml'
-  path.write_text('''[topology]
-schema_version=1
-[[topology.domains]]
-id="s0"
-kind="socket"
-parent="host0"
-[[topology.domains]]
-id="d0"
-kind="die"
-parent="s0"
-numa_nodes=[0]
-[[memory.pools]]
-id="h0"
-kind="hbm"
-owner="numa:0"
-os_nodes=[16]
-''')
-  assert Platform.load(path).resolve(0) == ('d0', 16)
-  path.write_text(path.read_text().replace('parent="s0"', 'parent="d0"'))
-  with pytest.raises(ValueError, match='cyclic'):
-    Platform.load(path)
+def test_policy_excludes_hardware_topology(tmp_path):
+  from vecops.distributed import Policy
+  path=tmp_path/'policy.toml'
+  path.write_text('schema="communication-policy/0.1"\n[communication]\nalgorithm="auto"\n')
+  assert Policy.load(path).communication['algorithm']=='auto'
+  path.write_text('[topology]\nroot="arbitrary"\n')
+  with pytest.raises(ValueError,match='hardware belongs to MemoryRuntime'):Policy.load(path)
 
 
 @pytest.mark.parametrize('policy,match', [
   ('chunk_bytes=0', 'positive integer'),
   ('algorithm="borrowed"', 'unknown communication algorithm'),
-  ('direction="push"', 'direction overrides are unsupported'),
+  ('direction="push"', 'unsupported communication policy fields'),
   ('unknown_switch=true', 'unsupported communication policy fields'),
 ])
 def test_policy_rejects_unimplemented_or_invalid_options(tmp_path, policy, match):
-  from vecops.distributed import Platform
+  from vecops.distributed import Policy
   path=tmp_path/'invalid.toml'
   path.write_text('[communication]\n'+policy+'\n')
   with pytest.raises(ValueError, match=match):
-    Platform.load(path)
+    Policy.load(path)

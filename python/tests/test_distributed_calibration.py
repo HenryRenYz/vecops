@@ -16,13 +16,13 @@ def _calibration(rank,size,store,directory,case):
   import torch
   import torch.distributed as dist
   import vecops.distributed as vd
+  from vecops.distributed.tuning import write_profile,profile_context
   torch.set_num_threads(1);vd.register_backend()
   root=Path(directory)
-  config=root/f'platform-{rank}.toml'
+  config=root/f'policy-{rank}.toml'
   text='''[communication]
 algorithm="flat"
 relay_threshold_bytes=0
-levels=[{domain="numa",mode="share"}]
 '''
   if case=='enablement' and rank==0 or case=='missing':
     text+='calibration="absent.json"\n'
@@ -39,15 +39,19 @@ levels=[{domain="numa",mode="share"}]
     signatures=[None]*size
     dist.all_gather_object(signatures,signature)
     assert all(x==signature for x in signatures)
+    # Registry lookup survives a fresh wrapper for the same native lifetime.
+    from types import SimpleNamespace
+    wrapped=SimpleNamespace(_routing_id=native._routing_id)
+    assert profile_context(wrapped)==profile_context(native)
     value=torch.tensor([float(rank)])
     outputs=[torch.empty_like(value) for _ in range(size)]
     key=native.plan_key('all_gather',outputs,[value])
     profile=root/'routes.json'
-    if rank==0:
-      profile.write_text(json.dumps({'schema_version':1,'context':signature,
-          'cases':[{'key':key,'selected':[1]}]}))
+    evidence=write_profile(profile,[{'key':key,'selected':[1]}])
+    assert evidence['schema_version']==2 and evidence['runtime_context']==signature
+    assert json.loads(native.tuning_context)==signature
     dist.barrier();dist.destroy_process_group()
-    # Same platform identity, now referencing its calibration. One member's
+    # Same policy identity, now referencing its calibration. One member's
     # changed tuning tag invalidates the group-wide workload context for ALL.
     config.write_text(text+'calibration="routes.json"\n')
     if rank==1:os.environ['VECOPS_COMM_TUNING_TAG']='frequency-changed'

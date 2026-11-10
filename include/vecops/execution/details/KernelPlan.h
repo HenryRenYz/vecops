@@ -181,7 +181,7 @@ auto KernelBuilder::worker_tensor(std::string_view name, Layout layout) {
   static_assert(Replicas > 0);
   static_assert((sizeof(T) & (sizeof(T) - 1)) == 0);
   const auto bytes = workspace_tensor_details::storage_bytes<T>(layout);
-  const auto aligned = workspace_plan_details::checked_align_up(bytes, std::max<nint_t>(64, alignof(T)));
+  const auto aligned = buffer_plan_details::checked_align_up(bytes, std::max<nint_t>(64, alignof(T)));
   auto replicated = workspace_tensor_details::prepend_worker_layout(meta::cint<Replicas>, layout, aligned / sizeof(T));
   auto result = tensor<T>(name, std::move(replicated));
   data_->slots.back().replicas = Replicas;

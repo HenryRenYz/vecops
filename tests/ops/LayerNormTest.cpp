@@ -765,6 +765,35 @@ TEST(LayerNormWorkspaceTest, ContiguousSpecsNeedNoWorkspace) {
   EXPECT_EQ(spec_bytes, 0);
 }
 
+TEST(LayerNormWorkspaceTest, MaterializesTransposedPlanesBeforeSlicingRows) {
+  constexpr nint_t Batch = 2, Rows = 37, Channels = 65, Leading = 43;
+  std::vector<vecops::bfloat16_t> source(Batch * Channels * Leading);
+  std::vector<vecops::bfloat16_t> dense(Batch * Rows * Channels);
+  std::vector<vecops::bfloat16_t> actual(dense.size()), expected(dense.size());
+  for (nint_t b = 0; b < Batch; ++b)
+    for (nint_t r = 0; r < Rows; ++r)
+      for (nint_t c = 0; c < Channels; ++c) {
+        auto value = vecops::bfloat16_t(float((b * 17 + r * 13 + c * 7) % 97 - 48) * 0.017f);
+        source[b * Channels * Leading + c * Leading + r] = value;
+        dense[(b * Rows + r) * Channels + c] = value;
+      }
+  auto shape = make_shape(cint<Batch>, cint<Rows>, cint<Channels>);
+  auto strided = make_tensor(source.data(), make_layout(shape,
+      make_strides(cint<Channels * Leading>, cint<1>, cint<Leading>)));
+  auto x = make_tensor(dense.data(), shape);
+  auto y = make_tensor(actual.data(), shape);
+  auto reference = make_tensor(expected.data(), shape);
+  auto op = layer_norm();
+  const nint_t bytes = op.required_workspace(input<float32_t>(strided), output<float32_t>(y));
+  EXPECT_GE(bytes, nint_t(dense.size() * sizeof(vecops::bfloat16_t)));
+  Workspace storage(bytes);
+  auto workspace = storage.view();
+  op(workspace, input<float32_t>(strided), output<float32_t>(y));
+  op(input<float32_t>(x), output<float32_t>(reference));
+  for (std::size_t i = 0; i < dense.size(); ++i)
+    EXPECT_EQ(float(actual[i]), float(expected[i])) << i;
+}
+
 TEST(LayerNormWorkspaceTest, HandlesStridedInputAndSecondLastContiguousOutput) {
   using InLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<17>, Const<2>>>;
   using OutLayout = Layout<Shape<Const<2>, Const<7>>, Strides<Const<1>, Const<2>>>;
@@ -1090,10 +1119,10 @@ TEST(LayerNormPreparedPatternTest,
   ASSERT_EQ(plan.allocations.size(), 1u);
   const auto& allocation = plan.allocations.front();
   EXPECT_EQ(allocation.request.domain,
-            execution::WorkspaceDomain::WorkerLocal);
+            execution::BufferDomain::WorkerLocal);
   EXPECT_EQ(allocation.request.replicas, lanes);
   EXPECT_EQ(allocation.request.bytes, expected_scratch);
-  const auto placement = execution::place_workspace(plan);
+  const auto placement = execution::place_buffers(plan);
   ASSERT_EQ(placement.entries.size(), 1u);
   EXPECT_GE(placement.entries.front().replica_stride, expected_scratch);
   EXPECT_EQ(placement.entries.front().replica_stride % 64, 0);

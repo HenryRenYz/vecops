@@ -28,7 +28,9 @@ logs and are returned with the ordered per-task `BuildResult` values.
 When `VECOPS_BUILD_CPU_LIST` is set to a Linux CPU-list expression, configure
 and build subprocess trees run through `taskset --cpu-list`. This restores the
 full intended build mask when an OpenMP-bound caller's master thread is pinned
-to one CPU; it does not alter the caller or model-worker affinity.
+to one CPU; it does not alter the caller or model-worker affinity. During an
+active `BuildSession`, the launcher additionally distributes compiler/linker
+slots over that explicit list as described below.
 
 `compile_batch()` validates the common SDK/toolchain contract, imports Vecops
 once, adds every task fragment with `add_subdirectory`, and runs one configure
@@ -181,6 +183,14 @@ checked by the provider. Generated Torch bridges use the same staged/validated
 publication discipline. Prepared executables remain immutable snapshots; their
 execution path does not re-hash source. Cache-only readers consume existing
 attestations without running native tools or creating a build tree.
+
+Callback lookup reuses digests of immutable Python code objects through an
+identity-keyed weak cache. Source location remains part of the digest, even
+when Python considers two code objects equal. Callable defaults, captured state,
+referenced functions and source file identities are still read on each lookup;
+replacing `__code__` changes identity immediately. Nonstandard mutable constants
+or metadata in a code object disable digest reuse. No registry or complete callable identity
+is persistently cached by this optimization.
 
 `compile_commands.json` is retained for read-only adapter, specialization and
 object inspection. Source/IR getters never invoke a build to synthesize missing
@@ -388,3 +398,121 @@ slot, existing view offset, and the layout's Const/Dynamic types; neither
 materializes a tensor nor converts its dtype. The caller must ensure that the
 new layout fits the underlying storage. View offsets derived from runtime
 scalars belong inside a recorded callback, after resolving those scalars.
+
+## Preparation sessions
+
+`vecops.BuildSession(parallelism=16)` shares an explicit compilation budget
+across source-kernel, graph pointwise, bridge and output-transfer preparation.
+The budget is independent of execution threads. Outside a session the default
+uses `VECOPS_BUILD_CPU_LIST` before the calling thread's affinity; close-pinned
+OpenMP workers must not reduce the compiler to one job. Explicit compiler job
+counts may be smaller than the session budget, but cannot exceed it. On Linux, ready kernel/bridge frontiers may overlap. A standalone CMake
+compiler/linker launcher and the graph-executor build share an interprocess
+slot pool, so multiple Ninja job counts do not multiply actual compiler jobs.
+The executor can be submitted while the model trace is collected. Real capture,
+initialization and binding retain their dependencies. `concurrent=False` selects
+serial frontiers. At most one independent session is active per process; worker
+contexts explicitly inherit that session, with synchronized content snapshots.
+Cached compiler objects use a durable per-process launcher route so they can be
+reused across sessions and outside sessions. The launcher queues commands only;
+it does not participate in artifact identity or alter compiler flags.
+
+On Linux, an active session with `VECOPS_BUILD_CPU_LIST` explicitly set binds
+each compiler/linker child to one CPU from that list: CPUs are sorted and slot
+`s` selects `cpus[s % len(cpus)]`. The list accepts comma-separated CPU numbers
+and inclusive ranges. Every listed CPU must already belong to the launcher's
+current OS affinity grant; invalid, empty or ungranted lists fail before the
+compiler starts. The launcher never expands that grant. Without an explicit
+list, or outside an active session, the child retains the inherited mask.
+`VECOPS_PRECOMPILE_CPU_LIST` is forwarded as the explicit build list by the
+session's compiler environment.
+
+Domain-isolated CPUs may be excluded from scheduler load balancing. A wide
+`taskset` mask alone then permits CPUs without distributing forked compilers
+among them; use this explicit slot binding for a reserved isolated CPU pool.
+One shared budget and identical lists assign simultaneous distinct slots to
+distinct CPUs while the budget does not exceed the list length. Larger budgets
+intentionally reuse CPUs modulo the list length. Separate sessions, including
+different model ranks, have separate slot pools: identical lists may collide
+across those pools. Use disjoint per-rank lists or a genuinely shared budget to
+obtain job-wide exclusive assignment. Slot binding controls compiler process
+placement, not the number of threads an individual compiler creates.
+
+Each command receipt keeps the original `cpus`/`allowed_cpus`, the validated
+`requested_cpus`, `assigned_cpu`, the launcher's `bound_cpus`, and a child
+affinity observation immediately after spawn. `child_affinity_verified` records
+whether that observation matches; a child which already exited can leave it
+unknown. This is a launch-time observation, not a guarantee that a custom
+compiler wrapper will never change its own affinity.
+
+Request ordering uses cached per-source historical costs (`build-costs-v1.json`),
+falling back to source size. An explicit `VECOPS_BUILD_COST_PROFILE` selects a
+read-only history instead, to start expensive sources first. Costs are scheduling
+hints, never validity evidence. Session reports retain observed source costs,
+per-command queue/start/end timestamps, per-leaf validation times and graph
+capture versus lowering/binding stages. `VECOPS_PREPARE_PROFILE=<directory>`
+additionally records cProfile data for metadata discovery and lowering/binding,
+never inside executable capture's data-escape guard. Keep those diagnostic runs
+separate from unprofiled latency samples. Failed sibling frontiers are joined
+before their session is released.
+
+The session reuses content identities and include-closure structure while
+planning. Include search candidates and resolved paths are checkpoint leaves:
+new local quoted headers, earlier include-root shadows and symlink retargeting
+invalidate a cached closure without inventorying unrelated generated outputs in
+the source directory. It re-reads bytes and
+directory inventories before/after actual cold builds and at the preparation seal.
+Changing source, SDK, toolchain, Torch headers/libraries or adding shadowing
+headers rejects the preparation session. The underlying `_watch` primitives
+remain uncached and existing provider locks/validators remain in force. Inputs
+must remain stable during preparation; this is not an atomic filesystem view
+or an mtime-based persistent cache. Large library files are hashed as independent
+SHA256 streams with up to four readers on the build CPU mask; small header
+inventories remain serial. Every checkpoint still reads fresh bytes and returns
+the same identity as a serial scan. `report_path` writes frontier timings,
+request counts, budget and snapshot hit/validation costs.
+
+Source-tree SDKs are built once into a toolchain/content-addressed package under
+`sdk-packages-v1`, locked across processes and atomically published only after
+installation and file hashing. Generated kernel projects consume exported
+CMake targets and do not rebuild the runtime. Kernel-specific flags are kept
+out of the SDK key; inherited CMake environment flags and the SDK/toolchain
+identity remain in it. Installed file inventories and hashes are verified.
+`BuildSession(reuse_sdk=False)` retains source-tree consumption. Package SDK
+installations and cache-only kernel providers retain their existing behavior.
+
+### Shared compilation work and graph preparation diagnostics
+
+Typed Torch bridges include `ATen/core/Tensor.h` rather than the ATen umbrella.
+The C++ typed functors, registration ABI, per-registration operator state and
+thread-pool adapters are unchanged; avoiding unrelated ATen operator declarations
+reduces repeated frontend work without adding dispatcher overhead. This is not
+cross-operator code fusion or a relaxation of content guards.
+
+Executable graph capture records immutable filename/line/function provenance by
+walking at most 47 caller frames, matching the former bounded stack extraction.
+It does not format source lines or retain live frames. Registering an already
+known Tensor preserves the existing metadata contract and updates annotations
+and ownership flags without recomputing metadata that `GraphCapture.tensor`
+would discard. Storage alias checks, operator restrictions, data-escape guards,
+RNG preservation and initializer/steady-state bindings remain active. Reports
+separate `graph-capture` and `graph-lower-bind`; captures are not C++ rebuilds.
+
+### Planning graph source kernels before real capture
+
+`graph.discover_pointwise_requests` observes an explicitly selected region
+during the existing FakeTensor request trace. Discovery and real replay share
+`_pointwise_plan.select_kernel`, including dtype/layout/broadcast guards and
+short reductions. The requests enter the same collector as model native
+kernels, so compatible kernels share one CMake/Ninja batch. Successful bulk
+preparation marks only artifact readiness; real capture still creates fresh
+buffers, ownership proofs, initializer cache bindings and steady programs.
+AF3 names the complete Evoformer and denoiser boundaries and predeclares the
+one-element grid-seed offset kernel. Unsupported operations retain ATen.
+
+This path is disabled for real-tensor discovery and semantic memory-graph
+capture: retaining real intermediates would inflate memory and inserting
+shadow artifact requests must not alter the memory graph. A selector miss at
+real capture retains the ordinary preparation path and shared build budget.
+The build-session report records discovered kernel families and request count;
+Ninja logs remain the authority for actual object builds and deduplication.

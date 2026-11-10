@@ -25,7 +25,6 @@ from .ir import (
   TensorValue,
 )
 
-
 _active_capture: contextvars.ContextVar[GraphCapture | None] = contextvars.ContextVar(
   "vecops_graph_capture", default=None
 )
@@ -117,34 +116,59 @@ class GraphCapture:
     different shapes, layouts or non-Tensor arguments. Existing manual and
     precompile captures remain metadata-only and do not retain activations.
     """
+    from .._build_session import build_frontier
     from ._replay import capture_torch
-    return capture_torch(self, function, args, kwargs,
-                         preserve_rng_state=preserve_rng_state)
+    with build_frontier('graph-capture', validate=False, name=self.name):
+      return capture_torch(self, function, args, kwargs,
+                           preserve_rng_state=preserve_rng_state)
 
-  def compile_torch(self, *, memory_plan=None, system=None, domain=None,
-                    large_pages: bool = True, native_operators=None,
+  def capture_torch_metadata(self, function, *args, **kwargs):
+    """Record an executable with active FakeTensorMode, without CPU execution.
+
+    Call ``bind_metadata`` with real storage before ``compile_torch``. Binding
+    allocates no values by execution; input-dependent initialization belongs
+    to the first real replay. Unsupported data escapes fail during tracing.
+    """
+    from ._metadata import capture_metadata
+    from .._build_session import build_frontier
+    with build_frontier('graph-metadata-capture', validate=False, name=self.name):
+      return capture_metadata(self, function, args, kwargs)
+
+  def prepare_torch(self,*,native_operators=None,borrow_readonly_state=False,
+                    native_pointwise=False,borrow_outputs=False,native_donation=False):
+    """Optimize graph storage/communication effects before assigning addresses.
+
+    The returned plan exposes final memory_requirements, framework_requirements
+    and compile(). No physical storage or virtual address reservation is made.
+    """
+    from ._replay import prepare_torch
+    return prepare_torch(self,native_operators=native_operators,
+        borrow_readonly_state=borrow_readonly_state,native_pointwise=native_pointwise,
+        borrow_outputs=borrow_outputs,native_donation=native_donation)
+
+  def memory_requirements(self,*,allowed_pools=(),consumers=(),owned_outputs=False):
+    """Describe a default optimized plan; use prepare_torch for explicit policy."""
+    return self.prepare_torch(borrow_outputs=owned_outputs).memory_requirements(
+        allowed_pools=allowed_pools,consumers=consumers)
+
+  def compile_torch(self, *, memory_program=None, runtime=None, view=None, memory_call=None,
+                    native_operators=None,
                     borrow_readonly_state: bool = False, native_pointwise: bool = False,
-                    scratch_allocator=None, borrow_outputs: bool = False, native_donation: bool = False):
+                    borrow_outputs: bool = False, native_donation: bool = False):
     """Lower this capture to a guarded, synchronous C++ CPU interpreter.
 
     Call after ``capture_torch``. Unsupported operators/registrations fail
     explicitly, never falling back to a Python loop. ``native_operators`` maps
     qualified custom operator names to strong C++ registration/module owners;
     materialized vecops Torch registrations are discovered automatically.
-    Optional memory plans must describe this exact graph and select internal
-    nonescaping factory allocations. Other fast placements are rejected;
-    ordinary functional ATen results keep using the native allocator and their
-    unapplied slow placements are reported on the executable. By default,
-    borrowed planner arenas are isolated. ``borrow_readonly_state=True`` may
-    retain verified, dedicated, already-bound immutable module-state ranges;
-    their contents must remain unchanged for this executable's lifetime.
-    ``native_pointwise=True`` lowers supported floating ATen intermediates to
-    recordable SIMD grids and owns their nonescaping scratch buffers. Escaping
-    functional outputs retain their ordinary allocation/alias semantics.
-    ``scratch_allocator(bytes)`` may provide a preallocated CPU uint8 arena.
-    It runs only at compile time and must return enough contiguous storage.
-    Sharing an arena across executables requires externally serialized calls;
-    only nonescaping temporaries are placed there, never outputs or state.
+    ``memory_program`` accepts a compiled or prepared resource program. Its
+    integer storage bindings select runtime-owned factory buffers; other ATen
+    functional outputs retain their framework allocation contract and are
+    reported as unplanned. ``runtime`` and ``view`` select the same resource
+    authority used by model state and native operator workspace.
+    ``native_pointwise=True`` lowers supported floating intermediates to SIMD
+    grids whose buffers are compiled through that authority. Serialized graphs
+    share transient backing by receiving one model-level prepared program.
     ``borrow_outputs=True`` also preallocates supported escaping factories and
     pointwise outputs in a separate private arena. Those returned tensors may
     be overwritten on the next call; clone values that must outlive a replay.
@@ -155,12 +179,14 @@ class GraphCapture:
     aliases and storage owned by other planners cannot be donated. This cold
     optimization is opt-in and does not change eager operation schemas.
     """
+    from .._build_session import build_frontier, profile_phase
     from ._replay import compile_torch
-    return compile_torch(self, memory_plan=memory_plan, system=system, domain=domain,
-                         large_pages=large_pages, native_operators=native_operators,
-                         borrow_readonly_state=borrow_readonly_state,
-                         native_pointwise=native_pointwise, scratch_allocator=scratch_allocator,
-                         borrow_outputs=borrow_outputs, native_donation=native_donation)
+    with profile_phase('lower-bind', self.name), build_frontier('graph-lower-bind', validate=False, name=self.name):
+      return compile_torch(self, memory_program=memory_program, runtime=runtime, view=view, memory_call=memory_call,
+                           native_operators=native_operators,
+                           borrow_readonly_state=borrow_readonly_state,
+                           native_pointwise=native_pointwise,
+                           borrow_outputs=borrow_outputs, native_donation=native_donation)
 
   def _next_event_id(self) -> tuple[str, int]:
     self._event_counter += 1
@@ -440,7 +466,12 @@ class GraphCapture:
       for tensor_id, access, _argument in normalized_inputs
       if access.writes
     }
-    versions_before = dict(self._storage_versions)
+    # Read every input version before any write. Aliased/duplicate inputs
+    # share a single increment, including reads of a written storage.
+    versions_before = {
+      self.tensors[tensor_id].storage_id: self._storage_versions[self.tensors[tensor_id].storage_id]
+      for tensor_id, _access, _argument in normalized_inputs
+    }
     for storage_id in written_storages:
       self._storage_versions[storage_id] += 1
     uses = [
@@ -477,12 +508,6 @@ class GraphCapture:
         event.uses.append(TensorUse(tensor_id, access, "return", version, version))
     return event
 
-  def _replay_session(self):
-    # Metadata/precompile capture never changes a runtime session. Executable
-    # capture observes a real invocation inside the existing planner context.
-    tape = getattr(self, "_torch_replay_tape", None)
-    return None if tape is None else tape.session_owner
-
   @contextlib.contextmanager
   def region(
     self,
@@ -492,9 +517,6 @@ class GraphCapture:
     attributes: dict[str, Any] | None = None,
   ):
     input_ids = [self.tensor_id(value) for value in inputs if self._object_entry(value) is not None]
-    session = self._replay_session()
-    if session is not None:
-      session.enter_scope(name)
     enter = self._append_event(
       "region_enter",
       name,
@@ -507,8 +529,6 @@ class GraphCapture:
       yield state
     finally:
       self._scope.pop()
-      if session is not None:
-        session.leave_scope()
       output_ids = [
         self.tensor_id(value)
         for value in state.get("outputs", ())
@@ -545,9 +565,7 @@ class GraphCapture:
       attributes=dict(attributes or {}),
     )
     self.loops.append(loop)
-    session = self._replay_session()
-    runtime = None if session is None else session.declare_loop(name, trip_count)
-    return LoopHandle(self, loop, runtime)
+    return LoopHandle(self, loop)
 
   def record_marker(
     self, kind: str, name: str, *, attributes: dict[str, Any] | None = None
@@ -555,9 +573,6 @@ class GraphCapture:
     return self._append_event(kind, name, attributes=attributes)
 
   def enter_scope(self, name: str, *, kind: str = "scope") -> None:
-    session = self._replay_session()
-    if session is not None:
-      session.enter_scope(name)
     self._append_event(f"{kind}_enter", name)
     self._scope.append(name)
 
@@ -565,9 +580,6 @@ class GraphCapture:
     if not self._scope:
       raise RuntimeError("cannot leave an empty graph scope stack")
     name = self._scope.pop()
-    session = self._replay_session()
-    if session is not None:
-      session.leave_scope()
     self._append_event(f"{kind}_exit", name)
 
   def finish(self) -> ExecutionGraph:
@@ -694,14 +706,7 @@ def declare_loop(
 ) -> LoopHandle:
   capture = current_capture()
   if capture is None:
-    try:
-      from vecops.planner.runtime import current_session
-
-      session = current_session()
-    except ImportError:
-      session = None
-    runtime = None if session is None else session.declare_loop(name, trip_count)
-    return LoopHandle(None, None, runtime)
+    return LoopHandle(None,None)
   return capture.declare_loop(name, trip_count, attributes=attributes)
 
 
@@ -710,14 +715,6 @@ def enter_scope(name: str, *, kind: str = "scope") -> None:
   if capture is not None:
     capture.enter_scope(str(name), kind=kind)
     return
-  try:
-    from vecops.planner.runtime import current_session
-
-    session = current_session()
-  except ImportError:
-    session = None
-  if session is not None:
-    session.enter_scope(str(name))
 
 
 def leave_scope(*, kind: str = "scope") -> None:
@@ -725,14 +722,6 @@ def leave_scope(*, kind: str = "scope") -> None:
   if capture is not None:
     capture.leave_scope(kind=kind)
     return
-  try:
-    from vecops.planner.runtime import current_session
-
-    session = current_session()
-  except ImportError:
-    session = None
-  if session is not None:
-    session.leave_scope()
 
 
 def mark_alias(alias: Any, base: Any, *, kind: str = "explicit") -> None:
@@ -788,25 +777,7 @@ def wrap_region(
         result = function(*args, **kwargs)
         state["outputs"] = _tensor_leaves(result, capture)
         return result
-    # Match captured factory keys only when replay is active. Retained and
-    # escaping aliases are excluded by the planner; merely dropping a lexical
-    # region would silently route a different allocation into its parent scope.
-    try:
-      from vecops.planner.runtime import current_session
-
-      session = current_session()
-    except ImportError:
-      session = None
-    if session is None or (
-        not session.enable_factory_replay
-        and os.environ.get("VECOPS_MIRROR_REGION_SCOPE") != "1"
-    ):
-      return function(*args, **kwargs)
-    session.enter_scope(region_name)
-    try:
-      return function(*args, **kwargs)
-    finally:
-      session.leave_scope()
+    return function(*args, **kwargs)
 
   return wrapped
 

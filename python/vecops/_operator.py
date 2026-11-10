@@ -6,11 +6,16 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from . import _C
 from ._compiler import Compiler
 from ._dtype import DType, normalize_dtype
 from ._schema import KernelDef, TensorDef, TensorMeta
+
+# Only Python declarations can attest a transferable recipe. Raw expert-level
+# C++ Operators remain valid, but are prepared by their originating process.
+_declarations = WeakValueDictionary()
 
 
 class Operator:
@@ -67,6 +72,10 @@ class Operator:
     source_path, include_dirs, selected = self.source, include_roots(self.compiler), self.compiler
 
     def validate_inputs():
+      from ._build_session import current_build_session
+      session = current_build_session()
+      if session is not None:
+        session.validate_publication()
       # The operator owns an immutable VL/SVL snapshot and compile definitions.
       # A batch may contain several such snapshots, and can build on a thread
       # with another current length. Validate content/policy, not that worker's
@@ -112,6 +121,11 @@ class Operator:
       source_identity,
       validate_inputs,
     )
+    self._build_identity = build_identity
+    self._source_identity = source_identity
+    self._recipe_id = recipe_id
+    self._dependencies = tuple(dependencies)
+    _declarations[self._native._handle] = self
 
   @property
   def native(self) -> _C.Operator:
@@ -136,6 +150,7 @@ class Operator:
       args,
       specializations,
       name=self.kernel_def.name,
+      source=str(self.source),
     ):
       outputs = tuple(
         argument

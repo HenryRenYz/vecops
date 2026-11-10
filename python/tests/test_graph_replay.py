@@ -212,31 +212,39 @@ def test_overlap_component_also_guards_relative_displacements():
     replay(t(0), t(16), t(24))
 
 
-class _Owner(bytearray):
-  pass
+def _resource_runtime():
+  from vecops.memory import native as m
+  def obj(name,**fields):
+    value=getattr(m,name)()
+    for key,item in fields.items():setattr(value,key,item)
+    return value
+  resources=obj('ResourceGraph',agents=[obj('Agent',id='executor',capabilities=['host_load_store'],address_space='host')],
+      pools=[obj('MemoryPool',id='uma',capacity_bytes=1<<20,address_space='host',granularity_bytes=4096,
+                 page_sizes_bytes=[4096],capacity_group='capacity')],
+      capacity_groups=[obj('CapacityGroup',id='capacity',capacity_bytes=1<<20)],
+      access=[obj('AccessConnection',id='access',rule='custom',agent='executor',pool='uma',
+                  access=[m.AccessMode.read,m.AccessMode.write],mapping=m.MappingMode.direct)])
+  resources.domains=[obj('AllocationDomain',id='eager',rule='arbitrary',members=['uma'])]
+  discovery=obj('LinuxDiscovery',graph=resources,
+      scope=obj('Scope',executable_agents=['executor'],allocatable_pools=['uma'],accessible_pools=['uma'],execution_slots={'executor':1}),
+      pool_bindings=[obj('LinuxPoolBinding',pool='uma',numa_nodes=[])],pool_available_bytes={'uma':1<<20})
+  return m.make_linux_runtime(discovery,obj('LinuxRuntimeOptions',participant='test'))
 
 
-class _System:
-  def __init__(self):self.allocations=[]
-  def current_cpu_domain(self):return 0
-  def allocate(self, size, **kwargs):
-    owner=_Owner(size);self.allocations.append(weakref.ref(owner));return owner
+def _committed(runtime):
+  view=runtime.view(runtime.current_scope())
+  return sum(group.committed_bytes for group in runtime.snapshot(view).groups)
 
 
-def _machine():
-  return planner.MachineProfile(fast_capacity=4096, slow_capacity=1 << 20,
-      fast_bandwidth_mib_s=100, slow_bandwidth_mib_s=10,
-      transfer_bandwidth_mib_s=100, alignment=64)
-
-
-def _factory_plan(execution):
-  return planner.plan_memory(execution, _machine(), config=planner.PlannerConfig(
-      minimum_fast_bytes=1, allow_input_fast=False, allow_persistent_fast=False,
-      only_explicit_factory_temporaries=True, require_replayable_temporaries=True))
+def _factory_plan(execution,runtime):
+  from vecops.memory import native
+  view=runtime.view(runtime.current_scope())
+  requirements=[req for req in planner.requirements_from_graph(execution) if req.allocated]
+  return planner.GraphMemoryCompiler(runtime,view,runtime.snapshot(view),native_module=native).compile(requirements)
 
 
 def _factory_model(value):
-  temporary=planner.empty_like(value)
+  temporary=torch.empty_like(value)
   temporary.copy_(value + 1)
   return temporary * 3
 
@@ -244,38 +252,35 @@ def _factory_model(value):
 def test_same_capture_plan_reuses_private_factory_arena_and_preserves_output_values():
   value=torch.arange(8.);capture=graph.GraphCapture('planned')
   capture.capture_torch(_factory_model, value)
-  plan=_factory_plan(capture._torch_execution_graph);system=_System()
-  replay=capture.compile_torch(memory_plan=plan, system=system, large_pages=False)
+  runtime=_resource_runtime();plan=_factory_plan(capture._torch_execution_graph,runtime)
+  replay=capture.compile_torch(memory_program=plan,runtime=runtime)
   assert replay.planned_factory_count == 1
   assert replay.allocator_policy['functional_aten']=='native ATen allocator'
   result=replay(value);saved=result.clone()
   torch.testing.assert_close(replay(value + 4), (value + 5) * 3)
   torch.testing.assert_close(result, saved)
-  assert any(reference() is not None for reference in system.allocations)
-  assert planner.current_session() is None
+  assert _committed(runtime)>0
 
 
-def test_capture_real_factory_replay_session_lease_survives_close():
-  import vecops
+def test_resource_factory_owner_survives_explicit_program_close():
   value=torch.arange(8.)
-  original=vecops.precompile(_factory_model, value, capture_graph=True).graph
-  plan=_factory_plan(original);system=_System()
-  with planner.PlanSession(original, plan, system=system, large_pages=False,
-      enable_factory_replay=True, strict_factory_replay=True) as session:
-    capture=graph.GraphCapture('active-session')
-    expected=capture.capture_torch(_factory_model, value)
-    replay=capture.compile_torch()
-    assert session.stats()['planned_factory_allocations'] == 1
-    torch.testing.assert_close(replay(value), expected)
-    assert replay.allocator_policy['captured_arena_copy_bytes'] > 0
-  assert any(reference() is not None for reference in system.allocations)
-  torch.testing.assert_close(replay(value), expected)
-  torch.testing.assert_close(replay(value + 2), (value + 3) * 3)
-  # A later planner session must allocate its own arena while graph holds its lease.
-  with planner.PlanSession(original, plan, system=system, large_pages=False,
-      enable_factory_replay=True) as other:
-    _factory_model(torch.ones(8) * 99)
-  torch.testing.assert_close(replay(value), expected)
+  runtime=_resource_runtime()
+  capture=graph.GraphCapture('resource-factory-owner')
+  expected=capture.capture_torch(_factory_model,value)
+  plan=_factory_plan(capture._torch_execution_graph,runtime)
+  view=runtime.view(runtime.current_scope())
+  prepared=plan.prepare(runtime,view).materialize()
+  replay=capture.compile_torch(memory_program=prepared,runtime=runtime)
+  prepared.close()
+  assert _committed(runtime)>0
+  torch.testing.assert_close(replay(value),expected)
+  other=graph.GraphCapture('resource-other-owner')
+  other.capture_torch(_factory_model,value)
+  other_replay=other.compile_torch(runtime=runtime)
+  torch.testing.assert_close(other_replay(value+2),(value+3)*3)
+  torch.testing.assert_close(replay(value),expected)
+
+
 
 
 def test_bound_output_is_explicitly_borrowed_and_can_be_cloned():
@@ -316,15 +321,15 @@ def test_empty_storage_inside_overlap_component_does_not_split_component():
 
 def test_planned_factory_view_chain_rejects_absolute_storage_offset():
   def model(value):
-    temporary=planner.empty_like(value)
+    temporary=torch.empty_like(value)
     temporary.copy_(value)
     alias=temporary.view(-1)
     return torch.as_strided(alias, value.shape, value.stride(), 0) + 1
   capture=graph.GraphCapture('planned-offset')
   capture.capture_torch(model, torch.ones(8))
-  plan=_factory_plan(capture._torch_execution_graph)
+  runtime=_resource_runtime();plan=_factory_plan(capture._torch_execution_graph,runtime)
   with pytest.raises(ValueError, match='storage-offset'):
-    capture.compile_torch(memory_plan=plan, system=_System(), large_pages=False)
+    capture.compile_torch(memory_program=plan,runtime=runtime)
 
 
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float32, torch.float64])
@@ -504,34 +509,40 @@ def test_capture_and_private_arena_do_not_need_cyclic_gc_to_release():
     capture=graph.GraphCapture('no-capture-cycle')
     capture.capture_torch(_factory_model,value)
     reference=weakref.ref(capture)
-    system=_System();plan=_factory_plan(capture._torch_execution_graph)
-    replay=capture.compile_torch(memory_plan=plan,system=system,large_pages=False)
+    runtime=_resource_runtime();plan=_factory_plan(capture._torch_execution_graph,runtime)
+    replay=capture.compile_torch(memory_program=plan,runtime=runtime)
     del capture
     assert reference() is None, 'mode classes, weak identity callbacks and tape must not retain capture'
-    assert any(owner() is not None for owner in system.allocations)
+    assert _committed(runtime)>0
     del replay
-    assert all(owner() is None for owner in system.allocations), 'private arenas must release without gc.collect()'
+    assert _committed(runtime)==0, 'physical roots must release without gc.collect()'
   finally:
     if was_enabled:gc.enable()
 
 
 def test_compile_error_releases_arena_even_while_traceback_is_retained_and_can_retry():
   def model(x):
-    temporary=planner.empty_like(x);temporary.copy_(x)
+    temporary=torch.empty_like(x);temporary.copy_(x)
     return temporary.view(-1).as_strided((4,),(1,),0)*2
   value=torch.ones(8)
   capture=graph.GraphCapture('compile-rollback')
   expected=capture.capture_torch(model,value)
   original={key:tensor.data_ptr()for key,tensor in capture._torch_replay_tape.storage_bindings.items()}
-  system=_System();plan=_factory_plan(capture._torch_execution_graph)
+  runtime=_resource_runtime();plan=_factory_plan(capture._torch_execution_graph,runtime)
   was_enabled=gc.isenabled();gc.disable()
   try:
     with pytest.raises(ValueError,match='storage-offset') as failure:
-      capture.compile_torch(memory_plan=plan,system=system,large_pages=False)
+      capture.compile_torch(memory_program=plan,runtime=runtime)
     assert failure.value.__traceback__ is not None
-    assert all(owner()is None for owner in system.allocations)
+    assert _committed(runtime)==0
     assert {key:tensor.data_ptr()for key,tensor in capture._torch_replay_tape.storage_bindings.items()}==original
-    replay=capture.compile_torch()
+    # The retry adopts an explicitly relative offset, which is representable
+    # after resource-program slab placement; the failed absolute form remains
+    # unsupported even with automatic planning.
+    for instruction in capture._torch_replay_tape.instructions:
+      if instruction.function._schema.name=='aten::as_strided':
+        instruction.arguments=(*instruction.arguments[:-1],None)
+    replay=capture.compile_torch(runtime=runtime)
     assert torch.equal(replay(value),expected)
   finally:
     if was_enabled:gc.enable()

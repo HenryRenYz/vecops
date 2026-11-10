@@ -359,7 +359,7 @@ TEST(AttentionTest, PreparedSDPAUsesPerLaneScratchForDynamicFullAndTail) {
   auto plan = workspace.finish_trace();
   ASSERT_EQ(plan.allocations.size(), ops::attention_details::WorkspacePart::Count);
   EXPECT_EQ(plan.allocations.front().request.domain,
-            execution::WorkspaceDomain::WorkerLocal);
+            execution::BufferDomain::WorkerLocal);
   EXPECT_EQ(plan.allocations.front().request.replicas, P);
 
   const auto expected_full = reference_attention(

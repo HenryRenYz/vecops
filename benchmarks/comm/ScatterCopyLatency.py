@@ -98,15 +98,20 @@ def worker(rank, options, barrier):
     import vecops
     torch.set_num_threads(36)
     torch.set_num_interop_threads(1)
-    system = vecops.memory.System()
+    runtime = vecops.memory.default_runtime()
+    mapping = json.loads(options.pool_map.read_text())
+    factories = {}
     owners = []
     peer_elements = 1179648  # BF16 2.25 MiB per destination.
 
     def allocate(elements, memory_node):
-        owner = system.allocate(elements * 2, os_numa_id=memory_node,
-                                fallback=None, large_pages=False)
-        owners.append(owner)
-        return torch.frombuffer(owner, dtype=torch.bfloat16, count=elements)
+        identifier = mapping[str(memory_node)]
+        if identifier not in factories:
+            factories[identifier] = vecops.memory.Pool.create(runtime, identifier,
+                allowed_pools=[identifier], page_bytes=4096, retain_idle_bytes=0)
+        tensor = factories[identifier].empty((elements,), dtype=torch.bfloat16)
+        owners.append(tensor)
+        return tensor
 
     outputs = [] if options.shared_buffer else [
         allocate(peer_elements, 16 + options.socket * 8 + p).fill_(-1) for p in range(8)]
@@ -210,6 +215,8 @@ def worker(rank, options, barrier):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library', required=True)
+    parser.add_argument('--pool-map', type=Path, required=True,
+                        help='explicit JSON OS NUMA ID to current Runtime pool ID mapping')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--socket', type=int, choices=(0, 1), required=True)
     parser.add_argument('--repeats', type=int, default=100)

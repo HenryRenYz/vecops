@@ -6,6 +6,8 @@ Use :class:`GraphCapture` directly from framework adapters, or pass
 ``capture_graph=True`` to :func:`vecops.precompile` for the Torch adapter.
 """
 
+from ._discovery import discover_pointwise_requests
+from ._execution_weights import event_execution_weights
 from .capture import (
   GraphCapture,
   LoopHandle,
@@ -32,11 +34,20 @@ from .ir import (
   TensorValue,
 )
 
+def provision_communication_capacity(plans,*,providers=()):
+  """Provision stopped graph transport groups collectively before graph admission."""
+  from ._replay import provision_communication_capacity as provision
+  return provision(plans,providers=providers)
+
+
 __all__ = [
   "AccessKind",
   "Event",
   "ExecutionGraph",
   "GraphCapture",
+  "discover_pointwise_requests",
+  "event_execution_weights",
+  "provision_communication_capacity",
   "Loop",
   "LoopSample",
   "LoopHandle",

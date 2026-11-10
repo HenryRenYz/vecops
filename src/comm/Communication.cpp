@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "vecops/comm/Communication.h"
 #include "vecops/comm/Copy.h"
+#include "vecops/memory/LinuxBackend.h"
 #include "vecops/comm/details/ReplicaRouting.h"
 #include <algorithm>
 #include <atomic>
@@ -10,6 +11,8 @@
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <cstring>
+#include <map>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -21,11 +24,17 @@
 
 namespace vecops::comm {
 namespace {
+namespace mm=vecops::memory::model;
+template<class T>T take(mm::Result<T> result) {
+  if(!result){const auto& error=std::get<mm::Error>(result.state);throw std::runtime_error(error.code+": "+error.message);}
+  return std::move(result).value();
+}
 constexpr size_t max_ranks = 256;
 constexpr size_t max_plans = 1024;
 struct alignas(128) Header {
   uint64_t arrived = 0, ready = 0, relayed = 0, done = 0;
   uint64_t aborted = 0, capacity = 0, operation = 0, root = 0;
+  uint64_t stopped = 0, payload_generation = 0;
   uint64_t descriptor = 0;
   uint64_t stages[16]{};
 };
@@ -53,6 +62,20 @@ void hint() {
   std::this_thread::yield();
 #endif
 }
+// A failed operation and a completed shutdown are independent facts. During
+// close every peer must still drop aliases and publish stopped, even if abort
+// has already poisoned data operations. Never substitute abort for that proof.
+void wait_stopped(const uint64_t* token,const std::chrono::steady_clock::time_point& deadline) {
+  size_t spin=0;
+  while(!load(token)) {
+    hint();
+    if((++spin&1023)==0) {
+      if(std::chrono::steady_clock::now()>deadline)
+        throw std::runtime_error("vecops comm stopped handshake timeout");
+      if((spin&65535)==0)std::this_thread::yield();
+    }
+  }
+}
 size_t add(size_t a, size_t b) {
   if (b > SIZE_MAX-a) throw std::overflow_error("vecops comm byte count overflow");
   return a+b;
@@ -64,76 +87,131 @@ size_t mul(size_t a, size_t b) {
 void system_check(bool ok, const char* operation) {
   if (!ok) throw std::system_error(errno, std::generic_category(), operation);
 }
-struct Mapping {
-  int fd = -1;
-  Header* header = nullptr;
-  char* data = nullptr;
-  size_t mapped = 0;
-  Mapping() = default;
-  Mapping(const Mapping&) = delete;
-  Mapping& operator=(const Mapping&) = delete;
-  Mapping(Mapping&& other) noexcept {
-    std::swap(fd,other.fd); std::swap(header,other.header);
-    std::swap(data,other.data); std::swap(mapped,other.mapped);
+// Payload metadata is in a separate part of the existing control mapping.
+// No root descriptor is interpreted on an unchanged hot replay generation.
+struct PayloadWire {
+  uint64_t bytes=0,page=0,offset=0;
+  char name[128]{},identity[256]{},pool[512]{},address_space[256]{};
+};
+constexpr size_t payload_offset=7<<20;
+static_assert(descriptor_offset+max_plans*sizeof(Descriptor)<=payload_offset);
+static_assert(payload_offset+sizeof(PayloadWire)*(max_ranks+1)<=header_bytes);
+PayloadWire* payloads(Header* header) {
+  return reinterpret_cast<PayloadWire*>(reinterpret_cast<char*>(header)+payload_offset);
+}
+void wire_text(char* out,size_t capacity,const std::string& text) {
+  if(text.size()>=capacity)throw std::invalid_argument("communication export metadata exceeds control wire limit");
+  std::memcpy(out,text.c_str(),text.size()+1);
+}
+std::string wire_text(const char* text,size_t capacity) {
+  const auto* end=static_cast<const char*>(std::memchr(text,0,capacity));
+  if(!end)throw std::invalid_argument("unterminated communication export metadata");
+  return {text,end};
+}
+struct Root {
+  std::shared_ptr<mm::Allocation> allocation;
+  std::shared_ptr<mm::SharedBacking> backing;
+};
+struct PayloadStore {
+  std::shared_ptr<mm::MemoryRuntime> runtime;
+  mm::ResourceView view;
+  std::string pool;
+  size_t page=0;
+  mm::LinuxPageStore pages;
+  PayloadStore(std::shared_ptr<mm::MemoryRuntime> value,const std::string& id):runtime(std::move(value)),pool(id) {
+    if(!runtime || pool.empty())throw std::invalid_argument("communication requires a MemoryRuntime and explicit payload pool");
+    view=take(runtime->view(take(runtime->current_scope())));
+    const std::vector<std::string> pools{pool};
+    const auto capability=take(runtime->mapping_capabilities(view,pools));
+    if(!capability.shareable || !capability.remappable || !capability.partial_backing_map)
+      throw std::invalid_argument("communication requires shareable remappable partial page mappings");
+    page=capability.page_bytes;
+    if(!page || page%static_cast<size_t>(sysconf(_SC_PAGESIZE)))
+      throw std::invalid_argument("invalid communication backend page geometry");
   }
-  ~Mapping() {
-    if (data) munmap(data,mapped);
-    if (header) munmap(header,header_bytes);
-    if (fd>=0) close(fd);
+  Root allocate(size_t bytes,PayloadWire& wire) {
+    static std::atomic<uint64_t> sequence{1};
+    mm::BackingRequest request{"comm-"+std::to_string(sequence.fetch_add(1)),runtime->participant(),
+      pool,bytes,page,mm::BackingMode::shareable_remappable,{}};
+    auto allocation=std::make_shared<mm::Allocation>(take(runtime->allocate(view,request)));
+    auto backing=take(allocation->export_backing());
+    const auto handle=std::any_cast<mm::LinuxBackingHandle>(take(backing->export_handle()));
+    PayloadWire next;next.bytes=bytes;next.page=page;next.offset=handle.backing_offset_bytes;
+    wire_text(next.name,sizeof(next.name),handle.name);
+    wire_text(next.identity,sizeof(next.identity),handle.physical_identity);
+    wire_text(next.pool,sizeof(next.pool),pool);
+    wire_text(next.address_space,sizeof(next.address_space),handle.allocation.address_space);
+    wire=next;
+    return {std::move(allocation),std::move(backing)};
   }
-  void map_data(size_t bytes) {
-    if (mapped == bytes) return;
-    auto* next = mmap(nullptr, bytes, PROT_READ|PROT_WRITE, MAP_SHARED,fd,header_bytes);
-    system_check(next != MAP_FAILED,"vecops comm mmap payload");
-    if (data) munmap(data,mapped);
-    data = static_cast<char*>(next); mapped = bytes;
+  std::shared_ptr<mm::SharedBacking> import(const PayloadWire& wire) {
+    if(!wire.bytes || !wire.page || wire.bytes%wire.page || wire.page!=page)
+      throw std::invalid_argument("invalid communication payload geometry");
+    const auto name=wire_text(wire.name,sizeof(wire.name));
+    const auto identity=wire_text(wire.identity,sizeof(wire.identity));
+    const auto source_pool=wire_text(wire.pool,sizeof(wire.pool));
+    const auto address_space=wire_text(wire.address_space,sizeof(wire.address_space));
+    if(std::find(view.accessible_pools.begin(),view.accessible_pools.end(),source_pool)==view.accessible_pools.end())
+      throw std::invalid_argument("communication payload pool is outside the runtime memory grant");
+    mm::AllocationInfo allocation{name,address_space,wire.bytes,wire.bytes,wire.page,{wire.page},
+      {{0,wire.bytes,source_pool}},true,true,1,mm::BackingMode::shareable_remappable};
+    return take(pages.import_backing({name,identity,std::move(allocation),wire.offset}));
   }
 };
-// Temporarily bind ONLY the allocating caller. Existing workers retain their
-// policy. The exact touched pages are subsequently queried when strict.
-struct Placement {
-  std::vector<unsigned long> previous, desired;
-  int mode = MPOL_DEFAULT;
-  bool changed = false, strict = false;
-  int node = -1;
-  explicit Placement(int target, bool require): strict(require), node(target) {
-    if (target<0) return;
-    const size_t bits = std::max<size_t>(1024, target+1);
-    previous.resize((bits+63)/64); desired.resize(previous.size());
-    if (syscall(SYS_get_mempolicy,&mode,previous.data(),previous.size()*64,nullptr,0)) {
-      if (strict) system_check(false,"vecops comm get_mempolicy");
-      return;
-    }
-    desired[target/64] |= 1UL<<(target%64);
-    changed = syscall(SYS_set_mempolicy,MPOL_BIND,desired.data(),desired.size()*64)==0;
-    if (!changed && strict) system_check(false,"vecops comm set_mempolicy");
+struct PayloadWindow {
+  std::unique_ptr<mm::VirtualReservation> reservation;
+  std::vector<std::unique_ptr<mm::MappedRange>> mappings;
+  std::vector<std::shared_ptr<mm::ImportedMemory>> imports;
+  char* address=nullptr;
+  size_t bytes=0;
+  void reserve(PayloadStore& store,size_t total) {
+    reservation=take(store.pages.reserve(total,store.page));
+    address=static_cast<char*>(take(mm::LinuxPageStore::address(*reservation)));bytes=total;
   }
-  ~Placement() {
-    if (changed) syscall(SYS_set_mempolicy,mode,previous.data(),previous.size()*64);
+  void map(PayloadStore& store,size_t offset,size_t count,std::shared_ptr<mm::SharedBacking> backing,
+           size_t physical_offset,bool write) {
+    const std::vector<mm::AccessMode> access=write?std::vector{mm::AccessMode::read,mm::AccessMode::write}
+                                                  :std::vector{mm::AccessMode::read};
+    auto mapping=take(store.pages.map(*reservation,backing,{physical_offset,offset,count},access));
+    const auto& info=backing->info();
+    mm::ExternalMemoryView external{"comm-page-alias",{info.address_space,
+      reinterpret_cast<uint64_t>(take(mapping->data()))},count,{},backing,!write,{}};
+    if(info.segments.size()==1)external.known_pool=info.segments[0].pool;
+    imports.push_back(take(store.runtime->import_memory(store.view,external)));
+    mappings.push_back(std::move(mapping));
   }
-  void touch(char* first, size_t bytes) {
-    const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-    // shm/tmpfs policy belongs to the shared object, not only this caller.
-    // Install it before first touch so all mappings retain the chosen target.
-    if (changed && bytes) {
-      const int result=syscall(SYS_mbind,first,bytes,MPOL_BIND|MPOL_F_STATIC_NODES,
-                               desired.data(),desired.size()*64,0);
-      if (result && strict) system_check(false,"vecops comm bind shared object");
+};
+struct Mapping {
+  int fd=-1;
+  Header* header=nullptr;
+  char* data=nullptr;
+  size_t mapped=0;
+  uint64_t payload_generation=0;
+  std::unique_ptr<PayloadWindow> window;
+  Mapping()=default;
+  Mapping(const Mapping&)=delete;
+  Mapping& operator=(const Mapping&)=delete;
+  Mapping(Mapping&& other)noexcept {
+    std::swap(fd,other.fd);std::swap(header,other.header);std::swap(data,other.data);
+    std::swap(mapped,other.mapped);std::swap(payload_generation,other.payload_generation);window=std::move(other.window);
+  }
+  ~Mapping() {
+    window.reset();
+    if(header)munmap(header,header_bytes);
+    if(fd>=0)::close(fd);
+  }
+  void map_data(PayloadStore& store,size_t capacity,size_t segments) {
+    const auto total=mul(capacity,segments);
+    const auto generation=load(&header->payload_generation);
+    if(mapped==total && payload_generation==generation)return;
+    auto next=std::make_unique<PayloadWindow>();next->reserve(store,total);
+    for(size_t index=0;index<segments;++index) {
+      const auto& wire=payloads(header)[index];
+      if(!wire.bytes)continue; // absent relay segments consume no physical backing
+      if(wire.bytes!=capacity)throw std::invalid_argument("communication payload capacity mismatch");
+      next->map(store,mul(index,capacity),capacity,store.import(wire),0,true);
     }
-    for (size_t i=0;i<bytes;i+=page) first[i]=0;
-    if (strict && node>=0 && bytes) {
-      int policy=0;std::vector<unsigned long> mask(desired.size());
-      system_check(syscall(SYS_get_mempolicy,&policy,mask.data(),mask.size()*64,first,MPOL_F_ADDR)==0,
-                   "vecops comm query shared policy");
-      if ((policy&~MPOL_F_STATIC_NODES)!=MPOL_BIND || mask!=desired)
-        throw std::runtime_error("vecops comm shared-object policy mismatch");
-      for (size_t i=0;i<bytes;i+=page) {
-        void* address = first+i; int status=-1;
-        system_check(syscall(SYS_move_pages,0,1,&address,nullptr,&status,0)==0,
-                     "vecops comm query placement");
-        if (status!=node) throw std::runtime_error("vecops comm shared-page placement mismatch");
-      }
-    }
+    data=next->address;mapped=total;payload_generation=generation;window=std::move(next);
   }
 };
 struct CopyShape {
@@ -201,20 +279,43 @@ struct Batch {
 };
 } // namespace
 
+// Failure cannot certify remote quiescence. Keep the root receipts alive for
+// the process lifetime; authority crash inspection reports these conservatively.
+void retain_unproven(std::vector<Root> roots,std::shared_ptr<mm::MemoryRuntime> runtime) {
+  struct Retained {std::vector<Root> roots;std::shared_ptr<mm::MemoryRuntime> runtime;};
+  static auto* mutex=new std::mutex;
+  static auto* records=new std::vector<Retained>;
+  std::lock_guard lock(*mutex);records->push_back({std::move(roots),std::move(runtime)});
+}
 struct Communicator::State {
   int rank, size;
   Options options;
   Exchange exchange;
   const VecopsThreadPoolV1* executor;
   std::vector<Mapping> peers;
+  std::unique_ptr<PayloadStore> payload;
+  std::vector<Root> roots;
+  std::vector<std::pair<uint64_t,Root>> retired_roots;
+  std::vector<std::weak_ptr<ExchangeBuffer>> exchanges;
+  bool closed=false;
   std::mutex mutex;
   uint64_t epoch=0;
+  uint64_t provision_epoch=0;
+  uint64_t preparation_epoch=0;
+  size_t registered_required=0;
+  std::vector<bool> registered_relays;
   bool sealed=false;
   size_t descriptor_count=0;
   Statistics stats;
   const detail::CopyBackend* copy=&detail::copy_backend();
   std::chrono::steady_clock::time_point deadline;
-  ~State() { if (executor && executor->release) executor->release(executor->context); }
+  ~State() {
+    if(!closed && payload) {
+      for(auto& [epoch,root]:retired_roots){(void)epoch;roots.push_back(std::move(root));}
+      if(!roots.empty())retain_unproven(std::move(roots),payload->runtime);
+    }
+    if(executor && executor->release)executor->release(executor->context);
+  }
   void wait(const uint64_t* token, uint64_t expected) {
     size_t spin=0;
     while (load(token)<expected) {
@@ -228,31 +329,35 @@ struct Communicator::State {
       }
     }
   }
-  void reserve(size_t required) {
+  void reserve(size_t required,const std::vector<bool>& needed={}) {
     auto& own=peers[rank];
-    size_t cap=load(&own.header->capacity);
-    if (required<=cap) return;
-    if (sealed) throw std::runtime_error("vecops comm sealed capacity exceeded; prepare first");
-    size_t next=std::max<size_t>(cap,static_cast<size_t>(sysconf(_SC_PAGESIZE)));
-    while(next<required) next=mul(next,2);
-    size_t bytes=mul(next,size+1);
-    system_check(ftruncate(own.fd,add(header_bytes,bytes))==0,"vecops comm resize");
-    own.map_data(bytes);
-    Placement placement(options.memory_node,options.require_placement);
-    // Touch once outside hot replay; placement follows the owner's policy.
-    placement.touch(own.data,next);
+    const size_t cap=load(&own.header->capacity);
+    bool missing=!cap;
+    for(size_t source=0;source<needed.size();++source)
+      missing|=needed[source] && !payloads(own.header)[source+1].bytes;
+    if(required<=cap && !missing)return;
+    if(sealed)throw std::runtime_error("vecops comm sealed capacity exceeded; prepare first");
+    size_t next=std::max(cap,payload->page);
+    while(next<required)next=mul(next,2);
+    const bool growth=next!=cap;
+    std::vector<PayloadWire> descriptors(size+1);
+    if(!growth)std::copy_n(payloads(own.header),size+1,descriptors.begin());
+    std::vector<Root> allocated;
+    if(growth)allocated.push_back(payload->allocate(next,descriptors[0]));
     for(int source=0;source<size;++source) {
-      bool needed=false;
-      for(size_t level=0;level<options.replica_levels.size();++level) {
-        const auto& groups=options.replica_levels[level];
-        if(!options.relay || groups[source]==groups[rank])continue;
-        int members=0,index=0;
-        for(int r=0;r<size;++r)if(groups[r]==groups[rank]){if(r<rank)++index;++members;}
-        needed|=source%members==index;
-      }
-      if(needed)placement.touch(own.data+(source+1)*next,next);
+      const bool used=(!needed.empty() && needed[source]) || (cap && payloads(own.header)[source+1].bytes);
+      if(used && (growth || !descriptors[source+1].bytes))
+        allocated.push_back(payload->allocate(next,descriptors[source+1]));
     }
+    if(growth) {
+      for(auto& root:roots)retired_roots.emplace_back(std::max<uint64_t>(1,epoch),std::move(root));
+      roots.clear();
+    }
+    for(auto& root:allocated)roots.push_back(std::move(root));
+    std::copy(descriptors.begin(),descriptors.end(),payloads(own.header));
     store(&own.header->capacity,next);
+    store(&own.header->payload_generation,load(&own.header->payload_generation)+1);
+    own.map_data(*payload,next,size+1);
     ++stats.capacity_growths;
   }
   void batch(std::vector<Job>& jobs) {
@@ -316,6 +421,7 @@ struct Plan::State {
   bool team_rows=false;
   std::vector<int> copy_levels;
   std::vector<std::vector<int>> relay_targets;
+  std::vector<bool> relay_needed;
   explicit State(std::shared_ptr<Communicator> comm, Specification value):owner(std::move(comm)),spec(std::move(value)) {
     copy_levels=spec.copy_levels.empty()?owner->state_->options.copy_levels:spec.copy_levels;
     for(const auto& l:spec.inputs) inputs.emplace_back(l);
@@ -349,11 +455,15 @@ struct Plan::State {
     // between ready and the following copy-preparation barrier.
     relay=spec.operation==Operation::AllGather && owner->state_->options.relay &&
           largest>=owner->state_->options.relay_threshold;
+    relay_needed.assign(owner->size(),false);
     if(relay) {
       std::vector<uint64_t> bytes;bytes.reserve(outputs.size());
       for(const auto& output:outputs)bytes.push_back(output.bytes);
       for(const auto& partition:owner->state_->options.replica_levels)
         relay_targets.push_back(detail::balanced_relay_targets(partition,owner->rank(),bytes));
+      for(size_t level=0;level<relay_targets.size();++level)if(copy_levels[level])
+        for(size_t source=0;source<relay_needed.size();++source)
+          relay_needed[source]=relay_needed[source] || relay_targets[level][source]==owner->rank();
     }
   }
 };
@@ -364,10 +474,10 @@ Plan::~Plan()=default;
 std::shared_ptr<Communicator> Communicator::create(int rank,int size,Options options,
     Exchange exchange,const VecopsThreadPoolV1* executor) {
   if(size<1 || size>static_cast<int>(max_ranks) || rank<0 || rank>=size || !options.threads || !options.chunk_bytes ||
-     !options.timeout_ms || options.memory_node < -1 || (options.require_placement && options.memory_node < 0))
+     !options.timeout_ms || !options.memory_runtime || options.payload_pool.empty())
     throw std::invalid_argument("invalid vecops communicator dimensions/options");
   if(options.locality_groups.empty()) options.locality_groups.assign(size,0);
-  if(options.locality_groups.size()!=size) throw std::invalid_argument("invalid locality group map");
+  if(options.locality_groups.size()!=static_cast<size_t>(size)) throw std::invalid_argument("invalid locality group map");
   if(options.replica_levels.empty()) {
     options.replica_levels.push_back(options.locality_groups);
     options.copy_levels.push_back(options.relay?1:0);
@@ -375,7 +485,7 @@ std::shared_ptr<Communicator> Communicator::create(int rank,int size,Options opt
   if(options.replica_levels.size()>16 || options.copy_levels.size()!=options.replica_levels.size())
     throw std::invalid_argument("invalid replica level count");
   for(size_t level=0;level<options.replica_levels.size();++level) {
-    if(options.replica_levels[level].size()!=size || (options.copy_levels[level]!=0 && options.copy_levels[level]!=1))
+    if(options.replica_levels[level].size()!=static_cast<size_t>(size) || (options.copy_levels[level]!=0 && options.copy_levels[level]!=1))
       throw std::invalid_argument("invalid replica partition/mode");
     if(level)for(int a=0;a<size;++a)for(int b=0;b<a;++b)
       if(options.replica_levels[level][a]==options.replica_levels[level][b] &&
@@ -386,16 +496,17 @@ std::shared_ptr<Communicator> Communicator::create(int rank,int size,Options opt
     throw std::invalid_argument("unsupported vecops comm executor ABI");
   auto s=std::make_unique<State>(); s->rank=rank;s->size=size;s->options=std::move(options);s->executor=executor;s->exchange=exchange;
   if(executor && executor->retain) executor->retain(executor->context);
+  s->payload=std::make_unique<PayloadStore>(s->options.memory_runtime,s->options.payload_pool);
   uint64_t random=0;
   system_check(getrandom(&random,sizeof(random),0)==sizeof(random),"vecops comm random identifier");
   std::string name="/vecops-"+std::to_string(getuid())+"-"+std::to_string(random);
   int fd=shm_open(name.c_str(),O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
   system_check(fd>=0,"vecops comm shm_open");
-  struct FileGuard {int fd;~FileGuard(){if(fd>=0)close(fd);}} file_guard{fd};
+  struct FileGuard {int fd;~FileGuard(){if(fd>=0)::close(fd);}} file_guard{fd};
   struct Cleanup {std::string name;~Cleanup(){shm_unlink(name.c_str());}} cleanup{name};
   system_check(ftruncate(fd,header_bytes)==0,"vecops comm control size");
   auto names=exchange(name);
-  if(names.size()!=size) throw std::invalid_argument("invalid bootstrap exchange");
+  if(names.size()!=static_cast<size_t>(size)) throw std::invalid_argument("invalid bootstrap exchange");
   s->peers.reserve(size);
   for(int p=0;p<size;++p) {
     Mapping m; m.fd=p==rank?fd:shm_open(names[p].c_str(),O_RDWR|O_CLOEXEC,0);
@@ -412,7 +523,7 @@ std::shared_ptr<Communicator> Communicator::create(int rank,int size,Options opt
   exchange("mapped");
   s->reserve(std::max<size_t>(1,s->options.initial_capacity));
   exchange("allocated");
-  for(auto& peer:s->peers) peer.map_data(mul(load(&peer.header->capacity),size+1));
+  for(auto& peer:s->peers)peer.map_data(*s->payload,load(&peer.header->capacity),size+1);
   return std::shared_ptr<Communicator>(new Communicator(std::move(s)));
 }
 std::shared_ptr<Plan> Communicator::prepare(Specification spec) {
@@ -420,8 +531,8 @@ std::shared_ptr<Plan> Communicator::prepare(Specification spec) {
   if(static_cast<uint32_t>(op)>static_cast<uint32_t>(Operation::SumFloat32))
     throw std::invalid_argument("unknown collective operation");
   if(spec.root<0 || spec.root>=state_->size) throw std::invalid_argument("invalid collective root");
-  if((op==Operation::AllGather && (spec.inputs.size()!=1 || spec.outputs.size()!=state_->size)) ||
-     (op==Operation::AllToAll && (spec.inputs.size()!=state_->size || spec.outputs.size()!=state_->size)) ||
+  if((op==Operation::AllGather && (spec.inputs.size()!=1 || spec.outputs.size()!=static_cast<size_t>(state_->size))) ||
+     (op==Operation::AllToAll && (spec.inputs.size()!=static_cast<size_t>(state_->size) || spec.outputs.size()!=static_cast<size_t>(state_->size))) ||
      ((op==Operation::Broadcast || op==Operation::SumFloat32) && (spec.inputs.size()!=1 || spec.outputs.size()!=1)) ||
      (op==Operation::Barrier && (!spec.inputs.empty() || !spec.outputs.empty())))
     throw std::invalid_argument("invalid collective tensor arity");
@@ -444,9 +555,14 @@ std::shared_ptr<Plan> Communicator::prepare(Specification spec) {
   }
   {
     std::lock_guard lock(state_->mutex);
-    if(state_->sealed)throw std::runtime_error("cannot prepare a new collective after communicator seal");
+    if(state_->closed)throw std::runtime_error("cannot prepare a collective after communicator close");
+    if(state_->sealed)throw std::runtime_error("cannot prepare a collective after communicator seal");
     if(state_->descriptor_count==max_plans)throw std::runtime_error("vecops communication plan capacity exceeded");
     auto& p=*plan->state_;
+    state_->registered_required=std::max(state_->registered_required,p.required);
+    if(state_->registered_relays.empty())state_->registered_relays.assign(state_->size,false);
+    for(size_t source=0;source<p.relay_needed.size();++source)
+      state_->registered_relays[source]=state_->registered_relays[source] || p.relay_needed[source];
     p.descriptor_id=state_->descriptor_count++;
     auto* d=descriptor(state_->peers[state_->rank].header,p.descriptor_id);
     d->operation=static_cast<uint64_t>(p.spec.operation);d->root=p.spec.root;
@@ -464,9 +580,100 @@ std::shared_ptr<Plan> Communicator::prepare(Specification spec) {
       d->sends[i]=op==Operation::AllToAll?p.inputs[i].bytes:(p.inputs.empty()?0:p.inputs[0].bytes);
       d->receives[i]=op==Operation::AllGather || op==Operation::AllToAll?p.outputs[i].bytes:(p.outputs.empty()?0:p.outputs[0].bytes);
     }
+    // Before the first invocation there are no publication readers. Provision
+    // exact registered relay requirements cold, so metadata-only preparation
+    // followed by seal does not depend on a hidden warm-up allocation.
+    if(!state_->epoch) {
+      state_->reserve(p.required,p.relay_needed);
+    }
     ++state_->stats.plans;
   }
   return plan;
+}
+bool Communicator::provision_registered_capacity() {
+  auto& c=*state_;
+  std::lock_guard lock(c.mutex);
+  const auto prefix="vecops-capacity/v1/"+std::to_string(++c.provision_epoch)+"/"+std::to_string(c.epoch)+"/";
+  // Each participant reports local failures at the next checkpoint rather
+  // than leaving peers blocked waiting for a publication that will not exist.
+  auto checkpoint=[&](const char* phase,const std::string& error={},bool grew=false) {
+    const auto tag=prefix+phase+"/";
+    auto values=c.exchange(tag+(error.empty()?(grew?"grown":"ok"):"error:"+error));
+    if(values.size()!=static_cast<size_t>(c.size))throw std::runtime_error("invalid capacity preparation exchange");
+    bool any=false;
+    for(const auto& value:values) {
+      if(value==tag+"grown")any=true;
+      else if(value!=tag+"ok")throw std::runtime_error("vecops capacity preparation mismatch or peer failure: "+value);
+    }
+    return any;
+  };
+  auto attempt=[](auto&& action) {
+    try{action();return std::string{};}
+    catch(const std::exception& error){return std::string(error.what());}
+    catch(...){return std::string("unknown capacity preparation failure");}
+  };
+  try {
+    const auto entry=attempt([&] {
+      if(c.closed || load(&c.peers[c.rank].header->stopped))throw std::runtime_error("communicator is closed");
+      if(load(&c.peers[c.rank].header->aborted))throw std::runtime_error("communicator is aborted");
+      if(load(&c.peers[c.rank].header->done)!=c.epoch)throw std::runtime_error("local publication has not stopped");
+    });
+    checkpoint("entered",entry);
+    c.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(c.options.timeout_ms);
+    checkpoint("stopped",attempt([&] {
+      for(auto& peer:c.peers)c.wait(&peer.header->done,c.epoch);
+    }));
+    auto& own=c.peers[c.rank];
+    const auto cap=load(&own.header->capacity);
+    const auto target=std::max(cap,c.registered_required);
+    auto needed=c.registered_relays;
+    if(needed.empty())needed.assign(c.size,false);
+    bool rebuild=target>cap || !cap;
+    for(int source=0;source<c.size;++source) {
+      const bool existing=payloads(own.header)[source+1].bytes!=0;
+      rebuild|=needed[source] && !existing;
+      needed[source]=needed[source] || existing;
+    }
+    checkpoint("validated",attempt([&] {
+      if(rebuild && c.sealed)throw std::runtime_error("sealed communicator requires unregistered capacity");
+    }));
+    // A remote imported mapping keeps physical pages alive even after an
+    // owner's receipt is released. Remove all aliases BEFORE refunding roots.
+    for(auto& peer:c.peers){peer.window.reset();peer.data=nullptr;peer.mapped=0;}
+    checkpoint("unmapped");
+    c.retired_roots.clear();
+    const auto growths=c.stats.capacity_growths;
+    const auto allocation_error=attempt([&] {
+      if(rebuild) {
+        c.roots.clear();
+        std::fill_n(payloads(own.header),c.size+1,PayloadWire{});
+        store(&own.header->capacity,0);
+        store(&own.header->payload_generation,load(&own.header->payload_generation)+1);
+        c.reserve(std::max<size_t>(1,target),needed);
+      }
+    });
+    const bool grew=checkpoint("published",allocation_error,c.stats.capacity_growths!=growths);
+    checkpoint("mapped",attempt([&] {
+      for(auto& peer:c.peers)peer.map_data(*c.payload,load(&peer.header->capacity),c.size+1);
+    }));
+    return grew;
+  }catch(...){abort();throw;}
+}
+bool Communicator::preparation_consensus(bool local_success) {
+  auto& c=*state_;
+  std::lock_guard lock(c.mutex);
+  const auto prefix="vecops-preparation/v1/"+std::to_string(++c.preparation_epoch)+"/";
+  try {
+    const bool stopped=c.closed || load(&c.peers[c.rank].header->stopped) || load(&c.peers[c.rank].header->aborted);
+    const auto values=c.exchange(prefix+(stopped?"error:communicator stopped":(local_success?"true":"false")));
+    if(values.size()!=static_cast<size_t>(c.size))throw std::runtime_error("invalid preparation consensus exchange");
+    bool result=true;
+    for(const auto& value:values) {
+      if(value==prefix+"false")result=false;
+      else if(value!=prefix+"true")throw std::runtime_error("vecops preparation consensus failure or order mismatch: "+value);
+    }
+    return result;
+  }catch(...){abort();throw;}
 }
 Statistics Communicator::statistics() const {std::lock_guard lock(state_->mutex);return state_->stats;}
 void Communicator::seal(){std::lock_guard lock(state_->mutex);state_->sealed=true;}
@@ -532,17 +739,19 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
           size_t offset=0;for(int source=0;source<rank;++source)offset=add(offset,remote->receives[source]);
           p.remote_inbox_offsets[peer]=offset;p.validated_descriptors[peer]=h->descriptor;
         }
-        c.peers[peer].map_data(mul(load(&h->capacity),size+1));
+        c.peers[peer].map_data(*c.payload,load(&h->capacity),size+1);
       }
   };
   try {
     control([&] {
       lock.lock();
+      if(c.closed || load(&own->stopped))throw std::runtime_error("vecops communicator is closed");
       if(load(&own->aborted)) throw std::runtime_error("vecops communicator is aborted");
       c.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(c.options.timeout_ms);
       p.team_epoch=++c.epoch;
       for(auto& peer:c.peers)c.wait(&peer.header->done,p.team_epoch-1);
-      c.reserve(p.required);
+      std::erase_if(c.retired_roots,[&](const auto& retired){return retired.first<p.team_epoch;});
+      c.reserve(p.required,p.relay_needed);
       own->descriptor=p.descriptor_id;
       store(&own->arrived,p.team_epoch);
       if(!early_snapshot) {
@@ -639,26 +848,22 @@ void Plan::execute_impl(void* const* outputs,const void* const* inputs,const Con
 namespace {
 constexpr uint32_t max_slots=64;
 struct alignas(128) SlotControl {uint64_t ready=0,retired=0;};
-struct LeaseControl {uint64_t aborted=0;SlotControl slot[max_slots];};
-struct Alias {
-  char* address=nullptr;size_t bytes=0;
-  Alias()=default;
-  Alias(const Alias&)=delete;
-  ~Alias(){if(address)munmap(address,bytes);}
-  void reserve(size_t n) {
-    auto* p=mmap(nullptr,n,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
-    system_check(p!=MAP_FAILED,"vecops reserve alias range");address=static_cast<char*>(p);bytes=n;
-  }
-  void map(size_t offset,size_t bytes,int fd,size_t file_offset,int protection) {
-    auto* p=mmap(address+offset,bytes,protection,MAP_SHARED|MAP_FIXED,fd,file_offset);
-    system_check(p!=MAP_FAILED,"vecops fixed page alias");
-  }
-};
+struct LeaseControl {uint64_t aborted=0,stopped=0;SlotControl slot[max_slots];};
+
 }
 struct ExchangeBuffer::State {
   std::shared_ptr<Communicator> owner;
   std::vector<Mapping> peers;
-  Alias producer,consumer;
+  PayloadWindow producer,consumer;
+  Root root;
+  ~State() {
+    if(!closed && root.backing) {
+      std::vector<Root> roots;roots.push_back(std::move(root));
+      retain_unproven(std::move(roots),owner->state_->payload->runtime);
+    }
+  }
+  bool closed=false;
+  std::mutex close_mutex;
   size_t bytes=0,stride=0,slab=0;
   uint32_t count=0;
   std::vector<uint64_t> versions;
@@ -666,6 +871,7 @@ struct ExchangeBuffer::State {
   std::array<std::mutex,max_slots> mutex;
   LeaseControl* control(int rank)const{return reinterpret_cast<LeaseControl*>(peers[rank].header);}
   void check(uint32_t slot)const {
+    if(closed || load(&control(owner->rank())->stopped))throw std::runtime_error("vecops exchange is closed");
     if(slot>=count)throw std::out_of_range("vecops exchange slot index");
     if(load(&control(owner->rank())->aborted))throw std::runtime_error("vecops exchange aborted");
   }
@@ -685,7 +891,15 @@ struct ExchangeBuffer::State {
   }
 };
 ExchangeBuffer::ExchangeBuffer(std::unique_ptr<State> state):state_(std::move(state)){}
-ExchangeBuffer::~ExchangeBuffer(){if(std::any_of(state_->phase.begin(),state_->phase.end(),[](auto p){return p!=0;}))abort();}
+ExchangeBuffer::~ExchangeBuffer(){
+  try{close();}catch(...){
+    abort();
+    if(state_->root.backing) {
+      std::vector<Root> roots;roots.push_back(std::move(state_->root));
+      retain_unproven(std::move(roots),state_->owner->state_->payload->runtime);
+    }
+  }
+}
 size_t ExchangeBuffer::block_stride()const noexcept{return state_->stride;}
 size_t ExchangeBuffer::block_bytes()const noexcept{return state_->bytes;}
 uint32_t ExchangeBuffer::slots()const noexcept{return state_->count;}
@@ -730,11 +944,12 @@ void ExchangeBuffer::retire(uint32_t slot) {
 }
 std::shared_ptr<ExchangeBuffer> Communicator::prepare_exchange(size_t bytes,uint32_t slots,PagePlacement placement) {
   auto& c=*state_;std::lock_guard lock(c.mutex);
+  if(c.closed)throw std::runtime_error("cannot allocate exchange storage after close");
   if(c.sealed)throw std::runtime_error("cannot allocate exchange storage after seal");
   if(!slots || slots>max_slots || (placement!=PagePlacement::Source && placement!=PagePlacement::Destination))
     throw std::invalid_argument("invalid exchange storage options");
   auto s=std::make_unique<ExchangeBuffer::State>();s->owner=shared_from_this();s->bytes=bytes;s->count=slots;
-  const size_t page=sysconf(_SC_PAGESIZE);
+  const size_t page=c.payload->page;
   s->stride=mul(std::max<size_t>(1,add(bytes,page-1)/page),page);
   s->slab=mul(s->stride,c.size);size_t total=mul(s->slab,slots);
   s->versions.assign(slots,0);s->phase.assign(slots,0);
@@ -745,7 +960,7 @@ std::shared_ptr<ExchangeBuffer> Communicator::prepare_exchange(size_t bytes,uint
   struct Cleanup {std::string name;~Cleanup(){shm_unlink(name.c_str());}} cleanup{name};
   Mapping own;own.fd=shm_open(name.c_str(),O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC,0600);
   system_check(own.fd>=0,"vecops exchange shm_open");
-  system_check(ftruncate(own.fd,add(header_bytes,total))==0,"vecops exchange size");
+  system_check(ftruncate(own.fd,header_bytes)==0,"vecops exchange size");
   auto names=c.exchange(name);s->peers.reserve(c.size);
   for(int r=0;r<c.size;++r) {
     Mapping m;m.fd=r==c.rank?own.fd:shm_open(names.at(r).c_str(),O_RDWR|O_CLOEXEC,0);
@@ -756,18 +971,21 @@ std::shared_ptr<ExchangeBuffer> Communicator::prepare_exchange(size_t bytes,uint
     s->peers.push_back(std::move(m));
   }
   c.exchange("mapped");
-  auto& local=s->peers[c.rank];local.map_data(total);
-  {Placement policy(c.options.memory_node,c.options.require_placement);policy.touch(local.data,total);}
+  auto& local=s->peers[c.rank];
+  s->root=c.payload->allocate(total,payloads(local.header)[0]);
+  local.map_data(*c.payload,total,1);
   c.exchange("placed");
-  s->producer.reserve(total);s->consumer.reserve(total);
+  s->producer.reserve(*c.payload,total);s->consumer.reserve(*c.payload,total);
+  std::vector<std::shared_ptr<mm::SharedBacking>> imported;
+  for(auto& peer:s->peers)imported.push_back(c.payload->import(payloads(peer.header)[0]));
   for(uint32_t slot=0;slot<slots;++slot)for(int peer=0;peer<c.size;++peer) {
     size_t offset=slot*s->slab+peer*s->stride;
     int producer_rank=placement==PagePlacement::Source?c.rank:peer;
     int consumer_rank=placement==PagePlacement::Source?peer:c.rank;
     size_t producer_peer=placement==PagePlacement::Source?peer:c.rank;
     size_t consumer_peer=placement==PagePlacement::Source?c.rank:peer;
-    s->producer.map(offset,s->stride,s->peers[producer_rank].fd,header_bytes+slot*s->slab+producer_peer*s->stride,PROT_READ|PROT_WRITE);
-    s->consumer.map(offset,s->stride,s->peers[consumer_rank].fd,header_bytes+slot*s->slab+consumer_peer*s->stride,PROT_READ);
+    s->producer.map(*c.payload,offset,s->stride,imported[producer_rank],slot*s->slab+producer_peer*s->stride,true);
+    s->consumer.map(*c.payload,offset,s->stride,imported[consumer_rank],slot*s->slab+consumer_peer*s->stride,false);
   }
   // Fault both alias page tables cold. Physical pages were already placed by
   // their owners; these reads do not move pages or make a second payload copy.
@@ -777,6 +995,37 @@ std::shared_ptr<ExchangeBuffer> Communicator::prepare_exchange(size_t bytes,uint
     touched=static_cast<unsigned char>(touched^s->consumer.address[i]);
   }
   (void)touched;c.exchange("prepared");
-  return std::shared_ptr<ExchangeBuffer>(new ExchangeBuffer(std::move(s)));
+  auto result=std::shared_ptr<ExchangeBuffer>(new ExchangeBuffer(std::move(s)));
+  c.exchanges.push_back(result);return result;
+}
+void ExchangeBuffer::close() {
+  auto& s=*state_;
+  std::lock_guard close_lock(s.close_mutex);
+  if(s.closed)return;
+  std::vector<std::unique_lock<std::mutex>> locks;
+  for(uint32_t slot=0;slot<s.count;++slot)locks.emplace_back(s.mutex[slot]);
+  if(std::any_of(s.phase.begin(),s.phase.end(),[](auto p){return p!=0;}))
+    throw std::runtime_error("cannot close exchange with active producer/consumer leases");
+  // Closing certifies that local readers/writers have stopped. Drop every
+  // imported alias before acknowledging, so the final owner can refund roots.
+  s.producer.imports.clear();s.consumer.imports.clear();
+  s.producer.mappings.clear();s.consumer.mappings.clear();
+  for(auto& peer:s.peers){peer.window.reset();peer.data=nullptr;peer.mapped=0;}
+  store(&s.control(s.owner->rank())->stopped,1);
+  const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(s.owner->state_->options.timeout_ms);
+  for(int rank=0;rank<s.owner->size();++rank)wait_stopped(&s.control(rank)->stopped,deadline);
+  s.root={};s.closed=true;
+}
+void Communicator::close() {
+  auto& c=*state_;
+  std::lock_guard lock(c.mutex);
+  if(c.closed)return;
+  // The embedding drains its submission queue before this cold operation.
+  for(auto& weak:c.exchanges)if(auto exchange=weak.lock())exchange->close();
+  for(auto& peer:c.peers){peer.window.reset();peer.data=nullptr;peer.mapped=0;}
+  store(&c.peers[c.rank].header->stopped,1);
+  c.deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(c.options.timeout_ms);
+  for(auto& peer:c.peers)wait_stopped(&peer.header->stopped,c.deadline);
+  c.retired_roots.clear();c.roots.clear();c.closed=true;
 }
 } // namespace vecops::comm

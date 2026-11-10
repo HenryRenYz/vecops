@@ -1,122 +1,91 @@
 // SPDX-FileCopyrightText: 2026 HenryRenYz and vecops contributors
 // SPDX-License-Identifier: MIT
-//
-//
-
-/** @file MemoryInfo.cpp @brief Inspect topology and smoke-test placement. */
-
+/** @file MemoryInfo.cpp @brief Inspect generic resources and allocate in an opaque pool. */
 #include "vecops/memory/Memory.h"
-
-#include <cstddef>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
-#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
 namespace {
-
-using namespace vecops::memory;
-
+using namespace vecops::memory::model;
+template <class T> T take(Result<T> result) {
+  if (!result) {
+    const auto& error = std::get<Error>(result.state);
+    throw std::runtime_error(error.code + ": " + error.message);
+  }
+  return std::move(result).value();
+}
 struct Options {
-  std::optional<std::size_t> allocate_mib;
-  PlacementIntent placement = PlacementIntent::Default;
-  std::optional<unsigned> target;
-  bool touch = false;
-  bool use_large_pages = true;
+  std::optional<std::string> hardware, policy, calibration, pool, allocate;
 };
-
 [[noreturn]] void usage(const char* program, int status) {
   std::cerr << "usage: " << program
-            << " [--allocate-mib N] [--placement default|high-bandwidth|low-latency] [--target OS_NODE]"
-               " [--touch] [--no-large-pages]\n";
+      << " [--hardware FILE] [--policy FILE] [--calibration FILE]"
+         " [--pool ID --allocate '64 MiB']\n";
   std::exit(status);
 }
-
-std::size_t parse_size(std::string_view text, const char* option) {
-  std::size_t consumed = 0;
-  const auto value = std::stoull(std::string(text), &consumed);
-  if (consumed != text.size() || value > std::numeric_limits<std::size_t>::max()) {
-    std::cerr << option << " is outside the host size range\n";
-    std::exit(2);
-  }
-  return static_cast<std::size_t>(value);
-}
-
 Options parse_options(int argc, char** argv) {
-  Options result;
-  for (int index = 1; index < argc; ++index) {
-    const std::string_view option(argv[index]);
-    if (option == "--help")
-      usage(argv[0], 0);
-    if (option == "--touch") {
-      result.touch = true;
-      continue;
-    }
-    if (option == "--no-large-pages") {
-      result.use_large_pages = false;
-      continue;
-    }
-    if (index + 1 >= argc)
-      usage(argv[0], 2);
-    const std::string_view value(argv[++index]);
-    if (option == "--allocate-mib") {
-      result.allocate_mib = parse_size(value, "--allocate-mib");
-    } else if (option == "--target") {
-      const auto parsed = parse_size(value, "--target");
-      if (parsed > std::numeric_limits<unsigned>::max())
-        usage(argv[0], 2);
-      result.target = static_cast<unsigned>(parsed);
-    } else if (option == "--placement") {
-      if (value == "default")
-        result.placement = PlacementIntent::Default;
-      else if (value == "high-bandwidth")
-        result.placement = PlacementIntent::HighBandwidth;
-      else if (value == "low-latency")
-        result.placement = PlacementIntent::LowLatency;
-      else
-        usage(argv[0], 2);
-    } else {
-      usage(argv[0], 2);
-    }
+  Options options;
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view key = argv[i];
+    if (key == "--help") usage(argv[0], 0);
+    if (i + 1 == argc) usage(argv[0], 2);
+    const std::string value = argv[++i];
+    if (key == "--hardware") options.hardware = value;
+    else if (key == "--policy") options.policy = value;
+    else if (key == "--calibration") options.calibration = value;
+    else if (key == "--pool") options.pool = value;
+    else if (key == "--allocate") options.allocate = value;
+    else usage(argv[0], 2);
   }
-  return result;
+  if ((options.policy || options.calibration) && !options.hardware)
+    throw std::invalid_argument("policy/calibration require --hardware");
+  if (options.allocate.has_value() != options.pool.has_value())
+    throw std::invalid_argument("allocation requires both --pool and --allocate");
+  return options;
 }
-
-} // namespace
+double gib(std::uint64_t bytes) { return static_cast<double>(bytes) / (1ULL << 30); }
+}
 
 int main(int argc, char** argv) try {
   const auto options = parse_options(argc, argv);
-  const auto memory = MemorySystem::discover();
-  std::cout << memory.describe();
-  std::cout << "current CPU domain: " << memory.current_cpu_domain() << '\n';
-
-  if (!options.allocate_mib.has_value())
-    return 0;
-  if (options.allocate_mib.value() > std::numeric_limits<std::size_t>::max() / (1024 * 1024)) {
-    std::cerr << "--allocate-mib overflows bytes\n";
-    return 2;
+  auto runtime = options.hardware ? take(open_runtime(*options.hardware, options.policy, options.calibration))
+                                  : take(discover_linux_runtime());
+  const auto view = take(runtime->view(take(runtime->current_scope())));
+  std::cout << std::fixed << std::setprecision(3);
+  for (const auto& id : view.executable_agents)
+    std::cout << "agent " << id << "\n";
+  for (const auto& id : view.allocatable_pools)
+    std::cout << "pool " << id << "\n";
+  for (const auto& descriptor : runtime->describe_bindings()) {
+    std::cout << "binding " << descriptor.object << " backend=" << descriptor.backend;
+    for (const auto& [key, value] : descriptor.labels)
+      std::cout << ' ' << key << '=' << value;
+    std::cout << '\n';
   }
-  AllocationRequest request{
-    .bytes = options.allocate_mib.value() * 1024 * 1024,
-    .intent = options.target.has_value() ? PlacementIntent::ExactTarget : options.placement,
-    .exact_os_numa_id = options.target,
-    .fallback = FallbackPolicy::None,
-    .alignment = 4096,
-    .use_large_pages = options.use_large_pages,
-  };
-  auto allocation = memory.allocate(request);
-  if (options.touch) {
-    auto* data = static_cast<std::byte*>(allocation.data());
-    for (std::size_t offset = 0; offset < allocation.size(); offset += 4096)
-      data[offset] = std::byte{1};
+  const auto snapshot = runtime->snapshot(view);
+  for (const auto& group : snapshot.groups)
+    std::cout << "capacity " << group.capacity_group << " limit=" << gib(group.hard_limit_bytes)
+              << " GiB committed=" << gib(group.committed_bytes)
+              << " GiB system_available=" << gib(group.system_available_bytes) << " GiB"
+              << (group.shared_remaining_bytes ? " shared_remaining=" +
+                    std::to_string(gib(*group.shared_remaining_bytes)) + " GiB" : "") << '\n';
+  if (options.allocate) {
+    const auto bytes = take(parse_memory_size(*options.allocate));
+    const std::string pools[] = {*options.pool};
+    const auto caps = take(runtime->mapping_capabilities(view, pools));
+    auto allocation = take(runtime->allocate(view, {"memory-info", runtime->participant(), *options.pool,
+      bytes, caps.page_bytes, BackingMode::shareable_remappable, {}}));
+    const auto& info = allocation.info();
+    std::cout << "allocation pool=" << *options.pool << " mapped=" << gib(info.mapped_bytes)
+              << " GiB quantum=" << info.page_bytes << " B actual_page_sizes=";
+    for (const auto page : info.actual_page_sizes_bytes) std::cout << page << " B ";
+    std::cout << '\n';
   }
-  const auto target = allocation.target().value();
-  std::cout << "allocated " << allocation.size() << " bytes on target " << target << " (OS node "
-            << memory.topology().memory_targets[target].os_numa_id << "), large-page bytes "
-            << allocation.large_page_bytes() << ", regular bytes " << allocation.regular_page_bytes()
-            << ", touched=" << (options.touch ? "yes" : "no") << '\n';
   return 0;
 } catch (const std::exception& error) {
   std::cerr << "vecops-memory-info: " << error.what() << '\n';

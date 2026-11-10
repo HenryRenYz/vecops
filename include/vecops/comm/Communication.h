@@ -18,6 +18,7 @@
 #include <vector>
 #include "vecops/runtime/CallAbi.h"
 
+namespace vecops::memory::model { class MemoryRuntime; }
 namespace vecops::comm {
 enum class Operation : uint32_t { Barrier, Broadcast, AllGather, AllToAll, SumFloat32 };
 struct Layout {
@@ -35,7 +36,11 @@ struct Specification {
 };
 struct Options {
   uint32_t threads = 1;
-  int memory_node = -1; // shared-payload OS target; -1 keeps OS placement
+  // Root payload allocation uses this exact runtime and its shared authority.
+  // The pool is an opaque public resource ID; backend NUMA binding belongs to
+  // MemoryRuntime. Imported page aliases never incur a second root charge.
+  std::shared_ptr<memory::model::MemoryRuntime> memory_runtime;
+  std::string payload_pool;
   std::vector<int> locality_groups;
   // Coarse-to-fine nested partitions. A copy level makes one distributed
   // replica/source in each destination partition; share levels reuse the
@@ -47,7 +52,6 @@ struct Options {
   size_t chunk_bytes = 256 << 10;
   uint64_t timeout_ms = 120000;
   bool relay = true;
-  bool require_placement = false; // verify persistent policy and physical pages
   // Auto recognizes equal interleaved AllGather outputs and gives complete
   // destination rows to one worker. Other layouts retain the generic path.
   // Every scheduling path uses vec byte transport with cold ISA selection.
@@ -77,6 +81,30 @@ public:
       Exchange exchange, const VecopsThreadPoolV1* executor = nullptr);
   ~Communicator();
   std::shared_ptr<Plan> prepare(Specification specification);
+  /** Collectively provision the maximum publication size and union of relay
+   * segments of every registered plan, after the embedding stops submissions
+   * and drains its local queue. All ranks must enter in the same cold order,
+   * with the same completed invocation epoch. A control Barrier or earlier
+   * payload invocation does not disable this preparation phase.
+   *
+   * No publication/borrowed consumer may remain active. The protocol proves
+   * all previous readers stopped, removes every imported publication alias,
+   * and only then retires/rebuilds roots. Existing publication contents and
+   * borrowed addresses are invalidated; user input/output tensors are not.
+   * New descriptors are published and all peer mappings acknowledged before
+   * return. Returns the SAME bool on every rank: true if any rank allocated
+   * publication/relay roots, false for an already provisioned fixed point.
+   * Failures poison the communicator and retain unproven owners as usual.
+   * No exchange, allocation or remapping is added to unchanged hot replay.
+   */
+  bool provision_registered_capacity();
+  /** Cold all-rank AND of a local planning/admission result, using only the
+   * metadata exchange. Call in the same order after stopping local submissions
+   * and draining work. False is a normal consensus result, not an abort. This
+   * does not allocate/map payloads, advance invocation epochs, or run a data
+   * collective. Exchange failure or inconsistent call order poisons the group.
+   */
+  bool preparation_consensus(bool local_success);
   /** Collectively create fixed page aliases outside capture/replay. Producers
    * write peer-major blocks; consumers see source-major blocks at stable VAs.
    * Blocks are page padded, so callers must honor block_stride(). No payload
@@ -89,6 +117,15 @@ public:
   /** Freeze capacity and plan registration after explicit model preparation.
    * Existing prepared plans remain reusable with new buffer addresses. */
   void seal();
+  /** Collective cold shutdown after the embedding stops every local reader.
+   * Releases roots only after every rank certifies that it has stopped.
+   * Abort poisons data operations but does not replace this stopped handshake;
+   * peers may collectively close an idle aborted communicator. A missing peer
+   * or active exchange lease prevents refund and retains roots conservatively.
+   * Closing ends PageExchange access permission and removes its page aliases;
+   * producer/consumer tensors must not be used after process-group shutdown.
+   */
+  void close();
   void abort() noexcept;
   int rank() const noexcept;
   int size() const noexcept;
@@ -158,6 +195,11 @@ public:
   void begin(uint32_t slot);
   void publish(uint32_t slot);
   void retire(uint32_t slot);
+  /** Cold all-participant stopped handshake, including after abort. Active
+   * producer/consumer leases must first be retired; no further phase calls are
+   * legal after close. A missing stopped acknowledgement remains a failure.
+   */
+  void close();
   void abort() noexcept;
 private:
   struct State;

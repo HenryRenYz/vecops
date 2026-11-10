@@ -1,6 +1,6 @@
 # Relocatable imported targets installed inside a Python wheel at vecops/_sdk.
 # This file deliberately does not include the normal exported target file: the
-# wheel ships only the core static library needed to compile user kernels, and
+# wheel ships the core and enabled resource/communication libraries, and
 # every path is derived from PACKAGE_PREFIX_DIR after package configuration.
 include_guard(GLOBAL)
 
@@ -19,12 +19,22 @@ set_target_properties(vecops::optimize_for_kernels PROPERTIES
         "$<$<COMPILE_LANGUAGE:CXX>:-falign-functions=64>;$<$<COMPILE_LANGUAGE:CXX>:-falign-loops=64>;$<$<COMPILE_LANGUAGE:CXX>:-fno-math-errno>"
 )
 
-if(EXISTS "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops_comm@CMAKE_STATIC_LIBRARY_SUFFIX@")
+if(EXISTS "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops_memory@CMAKE_STATIC_LIBRARY_SUFFIX@")
     find_package(Threads REQUIRED)
+    add_library(vecops::memory STATIC IMPORTED)
+    set_target_properties(vecops::memory PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops_memory@CMAKE_STATIC_LIBRARY_SUFFIX@"
+        INTERFACE_COMPILE_FEATURES "cxx_std_20"
+        INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include"
+        INTERFACE_LINK_LIBRARIES "Threads::Threads;rt")
+    set_property(TARGET vecops::vecops APPEND PROPERTY INTERFACE_LINK_LIBRARIES vecops::memory)
+endif()
+
+if(EXISTS "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops_comm@CMAKE_STATIC_LIBRARY_SUFFIX@")
     add_library(vecops::comm STATIC IMPORTED)
     set_target_properties(vecops::comm PROPERTIES
         IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@vecops_comm@CMAKE_STATIC_LIBRARY_SUFFIX@"
         INTERFACE_COMPILE_FEATURES "cxx_std_20"
         INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include"
-        INTERFACE_LINK_LIBRARIES "Threads::Threads;rt")
+        INTERFACE_LINK_LIBRARIES "vecops::memory;Threads::Threads;rt")
 endif()

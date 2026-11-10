@@ -1763,6 +1763,14 @@ execution_graph = result.graph
 execution_graph.write("encoder-bucket-512.json")
 ```
 
+Qualified application discovery providers may return a separate immutable
+`result.planning_graph` and defer decoding the full IR until `result.graph` is
+first accessed. The latter still denotes the complete trace. Frozen decoding
+and `ExecutionGraph.planning_packet()` / `from_planning_packet()` preserve a
+canonical digest while validating each newly decoded graph. Successful
+validation is reused only for recursively immutable snapshots, never mutable
+graphs or serialized validation flags.
+
 `ExecutionGraph` contains only plain Python dataclasses and JSON-compatible
 values; it has no Torch dependency. Its ordered events record operator names,
 stable logical scopes, formal argument access (`read`, `write`, or
@@ -1813,6 +1821,20 @@ precompile path to sample cold and steady-state iterations without pretending
 that the shortened trace is the complete execution. The capture layer does not
 choose memory tiers or allocate physical arenas; those are consumers of the
 serialized IR.
+
+`graph.event_execution_weights(capture_or_graph)` reads closed loop summaries
+and returns exact `fractions.Fraction` weights keyed by stable event ID. The
+first observed sample and explicitly marked prologue/epilogue samples each
+count once; other samples share the remaining declared iterations, with a
+minimum weight of one. Nested sample weights multiply. For example, a declared
+seven-iteration loop with a prologue and one steady sample gives their events
+weights `1` and `6`; nesting a five-iteration loop gives steady-body weights
+`4` and `24` in those two outer samples. Symbolic/nonpositive trip counts are
+left unexpanded. This read-only helper accepts `GraphCapture` after its loops
+close, ordinary graphs and immutable snapshots; it does not execute a loop or
+establish that two samples have interchangeable effects. Memory traffic queries
+use the same helper, so adapters can carry logical call counts from the shared
+graph facts without repeating the planning algorithm.
 
 `mark_retained` is intended for Python-side caches that outlive a tensor's last
 observed operator access. It extends the tensor and its complete alias storage
@@ -1903,44 +1925,79 @@ output type.
 Only graph inputs and first-used external bindings retain tensor owners during
 capture. Produced temporaries follow eager lifetimes; capture retains their IR
 metadata rather than all intermediate payloads. Capture/recorder ownership avoids
-reference cycles, so releasing the capture/executable does not require cyclic GC
-to return private arena allocations. This is distinct from an
-allocator guarantee: ordinary functional ATen results still allocate through
-ATen during replay. Optional `memory_plan=` must describe this exact capture and
-can replace internal, nonescaping empty-factory allocations with private planned
-views. Unsupported fast placements fail; unapplied slow functional placements
-are listed in `replay.allocator_policy`.
+reference cycles, so releasing an executable does not require cyclic GC to
+return its owned physical roots. External inputs and module state retain their
+explicit storage owners. In-place updates remain visible; rebinding a module
+attribute or `.data` requires binding a new graph.
 
-When capture observes a live `PlanSession`, compilation isolates the bound
-planner views into a graph-private arena on the same requested memory tier and
-domain by default. Disconnected accessed byte components are compacted; relative
-view geometry and overlap within each component are preserved. Holes within a
-strided tensor's accessed span remain allocated. The original session may remain active,
-reuse its slots, close or leave old output aliases alive without overwriting the
-graph's private storage. `allocator_policy` reports copied bytes, source arena
-capacity/offset, requested domain, actual allocation target ID and large-page
-bytes. Captured arena state/weights become compile-time snapshots by default;
-the explicit immutable-state lease can instead pin validated dedicated slots.
-See [Planner state borrowing and arena compaction](#planner-state-borrowing-and-arena-compaction)
-for eligibility, lifetime and external-mutation rules. This differs from the live content semantics for
-ordinary weights outside an arena. Absolute `storage_offset` observations and
-`as_strided(..., storage_offset=<integer>)` on rebased aliases are rejected.
-A relative `as_strided` with `storage_offset=None` is supported only when its
-recorded output keeps the same storage/dtype and accesses a byte span contained
-in its self tensor's retained span; empty outputs access no bytes. Expanding a
-slice or empty alias beyond that retained span is rejected. A graph input overlapping such an arena
-currently requires explicit input staging and is rejected at compilation.
-Empty-only borrowed arena bindings and partially overlapping unrecognized
-storage owners are also rejected. Compiling another executable from the same
-capture makes another independent arena; it does not share writable graph slots.
+`capture.prepare_torch(...)` performs pointwise lowering, donation and native
+workspace description before allocating storage. It returns one `TorchGraphPlan`
+whose `memory_requirements()` describes the final optimized storage identities.
+`plan.compile(memory_program=prepared, memory_call=...)` binds that exact plan;
+it cannot repeat graph rewrites or silently add a second tensor/workspace arena.
+A plan binds once; prepare another plan for another executable. Ordinary
+`capture.compile_torch(...)` runs the same preparation/binding sequence.
 
-Weights/buffers bound outside a planner arena retain their captured storage
-handles: in-place content updates are visible, while rebinding a module
-attribute or `.data` requires recapture. Outputs preserve their execution
-aliases. An output aliased to an input or static bound buffer is borrowed and
-may change on later execution; clone it to retain a previous step. Functional
-outputs have their ordinary ATen allocation lifetime. No guarantee of distinct
-storage for every returned output is implied.
+Graph-owned factory and supported pointwise outputs use the common resource
+program. Small tensors share page slabs with aligned byte offsets. Absolute
+storage offsets on relocated graph buffers are rejected; a relative
+`as_strided(..., storage_offset=None)` must remain inside its proven source span.
+Borrowed outputs can be overwritten by the next call; clone values that need
+independent contents. Escaped Tensor storages retain the actual native mapping
+and backing owner after explicit program closure.
+
+Functional ATen results without explicit output buffers remain framework-owned.
+They appear in `plan.framework_requirements`, separate from managed requirements.
+`plan.framework_budget_recipe(pool, participant=...)` creates a backing-only
+pending-budget recipe for a caller-selected concrete pool. Reserve it without
+acquiring backing; it reserves capacity and does not claim to place Torch malloc
+pages. Actual framework allocations already reflected in OS free samples can
+therefore be conservatively counted again while this lease remains live.
+
+Cold distributed preparation must also close transport capacity before graph
+admission. `PreparedProgram.planned_placement(...)` inspects the offset-only
+proposal without claiming resident pages; `placement(...)` describes materialized
+backing. `TorchGraphPlan.configure_communication_placements(...)` selects routes
+from the proposal, and `vecops.graph.provision_communication_capacity(plans)`
+provisions each distinct stopped transport provider collectively. A no-growth
+fixed point is retained with `finalize_communication_contract()` before final
+compilation. `GraphMemoryCompiler.prepare_model` accepts `finalize_resources` and
+`preparation_consensus` callbacks to coordinate this ordering and all-participant
+admission retries. Successful grants stay held while peers replan; a collective
+finalizer runs only after all proposals are ready and all graph grants are
+withdrawn at a barrier. It retains the offset plans and reserved VA unless
+resource growth requires recompilation. Fatal failure refunds the local grant;
+see `docs/WorkspacePlanning.md` for the complete sequence.
+
+Each compilation freezes its budget scalars and reuses only exact placement and
+cost-query results within that attempt. A fresh admission snapshot rebuilds
+those caches. Final runtime estimates report capacity shortfalls by group, pool
+or shared constraint, including exact requested and available byte counts; the
+planner retains these scalar facts in a capacity error for auditing.
+Group and constraint shortfalls compare newly required backing after cache reuse;
+pool shortfalls compare total requested bytes. The available count is the one
+used by that estimate, rather than a later snapshot.
+
+During `prepare_model`, a typed group shortfall can also teach a temporary
+fresh-allocation margin equal to the observed physical sample loss. Learning
+requires identical accounting and untruncated pool allowances. A new grant,
+constraint or independent pool limit clears the margin. Idle cache remains
+available, public snapshots and runtime limits stay unchanged, and all temporary
+policy state is restored on success or failure. Once a typed physical rejection
+establishes that observation, every untruncated group's measured decline across
+the same-accounting snapshots can contribute its own maximum margin. No margin
+is summed across samples or copied between groups. One compiler instance
+prepares one model at a time. Compact fallback releases the preferred failure's
+traceback and layout metadata before compiling its replacement.
+
+A known unaccepted shared physical-free reserve failure carries primitive
+evidence from its last actual snapshot. `prepare_model` can learn its sample
+loss after a local-grant rollback advances epoch, provided compilation, reserve
+and current snapshots have identical complete nonphysical accounting. This
+exception does not waive changed peer balances, alias-pool quotas or overlapping
+constraints. The helper preserves its `RuntimeError` category and message,
+retains no native snapshot or original exception context, and does not itself
+retry a capacity rejection.
 
 The thin Torch-only executor is compiled at the first executable capture against the installed Torch
 version and C++ ABI. It does not link a second OpenMP runtime or an SDK library.
@@ -1951,72 +2008,83 @@ interprocess locking protects cache construction. First-use native module build,
 graph capture, graph lowering and steady replay costs should be measured
 separately.
 
-### Offline HBM/DDR planning
+### Resource-graph memory planning
 
-`vecops.planner` consumes a concrete `ExecutionGraph` without importing Torch.
-The production entry point accepts an explicit machine profile and returns a
-pointer-free, serializable plan:
+`vecops.planner` consumes framework-neutral storage requirements and the public
+C++ memory query interface. Agents, pools, capacity groups and transfer methods
+have opaque identities. The same algorithm supports any number of memory pools;
+no CPU hierarchy or fixed tier count appears in its policy data structures.
 
 ```python
-from vecops import planner
+from vecops import memory, planner
 
-machine = planner.profile_from_system(
-  memory_system,
-  fast_capacity=3 << 30,
-  slow_capacity=64 << 30,
-  fast_bandwidth_mib_s=295_578,
-  slow_bandwidth_mib_s=153_324,
-  transfer_bandwidth_mib_s=148_797,
-)
-plan = planner.plan_memory(execution_graph, machine)
-planner.validate_plan(execution_graph, plan)
-plan.write("model.memory-plan.json")
+runtime = memory.default_runtime()
+view = runtime.view()
+consumers = tuple(agent.id for agent in view.graph.agents
+                  if agent.id in view.executable_agents
+                  and 'host_load_store' in agent.capabilities)
+plan = capture.prepare_torch(native_pointwise=True, borrow_outputs=True)
+requirements = plan.memory_requirements(consumers=consumers)
+compiler = planner.GraphMemoryCompiler(runtime, view, runtime.snapshot(view))
+program = compiler.compile(requirements)
+prepared = program.prepare(runtime, view)        # virtual addresses only
+prepared.materialize(external=external_tensors)  # admit roots and map pages
+replay = plan.compile(runtime=runtime, memory_program=prepared)
 ```
 
-The planner collapses tensor aliases to storage groups, scales access benefit
-through sampled loop trip counts, selects HBM intervals under a hard capacity,
-colors non-overlapping lifetimes into reusable arena offsets, and emits ordered
-allocate/copy/free actions. Read-only external state has a DDR home and an HBM
-replica; graph outputs remain in DDR. A plan embeds the exact graph digest and
-is rejected if replayed with another trace.
+Materialization uses `planner.reserve_recipe_latest(runtime, view, recipe)`:
+each admission attempt takes a fresh capacity snapshot. Only an explicitly
+rejected stale epoch is retried, up to 64 attempts; capacity, permission and
+validation errors propagate immediately. Callers reserving framework-only
+budget recipes can use the same helper without acquiring physical backing.
 
-The equivalent CLI is:
+For a framework allocator whose actual policy permits several pools, use
+`lease, recipe = planner.reserve_budget_latest(runtime, view, byte_count,
+pool_order, native_module=None, attempts=64)`. The exact uint64 byte count is
+reserved without physical backing or virtual mappings. Each attempt rebuilds
+the recipe from a fresh snapshot, greedily using the caller's ordered opaque
+pool IDs and rounding each share up to its pool page quantum. The returned
+recipe records the full charge, which may exceed `byte_count`. Alias pools
+share one capacity-group balance; physical free, hard/shared headroom and every
+overlapping constraint remain binding. Managed idle cache is not malloc capacity.
+Only explicit unaccepted stale/capacity rejections allow bounded replanning;
+permission, invalid-recipe and uncertain-commit errors propagate. Insufficient
+ordered packing fails without a reservation and does not establish global
+infeasibility under other pool orders. This helper neither selects a hardware
+domain nor forces framework malloc placement: callers must prove that all
+listed pools belong to the allocator's actual permitted domain and retain the
+lease for the budget's lifetime. The static `reserve_recipe_latest` contract is
+unchanged.
+
+Requirements collapse tensor aliases into storage identities. Placement uses
+runtime-authorized mapping capabilities and measured/reference cost facts;
+unknown costs retain an explicit conservative flag. Pool capacity, unique
+physical capacity groups and overlapping domain caps all constrain admission.
+Integer-offset packing reuses only compatible placements with nonoverlapping
+lifetimes. Weighted page patterns retain their stripe phase; exported and
+independently mapped buffers receive exclusive page envelopes.
+
+`compile_model(programs, calls, serialized=True)` jointly compiles multiple graph
+calls. `ProgramCall.bindings` links local storage identities to model identities,
+including producer outputs, consumer inputs and retained state. Transient peaks
+share roots across proven serialized calls. Retained native workspace remains
+live throughout the model program. The caller specifies consumers and output
+retention; these are scheduling facts rather than memory-model hierarchy rules.
+
+`planner.audit_plan(program)` reports offset-only bindings, roots, initialization
+copies and group charges. `program.dumps()` emits canonical TOML without process
+addresses or handles. The command-line entry point accepts a captured graph,
+resource hardware/policy files and optional opaque pool/agent selections:
 
 ```sh
-python -m vecops.planner model.graph.json \
-  --output model.plan.json \
-  --report model.plan-summary.json \
-  --discover-system \
-  --fast-capacity 3GiB \
-  --slow-capacity 64GiB \
-  --fast-bandwidth-mib-s 295578 \
-  --slow-bandwidth-mib-s 153324 \
-  --transfer-bandwidth-mib-s 148797
+python -m vecops.planner model.graph.json --hardware machine.toml \
+  --policy memory-policy.toml --output model.memory.toml
 ```
 
-The explicit bandwidth values above are an example of measured target data.
-When omitted, `profile_from_system()` retains topology-provided values. Use
-measured values for production scoring because rated topology bandwidth can
-substantially overstate the fast/slow ratio seen by the intended thread count.
-
-`planner.PlanSession` binds the plan to `vecops.memory` arenas. It can
-materialize strided Torch views with `tensor_view()` and temporarily replace
-selected read-only module parameters/buffers with HBM replicas through
-`bind_module_state()`. Session exit restores the original module state and
-releases both arenas, including exceptional exits.
-
-Framework wrappers may call `planner.empty()` and `planner.empty_like()` as
-drop-in factory functions. With factory replay enabled, `PlanSession` allocates
-the complete planned HBM peak once and returns prebuilt views at fixed offsets;
-without a session they directly forward to Torch. Sampled steady-state loops
-are replayed by runtime epochs, and temporaries whose aliases escape an
-iteration are excluded by `PlannerConfig(require_replayable_temporaries=True)`.
-
-`planner.audit_plan(graph, plan)` reports coverage for parameters, buffers, and
-packed buffers, including accessed bytes and DDR-to-HBM copy actions. Its
-`movement` section also reports duplicate copies, low-reuse copies, and
-HBM-to-DDR copy-backs. Read-only state remains a clean DDR-backed replica and
-never receives an unnecessary HBM-to-DDR writeback.
+Use ordinary `torch.empty`, `torch.empty_like` and `tensor.contiguous()` in
+captured code. Their ATen dispatcher operations and storage lifetimes remain
+visible to the graph and are bound by the prepared resource program. Eager
+resource-backed allocation uses `memory.Pool`.
 
 ## Framework registration
 
@@ -2080,28 +2148,29 @@ entry. `VECOPS_TORCH_PREPARED_CALL=0` disables this optimization for A/B tests.
 NumPy arrays use the compiled template directly, with caller-owned or
 automatically allocated outputs according to `out_idx`.
 
-## Heterogeneous CPU memory
+## Memory resources and eager pools
 
-When the optional `vecops::memory` component is built, Python exports
-`vecops.memory.System`, owning buffers, NumPy factories, topology/tiers/stats,
-and a bounded workspace session. The memory module is absent when
-`VECOPS_BUILD_MEMORY=OFF`; importing ordinary vecops APIs remains unchanged.
+When `VECOPS_BUILD_MEMORY` is enabled, `vecops.memory.Runtime` owns the C++
+resource graph, capacity authority, arenas, mappings and completion service.
+`Runtime.open(hardware_file, policy_file=...)` binds a machine-independent TOML
+template to current backend inventory and process grants. `Runtime.discover()`
+provides a generic Linux CPU topology when no template is selected.
 
 ```python
-system = vecops.memory.System(
-  target_overrides=[
-    {"os_numa_id": 16, "kind": "hbm", "max_managed_bytes": 3 << 30},
-  ],
-)
-
-with system.workspace_session(fast_capacity=3 << 30, slow_capacity=8 << 30):
-  result = model(inputs)
+from vecops import memory
+runtime = memory.Runtime.open('machine.toml', policy_file='memory-policy.toml')
+pool = memory.Pool.create(runtime, 'working-domain', allowed_pools=['chosen-pool'],
+    hard_limit=0.8, grow_by_bytes=16 << 20)
+with memory.use_runtime(runtime):
+    tensor = pool.empty((1024, 1024), dtype=torch.float32)
 ```
 
-The single-use session affects registered Python operators and framework
-bridges on the calling thread. It freezes the CPU domain, owns one shared arena
-per tier, and releases both on exit. It does not replace the process allocator.
-See `docs/Memory.md` for placement and lifetime semantics.
+Domain and pool names come from the configured resource graph. Arena caches
+retain already charged roots, and suballocations do not reenter global capacity
+admission. Tensor storage and aliases keep their native allocation alive.
+`Runtime.contract()` returns immutable resource/grant/policy facts for prepared
+artifact guards, excluding addresses, current free capacity and epochs.
+See [Memory](Memory.md) for C++ ownership, sharing and mapping contracts.
 
 ## Kernel inspection, diagnostics and profiling
 
@@ -3043,41 +3112,23 @@ trapping or effectful reassignment retains the declaration it requires even
 when its resulting value is unread; cleanup preserves its original execution
 path and exception timing.
 
-#### Planner state borrowing and arena compaction
+#### Resource-program tensor ownership
 
-`GraphCapture.compile_torch(borrow_readonly_state=False)` keeps the default
-isolation/snapshot contract for captured planner storage. Disconnected accessed
-byte spans are compacted into a private owner. Views and actual overlapping
-byte ranges retain their relative positions within each connected component;
-one independent StorageImpl is retained per original storage identity across
-its components. Tensor strides remain unchanged. Storage capacity, raw pointers
-and absolute storage offsets are not a portable property of the replay. Explicit
-storage-offset observations and absolute-offset `as_strided` on planner-arena
-aliases are rejected. Relative `as_strided(..., storage_offset=None)` inherits the
-relocated self offset and is permitted only within self's retained byte span
-(with same storage identity/dtype); empty outputs access no byte. Relative views
-that expand into other components or beyond a sliced/empty self are rejected.
+Captured external inputs and module state retain their explicit storage owners.
+Graph-owned storage is compiled to integer byte offsets in a resource program;
+relative tensor aliases preserve their canonical storage identity and strides.
+Returned tensor storage pins both its virtual reservation and actual physical
+binding, including aliases made after replay. Closing a prepared program cannot
+free physical pages still owned by an escaped tensor.
 
-The explicit `borrow_readonly_state=True` policy can instead pin an existing
-planner owner for immutable model-state slots. Eligibility requires an actual
-bound/copied parameter or buffer, a fast replicated read-only placement marked
-`eager_external_replica`, and a slot that never overlaps any other plan placement,
-even at a different epoch. The bound view is frozen independently of a module's
-later `.data` restoration. Closing the source session does not free this owner.
-The caller must not mutate borrowed state, including through old aliases, until
-the executable is released. This is an immutable lease, not a general read-only
-input optimization. Captured writes through any actual byte alias are rejected.
-Unselected factory/dynamic buffers still receive private storage. The allocator
-policy reports copied bytes, compact components and borrowed state ranges.
+Readonly state relocation is explicit: mark its `BufferRequirement` with
+`may_redirect=True` and a selected `PlacementPlan`, then pass the canonical
+source tensor to `PreparedProgram.materialize(external=...)`. Initialization
+copies happen once during materialization. Mutable state needs an explicit
+commit policy and cannot use this readonly relocation path.
 
-Storage identity observations through the private `torch._C._is_alias_of` helper
-are rejected during executable capture, including cases where a mixed borrowed
-state/private temporary owner would split one original storage. A capture-only
-Python profile guard detects this C call, chains an existing Python profile and
-restores it on success/failure. An active non-callable C profiler (such as
-`cProfile`) is rejected without replacing it: capture first, then profile replay.
-This guards the supported Tensor program; it is not a sandbox for arbitrary
-private C APIs or Python control flow. Replay itself has no profiling callback.
+Storage identity and data escapes remain rejected during capture. Replay has
+no Python profiling callback or hidden allocator session.
 
 
 ### Prepared C++ source nodes in Torch replay
@@ -3114,6 +3165,11 @@ follow rebound addresses. Planner input/binding overlap checks use actual live
 byte spans; disjoint views of one arena owner require no staging copy.
 Integer-argument `narrow` views follow the same guarded geometry rule.
 An empty view without an addressed anchor retains its runtime operation.
+An internal storage declared as zero bytes uses one metadata-only empty
+Storage per storage identity. Its empty aliases preserve their strides and
+original storage offsets without requesting backing pages or planner capacity.
+A nonempty view of a zero-byte storage is rejected. Empty slices of a nonempty
+storage continue to use that storage's planned binding.
 Tensor-valued `narrow` starts remain runtime operations because their offsets
 depend on data rather than input metadata.
 Recorded `to`/`contiguous` calls that returned the exact input tensor are
@@ -3165,81 +3221,202 @@ headers and ABI; an available C++20 compiler is required. Importing configuratio
 types alone does not import Torch. Install the `communication` extra for Torch
 and, on Python <3.11, TOML parsing.
 
+Initialization passes the active runtime through `runtime.native.export_bridge()`.
+Its named capsule retains a native owner and validates the runtime interface and
+C++ standard-library ABI, independently of each extension's pybind registry.
+The backend retains that owner after initialization; no raw runtime integer or
+Python type-registry cast is used. Capsules are process-local and cannot be
+saved as graph or configuration data.
+
 ```python
 import torch.distributed as dist
 from vecops import distributed as vd
 
 vd.register_backend()
-dist.init_process_group("vecops", pg_options=vd.Options.from_file("platform.toml"))
+dist.init_process_group("vecops", pg_options=vd.Options.from_file("communication.toml"))
 group = vd.group()
 full = group.all_gather(local, dim=0, hints=vd.Hints(reuse="once"))
 other_shard = group.reshard(pair, source_axis=0, target_axis=1)
 ```
 
 Run this under `torchrun` or another launcher that sets the usual rendezvous and
-rank environment. Bind each process before initialization. The backend discovers
-the CPU NUMA node from affinity and takes its memory target and replica domain
-from the **vecops platform file**; model configuration need only supply its path
-(or `VECOPS_COMM_CONFIG`). The example
-`configs/platforms/920f4.toml` describes the concrete CPU/HBM mapping. It is
-machine-specific data, not a transport assumption. Without a platform file,
-communication uses ordinary OS placement and the flat algorithm.
+rank environment. Bind each process and install its `memory.Runtime` before
+initialization. All ranks on one host must use the same private job capacity
+directory; independent or different capacity authorities are rejected.
+`VECOPS_MEMORY_CAPACITY_DIRECTORY` configures the default runtime. Source
+snapshots, required relay replicas and PageExchange storage all allocate real
+roots through that runtime. Their imported aliases create no second charge.
 
-The version-1 TOML separates `topology.domains` (arbitrary parent tree, e.g.
-host/socket/die/NUMA), `memory.pools` (owners, kinds and OS target nodes),
-`resources` (shared bandwidth-resource identities), `topology.links` (resource
-references), and `communication` (implementation policy). Nominal resource
-capacities are descriptive and do not constitute evidence for automatic routing.
-Routing supports nested coarse-to-fine partitions and unequal group sizes:
+`VECOPS_COMM_POOL` optionally selects an opaque allocatable pool ID. Otherwise
+public host-agent access costs choose among pools with shared page mapping
+capabilities; incomplete costs retain deterministic resource order. Runtime
+backend bindings determine physical placement and the page quantum. A separate
+portable communication policy (`VECOPS_COMM_CONFIG`) controls thresholds and
+search; it contains no machine hierarchy or memory-kind definitions.
 
-* `algorithm="flat"` keeps direct published-source reads.
-* `algorithm="hierarchical"`, `replica_domain="die"` retains the compact
-  single-level policy: one distributed replica/source/destination domain above
-  `relay_threshold_bytes`, followed by private materialization or a consumer.
-* Explicit `communication.levels` composes `share` and `copy` independently.
-  For example `levels=[{domain="socket",mode="share"},
-  {domain="die",mode="copy"},{domain="numa",mode="share"}]` shares across
-  sockets, replicates into each die, then borrows those distributed replicas
-  within the die. A copy stage pulls each source directly into its assigned
-  destination rank; no preliminary leader aggregation occurs. Source modulo
-  destination group size balances equal payloads. It is deterministic for
-  asymmetric groups, though not a weighted-byte optimal assignment for ragged
-  traffic. Stage barriers protect parent replicas before downstream reuse.
-* `algorithm="auto"` keeps flat routing until a valid calibration exists, unless
-  explicit level modes override that default.
-  `communication.calibration="routes.json"` loads measured overrides for exact
-  operation/dtype/input/output sizes and strides. `tuning.tune_all_gather` tests
-  supplied mode combinations under simultaneous all-rank traffic, rotates their
-  order and compares median max-rank times against the first/default candidate.
-  It requires at least 5% gain above observed variation. `write_profile` saves
-  evidence and installs the selected table. Calibration runs before capture and
-  seal; replay never tunes. A different boot, frequency policy, rank placement,
-  worker count, topology or transport binary invalidates the profile and keeps
-  default routing. Context includes every member's worker count and frequency
-  tag; validity is a collective decision, so one stale member makes the whole
-  group fall back. Missing/mismatched profile files fail collectively.
-  `VECOPS_COMM_TUNING_TAG` can also invalidate profiles after
-  manual clock/MSR changes not reflected in sysfs frequency policy. Nominal GB/s
-  numbers never trigger an automatic choice.
+The optional adapter links `libvecops_memory.a`. By default it first checks the
+selected SDK's `lib`, then `_sdk/lib` beside the active `vecops._C` extension.
+Thus an editable installation can use checkout headers and the installed runtime
+archive without an environment override. A source extension in CMake's
+`build/python/bindings` layout can also use that same build's `src` archive; no
+other ancestor directories are searched. Installed wheels carry the archive in
+`vecops/_sdk/lib`.
 
-`configs/platforms/hierarchy-example.toml` shows explicit socket/die/NUMA
-nesting, a die-owned DDR pool and a shared link resource. It is a schema example,
-not a measured platform. Use the communication benchmark to produce a cold
-profile, for example:
+For a separately copied source/frozen extension, `VECOPS_MEMORY_LIBRARY` explicitly
+selects its matching archive. An invalid or empty override raises an error instead
+of falling back to another build. The selected archive's content hash remains
+part of the communication artifact identity.
+
+Potential relay windows reserve address space but allocate only segments required
+by registered plans. Growth retains old root receipts until all ranks acknowledge
+the replacement generation. Stable replay uses the existing shared control
+protocol without capacity-file transactions. Normal process-group shutdown
+drains local work, unmaps imported aliases and waits for all-rank stopped
+acknowledgements before refunding roots. An abort without that proof retains its
+receipts conservatively; dead owners remain visible to the authority.
+
+The `communication-policy/0.1` TOML is independent of the machine template:
+
+```toml
+schema = "communication-policy/0.1"
+[communication]
+algorithm = "auto"
+relay_threshold_bytes = 1048576
+minimum_gain = 0.05
+sync_warmup = 3
+sync_rounds = 7
+# calibration = "routes.json"
+```
+
+`CommunicationCompiler` exchanges public rank-agent grants, payload pool IDs,
+actual launch worker counts and resource connections at group initialization.
+It derives nested partitions from shared directed fabric cuts. Arbitrary pool,
+agent and resource names work; no hierarchy labels or memory kinds are parsed.
+Unequal group sizes and unequal directed rates are supported. A resource local
+to one branch can be nontransitive across the initial full group: defer that
+resource while another proven cut establishes its enclosing branch, then
+recheck it within the refined groups. If no proven refinement can advance and
+an unresolved resource remains, discard the hierarchy conservatively. Crossing
+valid cuts and unprovable routes retain the flat candidate and report
+`missing_facts`; local deferral does not manufacture their intersections.
+
+For a known materialized AllGather layout, cold graph preparation obtains final
+placement from its materialized `PreparedProgram`, or observes fixed external
+CPU pages through `Runtime.observe_external`. Dynamic invocation inputs remain
+unknown; metadata examples and framework budget declarations are not placement
+proof. Costs include source publication, replica reads and writes, and actual
+final output writes. Each enabled copy stage assigns remote sources in rank
+order to the destination member with least accumulated bytes, then synchronizes.
+The native lowering uses these same partitions and assignments.
+
+Bandwidth loads are evaluated by the public memory cost model. A bounded cold
+native-barrier sample supplies stage overhead (max across ranks, then median),
+or `stage_us` supplies an explicit microsecond value. An unknown publisher input
+read may be cancelled when it is exactly common to all routes; total cost still
+reports `quality="incomplete"`, while `comparison_complete` can be true. Unknown
+candidate-specific writes or routes force flat selection. `statistics()["routing"]`
+contains derived partitions, overhead samples, missing facts, candidates and
+selected modes. Capture performs the search once; hot native replay has no
+Python planning, residency queries or capacity-file transactions.
+
+`algorithm="flat"` disables automatic replication. `Hints(copy_levels=(0,1))`
+provides an explicit route for the generated coarse-to-fine partitions. The
+relay threshold remains independent; to measure small copy candidates use
+`relay_threshold_bytes=0` in both tuning and deployment policy.
+
+Empirical calibration may replace the reference cost comparison.
+
+The memory runtime's optional TOML overlay is separate from communication's
+consumer-specific calibration. `native.open_runtime(hardware_file,
+calibration_file=..., options=...)` loads the supported
+`memory-calibration/0.4` subset: access read/write curves, copy transfer
+curves/cases, and copy write coefficients. Unsupported compute/triad/fallback
+models are errors rather than ignored fields. The complete historical design
+examples contain additional models; they are not interchangeable with this
+executable subset. See `docs/MemoryResourceMigration.md` for the schema and
+provenance rules.
+
+For a known workload, create `native.CalibrationControl()`, assign its actual
+`cpu_cores` and opaque `implementation`, then assign
+`options.calibration_controls = {agent_id: control}` on a
+`native.LinuxRuntimeOptions` instance before opening the runtime. Bound STL
+mappings are Python copies; editing a dictionary returned by a property does
+not update its C++ owner. This is a construction-time workload contract, not an
+inference from CPU grants or execution slots. Missing or mismatched controls retain hardware
+reference estimates. `runtime.performance()` returns a detached dictionary with
+concrete target bindings, profiles and resolved route cases; editing it cannot
+change the runtime. A measured curve does not promote a mixed estimate involving
+reference physical resources to calibrated quality.
+`tuning.tune_all_gather` measures actual materialization. Borrowed consumers
+require **their own** profile: `tuning.tune_consumer` runs the real native
+consumer, activates its described workspace through a memory Program and
+checks every route against flat numeric results. It accepts an actual output
+placement (pool-to-byte weights); otherwise it requires complete observed pages.
+It restores initial output contents before each timed block, including consumers
+that update existing values. Profiles include exact operator/DSO hash, integer
+specializations, source/output layouts, observed output placement and all-rank
+runtime context. Ordinary copy calibration never selects a borrowed-consumer
+route. Without a matching consumer profile or an explicit hint, fused compute
+and memory overlap remain an auditable missing fact and that consumer stays flat.
+
+Both tuners use the first candidate as baseline, rotate candidate order and
+retain all max-rank round timings. The consumer tuner requires a flat baseline. The initial median-time winner is fixed before confirmation.
+With at least five rounds, unanimous paired gains above `minimum_gain` may select
+it only when both median(paired gain)-2*MAD and the all-sample mean-time gain
+also exceed that minimum. This margin is a heuristic, not a confidence interval.
+An otherwise plausible uncertain winner receives at most one additional batch
+of five baseline/winner rounds, alternating order and preserving per-block
+consumer numeric checks and output restoration. All five new rounds must beat
+the minimum; at least 90% of all paired rounds must win, and combined robust and
+mean-time margins must pass. No other candidate is retried or substituted after
+confirmation; inconclusive cases retain the baseline. Three-round tuning therefore
+requires confirmation before selecting a non-flat route. A case whose maximum
+possible confirmed win ratio cannot reach 90% remains flat without extra work.
+`noise_fraction` keeps its historical full-range/median diagnostic definition;
+it no longer vetoes a route by itself. `selection` records the reason, fixed
+winner, initial/confirmation/combined statistics and actual per-candidate round
+counts. All raw samples, including adverse tails, remain in the profile. `write_profile` writes rank-zero
+JSON evidence atomically and installs the same table on all ranks. Profiles
+use schema 2 and match stable CPU/architecture identity (including available
+microcode and firmware facts), kernel, frequency policy, ordered rank CPU grants,
+worker counts/binding configuration, resource graph, policy and transport binary.
+The consumer key separately retains the exact executed DSO and tensor contract.
+Job-local capacity lock identity and boot UUID are excluded only from this
+performance projection. The complete `backend.tuning_context`, live same-host
+and shared-capacity checks, and captured group/alias authority remain unchanged;
+the profile also records its original full context as `runtime_context` for audit.
+`tuning.profile_context(backend)` returns a detached performance match context
+for `load_profile`; it is not a mapping permission. Explicit thread-pool CPU
+lists or runtime-discovered grants take precedence over a caller mask narrowed
+by OpenMP. An authoritative nonempty CPU grant may have fewer CPUs than workers
+because native workers may share granted CPUs; only an undersized caller-only
+fallback mask is rejected as incomplete. Missing stable CPU evidence or a complete team CPU grant prevents
+profile creation/application. Old schema-1 profiles are rejected and need fresh
+calibration. Stale profiles fall back collectively; unreadable or inconsistent files
+fail collectively. `VECOPS_COMM_TUNING_TAG` invalidates manual clock changes not
+reflected in sysfs. These measurements cover the measured operations; complete
+inference still needs its own performance check.
+
+An upper compiler can call `tuning.consumer_requests(captures)` after native
+compilation and before executable binding. It returns deduplicated opaque
+operator/specification and source/output geometry requests in observed order,
+with their existing control groups. The query creates no plans, payloads,
+workspaces or mappings. `tuning.consumer_calibration_options(group)` supplies
+detached policy facts and candidates from the generated resource cuts. The
+consumer owner must explicitly provide valid bounded synthetic inputs;
+arbitrary opaque consumers are never automatically executed by this query.
+`tune_consumer` collectively admits its workspace before starting measurement
+and records every rank's offset-only workspace recipe alongside its results,
+so output placement evidence does not hide a different workspace memory tier.
+
+`configs/communication/default.toml` is the portable default. For example:
 
 ```sh
 torchrun --nproc-per-node=8 benchmarks/comm/TorchCollectives.py \
-  --backend vecops --config configs/platforms/920f4.toml \
+  --backend vecops --config configs/communication/default.toml \
   --cpus rank-cpus.json --tokens 768 --batch-dim \
   --iterations 20 --tune-profile routes-768.json --output timing-768.json
 ```
-
-The relay size threshold still applies to explicit per-level copy modes. To
-calibrate copy versus sharing below that heuristic, set
-`communication.relay_threshold_bytes=0` in the calibration platform file and
-deploy the resulting profile with that same file. Otherwise candidates below
-the threshold all execute direct sharing; their timing cannot establish a copy
-route benefit. A copy-level hint does not override this separate size policy.
 
 `benchmarks/comm/ResidentGranularity.py` compares materialized AllGather and
 AllToAll graph replay across chunk sizes, using the configured memory pool,
@@ -3254,14 +3431,11 @@ compares the joint producer + AllToAll + consumer cost for private, source-place
 and destination-placed outputs under native graph replay, including reuse=1/4.
 A synchronization-only microbenchmark cannot establish the benefit of aliases.
 
-Additional supported policy keys are `initial_capacity_bytes`, `chunk_bytes`,
-`require_placement`, and `timeout_ms`. `direction` currently accepts only `auto`:
-AllToAll pushes into peer inboxes; AllGather pulls published data. Strict
-placement installs persistent shared-object `MPOL_BIND|MPOL_F_STATIC_NODES`,
-temporarily binds only the allocating caller, and verifies both the installed
-policy and actual shared pages; a missing target or failed placement raises an error. No machine
-configuration is modified. `Options.threads` selects participating lanes in the
-existing vecops native pool, not a second communication pool.
+Additional policy keys are `initial_capacity_bytes`, `chunk_bytes`, `timeout_ms`,
+`copy_schedule` and `early_snapshot`. Unknown keys, including old hardware
+hierarchy sections, are rejected. Actual page placement and permissions belong
+to `MemoryRuntime` and its Linux backend. `Options.threads` selects participating
+lanes in the existing vecops native pool, not a second communication pool.
 
 Standard c10d operations include CPU strided AllGather/AllToAll, contiguous
 single-tensor variants, broadcast, barrier, ragged gather through
@@ -3271,7 +3445,7 @@ counts and sequence are validated across ranks. Inputs may alias outputs because
 publication completes before materialization. All outputs remain private,
 materialized tensors: hints never authorize shared aliases.
 `Hints(copy_levels=(0,1,0))` explicitly overrides a value AllGather's per-level
-route; other backends ignore it. The number/order matches the platform levels. Other c10d backends ignore these
+route; other backends ignore it. The number/order matches the generated resource partitions. Other c10d backends ignore these
 performance hints; the value facade uses native functional collectives during
 vecops graph capture, including its Gloo fallback.
 
@@ -3332,6 +3506,13 @@ matrix layout without a complete gathered intermediate. The graph keeps every
 consumer compiler/DSO owner alive. This is an explicit contract, not something
 `reuse="once"` authorizes automatically.
 
+Borrowed resident consumers preserve the registered kernel's destination access
+when preparing graph plans: an `inout` destination remains read-modify-write,
+while an output-only destination remains write-only. A synchronous consumer may
+pack an initialized owned destination before overwriting it, provided all reads
+finish before returning and it retains no peer address. This does not change the
+snapshot lease, publish/acquire/retire ordering, or read-only peer storage.
+
 `PageExchange(block_shape, dtype, slots=1, placement="destination")` collectively
 prepares fixed, shared AllToAll storage before capture. Each rank sees a
 peer-major producer and a source-major consumer. Aliases are mapped once;
@@ -3371,15 +3552,18 @@ include all live regions/slots in the model's preparation memory budget.
 For C++-only use, configure `VECOPS_BUILD_COMMUNICATION=ON` and consume
 `find_package(Vecops REQUIRED COMPONENTS comm)` / `vecops::comm`. Pass a cold
 bootstrap exchange callback and optionally an existing `VecopsThreadPoolV1` to
-`Communicator::create`, then prepare `Specification` instances and execute their
-pointer arrays. No framework runtime is needed.
+`Communicator::create`. Its `Options` must also hold a strong `memory_runtime`
+and an opaque `payload_pool`; same-host ranks share the capacity authority.
+Prepare `Specification` instances and execute their pointer arrays, then call
+collective `close()` after all readers stop to release shared roots. PyTorch is
+not required for this C++ interface.
 
 Regular peer-interleaved AllGather outputs use destination-row ownership:
 one worker writes all peer fragments of a row, avoiding source-dependent work
 imbalance and split cache-line ownership. Recognition (equal run/row geometry)
 is cold-plan work; pointer rebinding is checked at execution. Ragged, irregular,
 large-run and independent-output layouts retain generic peer scheduling.
-The vecops platform file accepts the `[communication]` scheduling policy:
+The portable communication policy accepts the `[communication]` scheduling policy:
 
 ```toml
 copy_schedule = "auto"      # default; "peer" selects peer scheduling
@@ -3417,7 +3601,8 @@ probe to the same communication copy dispatcher/ISA objects as the backend.
 The default mode uses private destination slices explicitly allocated on each
 peer's HBM, with no communicator or shared mapping. `--shared-buffer` instead
 requires an isolated `instrument_protocol.py --snapshot-addresses` build and
-an explicit local-HBM `VECOPS_COMM_CONFIG`: it borrows the exact prepared
+an explicit local-HBM `VECOPS_COMM_POOL` and `--pool-map`
+JSON mapping from OS NUMA numbers to runtime pool IDs: it borrows the exact prepared
 AllToAll source/destination addresses and runs the same payload without the
 transport protocol. Additional blocks precede each copy with an untimed full
 collective. All group/plan/input owners must remain alive through these probes;
@@ -3469,7 +3654,7 @@ logical tasks submitted inside them execute serially on the calling worker.
 selected before runtime initialization and benchmarked with the full model;
 active waiting may compete with native/ATen work when providers are mixed.
 
-The platform policy `communication.early_snapshot=true` opts AllGather into
+The communication policy `communication.early_snapshot=true` opts AllGather into
 early local publication: after previous readers retire, a rank copies its
 source while other ranks may still compute. The ready acquire precedes
 descriptor validation and every output/borrowed read. No collective uses
@@ -3526,13 +3711,364 @@ names, metadata, storage sizes, storage aliases and overlapping byte ranges
 before any graph operation. Dynamic input addresses are rebound on each call;
 this is not an unchecked pointer-only entry or an invariant-content promise.
 
-### Shared prepared buffer capacity
+### Resource-backed graph memory compilation
 
-`vecops.memory.BufferRequirement`, `plan_buffers` and `BufferSession` are the
-common tensor/graph/native-workspace planning interfaces. See [Memory](Memory.md)
-for ownership, concurrency and static-placement limits. Graph compilation uses
-the active BufferSession automatically for its native/explicit-factory storage,
-including escaping outputs. An explicit `scratch_allocator` still takes
-precedence for transient storage. This does not intercept opaque ATen allocator
-internals. Standalone graph compilation without a BufferSession retains its
-ordinary private Torch allocation behavior.
+`vecops.planner.BufferRequirement` represents both tensor storage and native
+operator workspace. `GraphMemoryCompiler` consumes the runtime's immutable
+resource view, current budget snapshot, placement/mapping capabilities and cost
+queries. Pool and agent names are opaque; the compiler has no tier or CPU
+hierarchy types. Missing consumer/cost information remains unknown.
+
+```python
+from vecops import memory, planner
+
+runtime = memory.default_runtime()
+view = runtime.view()
+consumers = tuple(agent.id for agent in view.graph.agents
+    if agent.id in view.executable_agents and "host_load_store" in agent.capabilities)
+lowered = capture.prepare_torch(borrow_outputs=True)
+requirements = lowered.memory_requirements(consumers=consumers)
+
+# framework_pool_id is an allocatable pool ID chosen by the application.
+# The recipe helper takes its concrete MemoryPool description.
+# This reserves capacity, not physical placement of ordinary ATen allocations.
+framework_lease = None
+if lowered.framework_requirements:
+    framework_pool = next(pool for pool in view.graph.pools
+        if pool.id == framework_pool_id and pool.id in view.allocatable_pools)
+    recipe = lowered.framework_budget_recipe(framework_pool,
+        participant=runtime.participant)
+    framework_lease = planner.reserve_recipe_latest(runtime.native, view, recipe)
+
+compiler = planner.GraphMemoryCompiler(runtime, view, runtime.snapshot(view))
+program = compiler.compile(requirements)
+prepared = program.prepare(runtime, view)       # virtual addresses only
+prepared.admit()                               # pending physical capacity
+prepared.materialize(external=external_tensors) # roots + mappings + state copies
+replay = lowered.compile(runtime=runtime, view=view, memory_program=prepared)
+```
+
+Describe and bind the same lowered plan: lowering again with different
+`borrow_outputs`, pointwise or donation options can change its storage contract.
+Keep `framework_lease` until all framework users stop; it is independent of the
+managed Program backing. For a joint model, budget framework peaks over the
+combined schedule rather than summing independent graph reservations.
+
+The caller supplies actual executable consumers for meaningful bandwidth costs.
+The external map uses storage IDs for borrowed inputs/state; these buffers are
+not charged again as owned roots. Native workspace descriptions use IDs
+`kernel:<instruction ordinal>/<workspace name>` and are prepared without physical
+allocation. Native workspace symbols include a stable slot ordinal as well as
+the optional debug label, so two equally named buffers remain distinct.
+Metadata-only kernel plans activate with addresses selected by this same
+program. By default a provider's retained workspace remains live for the whole
+model program; only proven transient workspace can reuse storage across calls.
+
+For multiple serialized graphs, call `compile_model(programs, calls,
+serialized=True)` with a requirement tuple per graph and `ProgramCall` objects.
+`ProgramCall.bindings` links local storage IDs to shared model identities, for
+example an initializer output and a steady-graph input. Unlinked transient
+storage can reuse offsets across calls; linked producer/consumer storage stays
+live through the intervening gap. Pass `memory_call=call.id` when compiling each
+capture against the shared prepared program. Without the serialized contract,
+all calls conservatively overlap, even if their local event numbers differ.
+Repeated calls use explicit repeat counts and weight access traffic by that
+count. For serialized calls with identical bindings and no interleaved calls,
+strictly internal lifetimes fold onto one iteration. External input/output/state
+ranges cover the entire repeated call domain, preserving tail-write/next-head-read
+backedges. An internal buffer cannot be used after its call returns; escaping or
+loop-carried state must be external or retained.
+
+`call_time_domains(programs, calls, serialized=True)` exposes those integer time
+domains. `compile_model(..., scoped_requirements=...)` also accepts requirements
+with explicit model-global time offsets. `ScopedNativeLease` is the lifecycle
+adapter for native state with a bounded activation span:
+
+```python
+scope = planner.ScopedNativeLease(lease, prefix="phase-workspace",
+    lifetime=(phase_begin, phase_end), allowed_pools=working_pools,
+    consumers=actual_consumers, execution_count=logical_calls)
+# Include scope.requirements() as scoped_requirements of the joint Program.
+# After the Program is materialized, at the real phase boundaries:
+scope.activate(prepared)  # constructs/initializes this native instance now
+# Execute every user of the instance, including its synchronous consumers.
+scope.suspend()          # stops/destroys the state before its pages are reused
+```
+
+Here native `retained` still protects state throughout the instance's active
+span. Delaying initialization and enforcing the stop boundary make physical
+reuse safe; changing the retained flag without these lifecycle operations does
+not. A signature used in separated phases stays live through the intervening
+phases. Unscoped instances keep whole-program retention. The AF3 adapter applies
+this protocol to uncaptured eager native workspaces; captured graph-native
+retained workspaces currently keep whole-program retention.
+
+Both `native_workspace_requirements` and `ScopedNativeLease` accept an exact
+positive integer `execution_count` (default 1). It multiplies the per-call
+workspace traffic estimate, including the one-pass fallback when native traffic
+is unspecified. It leaves bytes, replicas, alignment and liveness unchanged.
+The AF3 adapter passes the metadata discovery's full logical eager call count,
+including enclosing recurrence weights, exactly once. This gives eager and
+captured calls the same traffic accounting without treating repetitions as
+additional physical allocations.
+
+Planning caches only exact placement/access queries within one compilation:
+size, mode, page pattern, complete endpoint segments, consumer, payload, view
+epoch and execution-slot context remain part of query identity. It does not
+extrapolate another payload's cost. Capacity admission uses a fresh ledger
+snapshot. Retained spatial ranges are indexed separately from transient event
+intervals without changing traffic-based placement priority.
+
+`tools/memory/migration/ReplayPlanner.py` replans a trusted local
+`programs/calls/serialized` pickle without numerical inference or physical
+allocation. It writes a JSON timing/capacity report and the canonical TOML recipe;
+the migration source/native overlay can be used to select the implementation.
+
+`program.dumps()` emits canonical TOML with integer offsets and no addresses or
+handles. `planner.audit_plan(program)` prints logical bindings, offsets, backing
+charges and explicit state initialization copies. Small same-placement buffers
+share page slabs; independent mappings and exports get exclusive page envelopes.
+
+`GraphMemoryCompiler(..., preferred_alignment_bytes=None)` keeps the R33 default:
+for allocated buffers of at least 1 MiB, packing prefers an offset aligned to
+the placement's logical page quantum as well as the requested alignment. An
+explicit hint must be a positive uint64 power of two; it replaces that soft
+quantum preference with `max(page_bytes, preferred_alignment_bytes)` only for
+those large allocated buffers. Stronger requested alignment and interleaved
+placement periods still apply. The hint is not a hard buffer requirement. This is a
+soft preparation heuristic: if its padded demand does not fit, the same
+placement is tried with compact packing before considering another pool. A
+planning-capacity failure of the complete preferred layout, including its final
+physical estimate, retries once from empty slabs with compact packing throughout.
+This retry uses the same planning inputs and allocates no backing; provider,
+permission and validation errors are not retried. Requested alignment remains a
+minimum. Concrete offsets, automatic pool choices and root extents may change;
+no unchanged capacity total or performance improvement is promised. Small
+subpage buffers keep compact packing. No work is added to numerical replay.
+
+`BufferRequirement.alignment` is a hard minimum on the absolute allocated buffer
+address. Each slab's `VirtualRegion.base_alignment_bytes` carries the maximum
+requested alignment (and at least its page quantum) to VA reservation. Zero on a
+manually constructed region means the existing page-aligned default. The base
+minimum is independent of `page_bytes`, mapping lengths and physical-capacity
+charges: a 64-byte buffer may have a 4 MiB aligned VA in one ordinary logical
+page. A nonzero base minimum must be a power of two. Existing large Linux
+reservations retain their THP alignment preference even with the default.
+Preparing a stronger recipe against an older, weaker base guarantee is rejected;
+a stronger prepared base may satisfy a weaker request. No live-address-dependent
+offset patch changes the compiled recipe.
+
+Output-cache copies accept explicit `target_program` and `target_bindings` from
+the model placement policy. Source input aliases must be redirected together;
+consumer writes, physical aliases with other operands and opaque asynchronous
+uses prevent relocation. No destination capacity is allocated implicitly.
+Preparation requires writable destination receipts and proves that distinct
+cache sources have disjoint physical destinations. It also checks all supplied
+source outputs, producer state and other live consumer operands. Different
+virtual addresses do not prove independence: remapped aliases are compared by
+their backend-certified backing identity and offset. Incomplete physical
+receipts are rejected. These checks add no query to replay.
+
+Graph templates persist address-free IR, schemas and symbolic model/input
+bindings. Restoring them reacquires current owners, then runs ordinary guards.
+Opaque ATen allocation interiors remain owned by the framework.
+
+## Shared preparation policy
+
+```python
+with vecops.BuildSession(parallelism=16, report_path="build-session.json"):
+    # Bootstrap/parameter packing, native request discovery, then real graphs.
+    result = vecops.precompile(model, example, parallelism=16)
+    # GraphCapture.compile_torch and output-transfer preparation inherit jobs.
+```
+
+BuildSession is separate from `collect_compile_requests`: real eager capture
+executes bootstrap kernels, whereas the request collector short-circuits them.
+The session stores content identities, not tensor addresses or bound owners.
+Do not mutate build inputs during the context; start a new session after edits.
+One independent context may be active per process; its worker contexts share
+one actual compiler/linker budget. Ready kernel/bridge builds may overlap, and
+an integration can prewarm the graph executor during request discovery. Compiler
+objects remain reusable across sessions through a process-local launcher route.
+Content and include-resolution guards are checked before publication. The
+session report separates capture, lowering/binding, source costs, and individual
+validation leaves. Graph preparation still honors initializer-to-steady
+cache binding dependencies. Compilation may prepare a shared SDK package when
+a native compiler is first resolved within a session.
+
+Repeated callback lookups reuse only immutable code-object digests. Defaults,
+closure/global state and source contents retain their ordinary fresh identity
+checks. Code replacement and source-location changes are observed; weak cache
+entries disappear when their code objects are unloaded. Mutable code constants or metadata
+use the uncached path.
+
+A model integration can call `vecops.graph.discover_pointwise_requests` around
+its prepared region while `vecops.is_discovering_graph_artifacts()` is true.
+The function returns the ordinary fake result while appending storage-free
+artifact requests. `borrow_outputs` must match real graph lowering. Source
+kernel compilation and Torch ABI bridges remain separate compatible groups;
+pointwise jobs no longer need to be discovered first during real capture.
+
+### Metadata executable capture
+
+`GraphCapture.capture_torch_metadata(function, *fake_args)` requires the strict
+`vecops.graph._metadata.metadata_mode()` context (a FakeTensorMode with CPU
+fallback and tensor constant folding disabled). It records the same static dispatcher tape and semantic IR without
+CPU numerical execution. Data-dependent escapes are rejected. The metadata
+capture retains FakeTensor source owners until binding, so weak conversion-cache
+collection cannot recycle a storage token and associate it with another weight.
+Produced storage identities use one weak receipt per graph storage; historical
+addresses alone never prove a cross-graph alias. Traffic normalization visits
+each event once and counts aliased reads/writes by their maximum logical span.
+The metadata
+binding helper `vecops.graph._metadata.bind_metadata(capture, real_args)` binds
+current real input/module storage before `compile_torch`; it never executes the
+program to infer values. Unknown external tensors fail explicitly. The resulting
+executable exposes `metadata_outputs`, uninitialized geometry/alias prototypes
+for linking an initializer to a steady executable. These prototypes must never
+be interpreted as computed results. Only actual replay initializes numeric
+outputs. Runtime replay continues to reject FakeTensors and active tensor modes.
+
+Binding and compilation may run after the inference scope that created the
+source tensors has ended. Projected state and static bound views retain their
+source storage, strides and offsets. Read-only state redirection preserves the
+source Tensor object, its inference status and its version-counter contract,
+including when the destination storage was prepared in another mode. Ordinary
+Parameter autograd metadata remains intact.
+
+`torch.empty` and `torch.empty_like` calls inside metadata executable capture
+record dispatcher factory nodes. The resource compiler owns their temporary
+storage and lifetimes when metadata is bound and lowered. Outside a prepared
+graph these remain framework allocations; eager applications request managed
+storage explicitly through `vecops.memory.Pool`.
+
+### Immutable planning snapshots
+
+`planning_graph = graph.freeze()` returns a detached, recursively read-only
+`ExecutionGraph`: nested dataclasses reject assignment, mappings reject writes
+and sequences become tuples. Edit the original graph, then freeze a new
+snapshot after any metadata/storage binding. Capture/replay graphs are not
+frozen implicitly. `planning_graph.content_digest()` (also used by
+`planner.graph_digest`) encodes format-v1 canonical JSON once and reuses the
+digest for subsequent plan checks. Mutable graphs always recompute their
+digest. `to_dict()`/`dumps()` retain their existing JSON representation and
+return detached ordinary values; serializers no longer deep-copy dataclasses
+before walking them again. Existing plan digests remain compatible.
+
+Within a BuildSession, SVE compatibility checks reuse each complete compiler
+policy and hashed effective environment. The first lookup still invokes the
+selected explicit driver; checkpoints re-read wrapper and reported installed
+Clang bytes, including a previously missing installed binary. New sessions
+probe again, and offline cache-only operation continues to replay attestations
+without finding or executing tools. Reports include `toolchain-probe` events
+with wall time and version query counts. User loader/instrumentation variables
+are retained in the effective environment, not silently stripped.
+
+AF3's qualified frontend continuation uses the private precompile
+`_torch_call_observer(registration, arguments)` hook to copy storage-free Torch
+call descriptors while the request collector short-circuits the dispatcher.
+The hook also runs before a cold bridge is materialized. It does not submit
+operators, change request deduplication, or alter semantic graph recording.
+Runtime scalar arguments are observable even when they do not specialize the
+artifact; integrations must not infer workspace requirements from the deduped
+artifact set alone. Observer exceptions propagate and unwind collection.
+
+### Shared preparation and validated discovery reuse
+
+Torch bridge v8 identities store content digests of the common Torch input
+inventories. The original file/tree bytes remain BuildSession validation leaves;
+compact manifests do not replace publication/seal checkpoints with timestamps.
+Equivalent registrations check one artifact per batch. Hot bridge loading does
+not take the build-writer lock; a miss retries and rechecks under that lock.
+
+The optional `precompile(..., prepare_exchange=...)` callback returns JSON-safe
+records from all ranks in rank order. Python-declared operator recipes with the
+same host, schema, compiler/source/cache identity and execution parallelism share
+an owner; uneven request geometries are unioned on that owner. Unknown expert
+operators keep their originating owner. Each process still creates its native
+provider and Torch dispatcher bindings. Build failures are exchanged before the
+next phase. Without the callback the previous rank-turn protocol is retained.
+No process-private native handles or Tensor payloads enter the exchanged records.
+
+`VECOPS_PRECOMPILE_CPU_LIST` optionally names an explicitly reserved compiler CPU
+pool, independent of each model rank's affinity. BuildSession's parallelism is
+the shared compile/link limit; native execution parallelism remains the model's
+thread count. Compiler RSS and available memory must bound a larger build pool.
+This scheduling override does not change artifact semantics.
+
+`ExecutionGraph.state_access_summary()` is a projection for state-only planning.
+It retains external/persistent aliases, all loop-carried storage, original event
+indexes/scopes and exact payload/metadata classification. Temporary factory
+replay is outside this projection. Freeze the summary separately and derive
+explicit external state requirements; the full graph remains available for diagnostics.
+
+The private discovery recipe adapter serializes JSON schemas, source/compiler
+attestations and storage-free arguments. Its application must separately attest
+model code/structure, inputs and control configuration and agree on hits across
+all participating ranks. Restoring a recipe revalidates compiler, vector state
+and source dependencies. Address-free metadata tapes can also be restored under
+strict FakeTensorMode. Input-dependent initializer values still execute at real
+replay; post-lowering output slot geometry is cached, never output payloads.
+Identical complete compiler policies share one frozen snapshot only within a
+single declaration restoration. Native owner verification checks each distinct
+schema once per verification call. Pointwise tapes can carry address-free
+lowering recipes, guarded by tape/schema/logical geometry, implementation and
+registry identity, execution threads, vector state and borrowing/donation
+policy. Restored recipes require current published native owners; missing or
+changed contracts fall back to normal selection. Workspace, tensors and native
+addresses are always rebound in the current process.
+
+
+### Logical communication in metadata templates
+
+The private template adapter can relocate layout-only `vecops_comm::run` and
+`vecops_comm::consume` plans. It writes logical group membership/platform,
+operation/splits/root/copy hints and tracked consumer symbols, never a live
+handle. Binding prepares new local plans from metadata on an existing group,
+retains the native registration and communicator, and submits no collective.
+Ambiguous/missing groups, platform changes, unknown owners and PageExchange
+external mappings remain unsupported. Pointwise recipe contracts normalize
+communication through these logical descriptions as well.
+
+Metadata restoration binds current explicit owners. Final storage/lifetime
+requirements come from the optimized graph plan, not a capture-time allocator
+session or a state-only graph summary.
+
+`implementation_identity()` still attests the complete Python frontend for
+model/tape caches and in-process elaboration guards. Native build attestation
+uses a separate identity excluding a small audited list of runtime-only modules;
+all Python paths remain in its inventory and unknown modules remain binary
+dependencies. Generators, schema bridges, headers, native libraries, tools and
+compile/link policy still invalidate native artifacts. This is dependency
+separation, not an option to ignore arbitrary SDK edits.
+
+Donation lowering detaches only the tensor/storage records it mutates and the
+storage-membership lists; execution events, metadata and annotations remain
+read-only. This avoids recursively copying the complete IR. Binding retains
+explicit physical owners and validates storage aliases and byte overlaps before
+execution.
+
+Collective template restoration validates relocation ordinals before preparing
+plans and follows numerical instruction order. Canonical JSON sorts object keys
+lexicographically, which must not reorder native descriptor creation or allocation
+requests at digit boundaries (for example instruction 10 before instruction 2).
+Duplicate/noncanonical indices and changed instruction placeholders reject the
+restoration; executable communication order remains the captured tape order.
+
+Metadata region projections can attach an executable tape to the existing
+semantic capture. They install no nested `GraphCapture`: a recorder above an
+application router suppresses lower recorders for the same operation, while
+source requests emitted by that router still enter the compilation union.
+A regional snapshot detaches its event/tensor/storage records before lowering;
+parent planning events and liveness remain independent. Logical owner bindings
+are resolved again after parameter relocation, including nonzero view offsets.
+Unmaterialized source schemas are resolved only after publication. A borrowed
+consumer discovered in this mode records a logical relocation and its source
+kernel request, not a transport submission or an executable pointer table.
+Missing steady variants are recorded outside the model planning event stream.
+
+Graph lowering builds the input-position index once before binding pointwise
+scratch outputs. It must not enumerate and search the complete pybind input
+list for every output: that introduces a product of input count and pointwise
+node count into preparation. Alias inputs are appended after this lookup phase;
+the existing input order and tensor bindings are preserved.

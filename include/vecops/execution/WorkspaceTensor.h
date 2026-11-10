@@ -27,7 +27,7 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/execution/Parallel.h"
-#include "vecops/execution/WorkspacePlan.h"
+#include "vecops/execution/BufferPlan.h"
 #include "vecops/tensor/Tensor.h"
 
 namespace vecops::execution {
@@ -35,7 +35,7 @@ namespace vecops::execution {
 /** Placement and base-alignment policy for a typed workspace tensor. */
 struct WorkspaceTensorOptions {
   nint_t alignment = vec::DEFAULT_ALIGNMENT;
-  WorkspacePlacementPolicy placement = WorkspacePlacementPolicy::FastPreferred;
+  BufferPlacementPolicy placement = BufferPlacementPolicy::FastPreferred;
   double estimated_traffic_bytes = 0;
 };
 

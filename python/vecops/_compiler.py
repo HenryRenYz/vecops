@@ -326,10 +326,12 @@ class Compiler:
     if selected_generator is None and shutil.which("ninja"):
       selected_generator = "Ninja"
     toolchain.generator = selected_generator
-    affinity = getattr(os, "sched_getaffinity", None)
-    available = len(affinity(0)) if affinity is not None else (os.cpu_count() or 1)
-    toolchain.parallel_jobs = self.jobs or max(1, min(available, 8))
-    toolchain.environment = self.environment
+    from ._build_session import build_parallelism, current_build_session
+    toolchain.parallel_jobs = build_parallelism(self.jobs or None)
+    session = current_build_session()
+    from ._build_session import compiler_launcher_environment
+    scheduling = session.compiler_environment(self.environment) if session else compiler_launcher_environment(self.environment)
+    toolchain.environment = {**self.environment, **scheduling}
     toolchain.output_mode = self.output
     import weakref
 
@@ -368,10 +370,25 @@ class Compiler:
     config.link_directories = self.library_dirs
     config.link_libraries = self.libraries
     config.link_options = self.ldflags
+    session = current_build_session()
+    if session is not None and session.reuse_sdk and sdk_layout == _C.SdkLayout.source_tree:
+      from ._sdk_cache import prepared_sdk
+      config.sdk = prepared_sdk(self, config.sdk, toolchain)
     return config
 
   def _observe_build(self, event):
     import time
+
+    from ._build_session import current_build_session
+
+    session = current_build_session()
+    if session is not None and event.state == 'finished':
+      # Observers must not throw. The next provider input validator performs
+      # the byte check before publishing, once for the whole native frontier.
+      session._publication_check_required = True
+      if event.phase.startswith("kernels: build") and event.exit_code == 0:
+        from ._build_cost import observe_batch
+        session.costs.update(observe_batch(event.log_path))
 
     self.build_events.append(
       {
@@ -400,7 +417,8 @@ class Compiler:
     """Return the lazily-created raw compiler, or ``None`` for cache-only mode.
 
     Accessing this property in a build-capable mode resolves the SDK and native
-    tools and may raise :class:`FileNotFoundError`; it still does not compile.
+    tools and may raise :class:`FileNotFoundError`. In a BuildSession it may
+    prepare the shared SDK package; kernel artifacts remain lazy.
     """
     if self.cache_mode == _C.ArtifactCacheMode.cache_only:
       return None

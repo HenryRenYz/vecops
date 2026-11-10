@@ -107,7 +107,7 @@ TEST(WorkspaceTensorTest, RuntimeReplicasAndPaddedInnerLayoutCompose) {
   ASSERT_EQ(logical.allocations.size(), 1u);
   // Inner reachable offsets are [0, 12], hence thirteen uint16_t elements.
   EXPECT_EQ(logical.allocations.front().request.bytes, 13 * nint_t(sizeof(std::uint16_t)));
-  auto placement = place_workspace(logical);
+  auto placement = place_buffers(logical);
   ASSERT_EQ(placement.entries.size(), 1u);
   EXPECT_EQ(placement.entries.front().replica_stride, 64);
   EXPECT_EQ(placement.fast_bytes, 3 * 64);
@@ -126,16 +126,16 @@ TEST(WorkspaceTensorTest, RejectsUnsafeWritableLayouts) {
 TEST(WorkspaceTensorTest, TypedRequestsReplayThroughTheBytePlanner) {
   WorkspaceContext tracing{trace_workspace, "typed-replay"};
   auto traced = tracing.worker_tensor<std::uint8_t, 2>(
-    "local", make_shape(cint<17>), WorkspaceTensorOptions{.placement = WorkspacePlacementPolicy::SlowAllowed});
+    "local", make_shape(cint<17>), WorkspaceTensorOptions{.placement = BufferPlacementPolicy::SlowAllowed});
   ASSERT_NE(traced.data(), nullptr);
   auto logical = tracing.finish_trace();
-  auto placement = place_workspace(logical, 0, 1024);
+  auto placement = place_buffers(logical, 0, 1024);
   std::vector<std::byte> slow(static_cast<std::size_t>(placement.slow_bytes + 64));
-  BoundWorkspacePlan bound{placement, nullptr, 0, slow.data(), nint_t(slow.size())};
+  BoundBufferPlan bound{placement, nullptr, 0, slow.data(), nint_t(slow.size())};
   WorkspaceContext replay{"typed-replay", bound};
 
   auto replayed = replay.worker_tensor<std::uint8_t, 2>(
-    "local", make_shape(cint<17>), WorkspaceTensorOptions{.placement = WorkspacePlacementPolicy::SlowAllowed});
+    "local", make_shape(cint<17>), WorkspaceTensorOptions{.placement = BufferPlacementPolicy::SlowAllowed});
   EXPECT_EQ(replayed.size(0), 2);
   EXPECT_EQ(replayed.stride(0), 64);
   EXPECT_NE(replayed.data(), nullptr);

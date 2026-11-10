@@ -187,17 +187,16 @@ def test_torch_bridge_covers_all_vecops_dtypes():
 def test_framework_storage_dtypes_are_not_kernel_dtypes():
   np = pytest.importorskip("numpy")
   torch = pytest.importorskip("torch")
-  from vecops.planner.runtime import _torch_dtype
 
   assert framework_dtype("torch.bfloat16", "torch") == torch.bfloat16
-  assert _torch_dtype("torch.complex64") == torch.complex64
+  assert framework_dtype("torch.complex64", "torch", allow_framework_only=True) == torch.complex64
   assert framework_dtype("complex64", "numpy", allow_framework_only=True) == np.dtype("complex64")
   with pytest.raises(TypeError, match="unsupported dtype"):
     framework_dtype("complex64", "numpy")
   with pytest.raises(TypeError, match="unsupported dtype"):
     framework_dtype(torch.complex64, "torch")
   with pytest.raises(TypeError, match="unsupported dtype"):
-    _torch_dtype("not-a-dtype")
+    framework_dtype("not-a-dtype", "torch", allow_framework_only=True)
 
 
 def test_memory_numpy_uses_shared_dtype_adapter():
@@ -206,7 +205,7 @@ def test_memory_numpy_uses_shared_dtype_adapter():
     pytest.skip("native memory support is unavailable")
   from vecops.memory import numpy as memory_numpy
 
-  class System:
+  class Pool:
     def __init__(self):
       self.sizes = []
 
@@ -214,13 +213,13 @@ def test_memory_numpy_uses_shared_dtype_adapter():
       self.sizes.append(size)
       return bytearray(size)
 
-  system = System()
+  pool = Pool()
   for value, expected in [
     (vecops.float32, np.dtype("float32")),
     (T.DType("uint16"), np.dtype("uint16")),
     (np.complex64, np.dtype("complex64")),
   ]:
-    output = memory_numpy.zeros(3, dtype=value, system=system)
+    output = memory_numpy.zeros(3, dtype=value, pool=pool)
     assert output.dtype == expected
-    assert system.sizes[-1] == 3 * expected.itemsize
+    assert pool.sizes[-1] == 3 * expected.itemsize
     np.testing.assert_array_equal(output, 0)

@@ -56,7 +56,8 @@ using resource_requirements_t = typename transpose2d_details::
  * @tparam M Meta row extent (`Const`, constrained `Dynamic`, or runtime value).
  * @tparam N Meta column extent.
  * @tparam Policy Automatic backend choice or forced Gather.
- * @tparam Implementation Vector or SME implementation tag.
+ * @tparam Implementation Vector or SME implementation tag; Automatic selects SME
+ *         automatically for raw unit-column-stride operands, otherwise Vector.
  * @param scope Active execution scope.
  * @param m Source row extent.
  * @param n Source column extent.
@@ -74,7 +75,7 @@ template <int SrcRow, int SrcCol, int DstRow, int DstCol,
           meta::ValueType M, meta::ValueType N,
           typename Source, typename Destination,
           typename Policy = transpose2d_policy::Automatic,
-          typename Implementation = transpose2d_implementation::Vector>
+          typename Implementation = transpose2d_implementation::Automatic>
   requires transpose2d_details::generic::
       CompatibleAccesses<Source, Destination>
 VECOPS_ALWAYS_INLINE void transpose2d_bound(
@@ -92,8 +93,48 @@ VECOPS_ALWAYS_INLINE void transpose2d_bound(
   VECOPS_ASSERT(static_cast<nint_t>(m) >= 0 && static_cast<nint_t>(n) >= 0,
                 "transpose extents must be non-negative");
 
-  using Backend =
-      transpose2d_details::ImplementationBackend<Implementation>;
+  // A column-major destination can make the logical transpose a contiguous
+  // physical copy. Honor explicit Gather/SME requests; Automatic/Vector may
+  // remove the register transpose when raw layout types prove this mapping.
+  constexpr bool CopyLines = [] {
+    if constexpr (std::same_as<Policy, transpose2d_policy::Automatic> &&
+        !std::same_as<Implementation, transpose2d_implementation::SME> &&
+        transpose2d_details::generic::RawNoTransformAccess<Source> &&
+        transpose2d_details::generic::RawNoTransformAccess<Destination>) {
+      using In = transpose2d_details::generic::SpecOf<Source>;
+      using Out = transpose2d_details::generic::SpecOf<Destination>;
+      return std::same_as<tensor::stride_type_t<SrcCol, typename In::InputLayout>, meta::Const<1>> &&
+             std::same_as<tensor::stride_type_t<DstRow, typename Out::OutputLayout>, meta::Const<1>>;
+    }
+    return false;
+  }();
+  if constexpr (CopyLines) {
+    transpose2d_details::generic::contiguous_line_transpose<SrcRow, SrcCol, DstRow, DstCol>(
+        m, n, source, src_origin, destination, dst_origin);
+    return;
+  }
+
+  // DataAccess calls this entry after binding a whole transposed plane. Keep
+  // its layout and raw-storage proof available to the same SME leaf used by
+  // ops::transpose; selecting Vector unconditionally here silently defeated
+  // automatic input materialization. The SME backend owns its resource scope.
+  constexpr bool UseSME = [] {
+#if defined(HAS_SME_FA64)
+    if constexpr (std::same_as<Policy, transpose2d_policy::Automatic> &&
+                  transpose2d_details::generic::RawNoTransformAccess<Source> &&
+                  transpose2d_details::generic::RawNoTransformAccess<Destination>) {
+      using In = transpose2d_details::generic::SpecOf<Source>;
+      using Out = transpose2d_details::generic::SpecOf<Destination>;
+      return std::same_as<tensor::stride_type_t<SrcCol, typename In::InputLayout>, meta::Const<1>> &&
+             std::same_as<tensor::stride_type_t<DstCol, typename Out::OutputLayout>, meta::Const<1>>;
+    }
+#endif
+    return false;
+  }();
+  using Selected = std::conditional_t<std::same_as<Implementation, transpose2d_implementation::Automatic>,
+      std::conditional_t<UseSME, transpose2d_implementation::SME,
+                         transpose2d_implementation::Vector>, Implementation>;
+  using Backend = transpose2d_details::ImplementationBackend<Selected>;
   Backend::template run<SrcRow, SrcCol, DstRow, DstCol>(
       scope, m, n, source, src_origin, destination, dst_origin, policy);
 }

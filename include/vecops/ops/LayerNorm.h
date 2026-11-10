@@ -41,6 +41,11 @@
  * Workspace-form and ExecutionScope-form overloads mirror `softmax`:
  * query `required_workspace(in, g, b, out)`, or pass an active scope as
  * the first argument to reuse an already-active hardware region.
+ * For a transposed input with a statically unit-stride prefix axis, the whole
+ * input plane is materialized before row slicing. This retains the layout
+ * proof required by the automatic SME transpose backend and preserves the
+ * original memory dtype and row reduction arithmetic. Its workspace scales
+ * with the supplied tile, so callers should pass bounded tiles in hot loops.
  *
  * ## Pitfalls
  *

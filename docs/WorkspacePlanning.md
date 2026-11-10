@@ -2,18 +2,20 @@
 
 Vecops separates logical storage, physical placement, and execution binding:
 
-1. `LogicalWorkspacePlan` is pointer-free. It records stable allocation sites,
+1. `LogicalBufferPlan` is pointer-free. It records stable allocation sites,
    Meta axis contracts, decision fingerprints, domains, and lexical lifetimes.
-2. `WorkspacePlacement` assigns those sites to fast or slow memory and chooses
+2. `BufferPlacement` assigns those sites to fast or slow memory and chooses
    offsets. Placement may be recomputed when HBM capacity changes without
    retracing the kernel.
-3. `BoundWorkspacePlan` attaches concrete arena bases. Replay then resolves the
+3. `BoundBufferPlan` attaches concrete arena bases. Replay then resolves the
    stable sites to direct views; no allocation or placement search belongs in a
    tile loop.
 
 `WorkspaceContext` is the source-kernel API joining these layers. Dynamic mode
-serves requests from caller arenas and spills to aligned host allocation. Trace
-mode performs the real call while recording its pointer-free plan. Replay mode
+serves requests from borrowed caller arenas and sends owned spills through the
+active resource-backed workspace provider. Those roots require Runtime capacity
+admission; there is no uncharged heap fallback. Trace mode performs the real
+call while recording its pointer-free plan. Replay mode
 executes the same request topology against a bound placement.
 
 ## Typed workspace tensors
@@ -62,8 +64,8 @@ to select a replica; do not index it with an operating-system or OpenMP thread
 number. A logical lane is the stable scratch identity even if an embedding runs
 several lanes sequentially on one physical worker.
 
-The low-level byte `request()`/`bind()` and `BoundWorkspaceSlot` APIs remain
-implementation and compatibility tools. Ordinary source kernels should prefer
+The low-level byte `request()`/`bind()` and `BoundBufferSlot` APIs remain
+lower-level buffer interfaces. Ordinary source kernels should prefer
 typed tensors and prepared operators.
 
 ## Scopes and placement
@@ -193,19 +195,19 @@ therefore pay the sum described above.
 
 ## Replay and physical arenas
 
-When no external raw workspace is supplied, generated adapters use a small
-calling-thread `WorkspaceReplayCache`: the first compatible call executes in
-trace mode and subsequent calls replay a placed plan. A caller-provided ABI
-workspace becomes the fast arena. A `WorkspaceArenaProvider` can instead bind
-plans to explicit fast/slow storage; `MemoryWorkspaceSession` maps those tiers
-to HighBandwidth and Default memory without coupling the memory core to
-workspace types.
+Generated adapters receive a call-scoped `WorkspaceArenaProvider`. The default
+provider routes allocations through `MemoryRuntime` and its capacity ledger;
+`resource_workspace_arena_provider(runtime, pool_ids)` binds a specific runtime
+and permitted pools. Pool IDs are opaque. Native fast/slow placement hints are
+translated by the provider; they are not hardware tiers in the resource model.
+A caller-provided ABI workspace remains a borrowed arena with explicit capacity.
 
-Shared-arena providers expose the same session-owned fast/slow bases to each
-cached plan, so their capacities are session totals rather than per-entry
-budgets. A changed provider identity replaces cached plan metadata. See
-[Memory](Memory.md) and [Runtime](Runtime.md) for the provider and execution
-context ABI.
+Cached plans retain their own backing owners, and every invocation receives the
+current execution services. Dynamic spills are charged through the same runtime.
+Graph-managed execution rejects undeclared owning scratch instead of allocating
+an unplanned payload. The upper graph compiler can bind declared native buffers
+together with tensor storage in an offset-only recipe. See
+[Memory](Memory.md) and [Runtime](Runtime.md) for ownership and execution context.
 
 `WorkspaceContext` itself is intentionally single-threaded. Allocate tensors
 and prepare operators before entering a parallel region. Parallel callbacks may
@@ -220,16 +222,21 @@ arrival.
 they expose layout metadata and cannot read capture-time tensor contents.
 `prepare_operation<P>(name, op, patterns...)` accepts the existing address-free
 operator patterns. Planning first declares all scratch; instantiation then
-places buffers and scratch together, allocates one arena per tier, and binds
-instance-owned prepared objects. No scratch declaration or placement lookup
-belongs in replay. Allocation remains conservative: independently live sites
+places buffers and scratch together and binds instance-owned prepared objects.
+Standalone C++ instances obtain their arenas through the resource provider;
+metadata-only graph instances receive compiler-selected buffer addresses and
+owners at activation, without first allocating a separate private arena. No
+scratch declaration or placement lookup belongs in replay. Allocation remains conservative: independently live sites
 are not colored merely because their declarations occupy sibling C++ scopes.
 
-Default storage prefers fast memory and falls back to slow memory when the
-preferred arena is unavailable; required-fast storage must fit. A provider
-that deliberately shares arenas between plans still requires its embedding's
-serialization/lease discipline across instances. Within one plan, distinct
-buffers and operator scratch have disjoint placed spans.
+Native tier hints guide arena planning; the default provider resolves capacity
+and allocation through the Runtime's authorized candidate pools. They do not
+imply separate physical fast and slow pools. Required-fast storage must fit its
+declared arena constraint. A provider that deliberately shares arenas between
+plans still requires its embedding's serialization/lease discipline across
+instances. Within one plan, simultaneously live buffers and operator scratch
+have disjoint spans. Explicit consume/overwrite contracts may prove disjoint
+lifetimes and permit reuse of the same offsets.
 
 `grid` records a program callback. `worker_grid` records a worker callback
 whose synchronous `worker.programs(...)` loop can be surrounded by per-worker
@@ -242,11 +249,13 @@ not retained from plan construction.
 
 ## Common buffer placement and segmented operator storage
 
-The implementation now lives in `execution/BufferPlan.h`; the workspace names
-above are aliases to this common IR. `BufferMemorySession` accounts for graph
-and tensor owners while placing kernel buffers. KernelBuilder uses this same
-colorer rather than a second append-only allocator. Buffer names and traffic
-hints are retained through the optional prepare-time provider ABI.
+Native storage declarations use `execution/BufferPlan.h` directly.
+`WorkspaceContext` and typed workspace tensors consume these same buffer records;
+there is no compatibility `WorkspacePlan.h` header. The Python graph compiler converts
+native declarations to the same resource-runtime requirements as tensor storage.
+`MemoryRuntime` accounts for graph, eager and native owners through one ledger.
+KernelBuilder uses this colorer for its local plan; buffer names and traffic
+hints are retained through the prepare-time provider ABI.
 
 Prepared architecture Matmul declares backend scratch, packed A, packed B and
 auxiliary materialization separately. Prepared SDPA declares backend workspace,
@@ -340,43 +349,55 @@ buffer are also conservative, including metadata uses that could precede the
 definition of the proposed input view. Rewritten JIT references resolve at use,
 after static or ordinary view lowering establishes their targets.
 
-## Explicit initializer-to-steady cache transfer
+## Initializer caches and explicit copies
 
-A Torch executable may expose cold `fixed_output_values(values)` descriptors,
-then prepare `producer.prepare_output_transfer(values, consumer,
-input_offset=..., expected_replays=...)`. This API requires an active common
-`BufferSession`, `native_donation=True` ownership analysis, and a caller promise
-that the cache tuple is immutable for the entire invocation, including other
-graphs. It only selects privately owned retained initializer outputs in slow
-memory that the steady executable actually reads. Consumer writes, opaque or
-collective uses, and aliases outside the selected cache inputs exclude a storage.
+A joint model program links an initializer's owned cache outputs and the steady
+program's inputs to the same model storage identity. `compile_model()` combines
+their lifetimes and read/write traffic, including the steady `repeat_count`,
+before choosing placement. The initializer writes directly into that final
+placement. AF3 therefore has no later cache-promotion/finalization pass and no
+extra copy merely to change a cache from one memory tier to another. The
+`cache_read_only` contract and ordinary capture/alias guards still apply.
+Framework-owned outputs remain separately budgeted framework allocations; a
+budget declaration does not claim that these outputs were physically relocated.
 
-The planner leaves all existing addresses, offsets and tiers unchanged, ranks
-eligible complete storages by static read bytes per byte of capacity, and binds
-individual fast leases into currently free space. It skips storages larger than
-the largest free extent and caches with no reads. This is a conservative capacity
-heuristic, not a bandwidth-optimal placement proof. Preparation must happen after
-cold eager prototypes are released. It retains canonical slow storage, so peak
-logical capacity includes both versions; it does not retire or migrate weights.
+For a separately chosen destination, a Torch executable exposes cold
+`fixed_output_values(values)` descriptors and an explicit copy preparation API:
 
-`transfer.replay(values)` is an explicit once-per-invocation native vec copy
-after the initializer and before steady consumption. Four independent vector
-streams preserve bits; no SDMA/libc fallback is used. The copy graph and target
-views are prepared once; replay performs no allocation, mapping, capture or
-placement. Full storage capacity, offset, strides and input alias groups remain
-identical. A different source address or execution thread is rejected. The
-caller must serialize the producer, transfer and consumer. C++ program scratch
-reuse, graph donation and this transfer all draw from the common capacity
-manager, with different explicit ownership/completion contracts.
+```python
+transfer = producer.prepare_output_transfer(
+    producer.fixed_output_values(values), consumer,
+    input_offset=cache_input_offset,
+    target_program=destination_program,
+    target_bindings={0: "destination-cache"},
+)
+replacement_values = transfer.replay(values)
+```
 
-Link-time alias closure includes both StorageImpl identity and overlapping
-storage byte intervals. Captured input/state spans are cold, non-owning proof
-metadata: an alias outside the rebound cache tuple, including a distinct
-frombuffer StorageImpl or a bound module buffer, excludes promotion. Trailing
-scalar specialization arguments remain distinct from runtime tensor call-value
-indices; nested/custom argument paths stay conservative. Copy kernels have an
-explicit worker upper bound, clamped to the compiled execution provider's
-capacity, independently of compiler job count.
+`destination_program` must already be materialized. Its buffer requirements,
+placement and capacity admission are the caller's responsibility. The binding
+map names the destination logical buffer for each selected cache index; aliases
+of one storage must name the same destination and be redirected together. Missing
+or empty targets fail explicitly. This helper does not search free capacity,
+choose a pool, infer profitability or accept an `expected_replays` promotion
+threshold. Both source and destination coexist and remain charged while live.
+
+Sources must be fixed, privately owned initializer outputs. The helper checks
+consumer write/opaque effects and aliases outside the selected cache inputs,
+including distinct StorageImpl objects with overlapping physical byte spans and
+bound module state. Unsafe selections raise an error. Copies cover the complete
+logical storage and preserve dtype, strides and nonzero view offsets; they do
+not copy an unrelated shared slab envelope. Unselected cache values remain in
+their original storage.
+
+`transfer.replay(values)` performs the prepared, bit-preserving native copy with
+no tensor payload allocation, placement search, mapping or capture. Targets and
+escaped Tensor aliases retain their actual C++ physical binding, even if the
+Python destination Program is closed. Source addresses and the preparation
+thread are checked. The caller serializes the producer, transfer and consumer,
+and promises that the selected caches stay immutable for the invocation across
+other graphs. Execution width is part of the copy kernel specialization and is
+independent of compiler job count.
 
 Logical pinning applies within a kernel/program. An explicitly shared workspace
 provider also requires contents to be disposable between unrelated invocations;
@@ -385,3 +406,84 @@ calls should be declared external tensors with owning leases, or kept in an
 isolated provider/program covering all users. The AF3 native scratch paths use
 invocation-local contents; opaque custom state is not made recyclable merely
 by a consume marker.
+
+
+## Cold communication capacity and offset-only proposals
+
+A registered collective describes its layouts and selected route. After earlier
+broadcasts or barriers, registering a later graph does not itself certify that
+all publication and relay roots already exist. A model closes that dependency
+before admitting its graph capacity:
+
+1. Compile an offset-only proposal and query `PreparedProgram.planned_placement`.
+   This describes the recipe; `placement()` continues to require actual backing.
+2. Call each graph plan's `configure_communication_placements` with that proposal.
+   Provision each distinct transport through public
+   `vecops.graph.provision_communication_capacity(plans)`.
+3. If any participant added transport roots, refresh the budget snapshot and
+   replan. Once provisioning reports no growth, call
+   `plan.finalize_communication_contract()` for each plan.
+4. Admit the graph, then materialize backing and compile the final executables.
+   Final binding retains the closed routing contract; new observations of an
+   external pointer do not silently select another route after backing.
+
+`GraphMemoryCompiler.prepare_model(..., finalize_resources=callback,
+preparation_consensus=agree)` implements this fixed point. The callback receives
+an address-only `PreparedProgram` and returns a bool indicating changed external
+resource capacity. Distributed callers provide an all-participant boolean AND
+for `agree`; local compilation, resource growth and admission then follow the
+same retry branch on every participant. The coordinator must cover the complete
+model preparation, including any smaller communication groups. Graph backing is
+never acquired inside that loop.
+
+When only some participants obtain their pending grants, those participants
+retain their proposals and grants while unsuccessful peers recompile against
+the remaining capacity. This prevents repeated competition for the same preferred
+pool. Before every collective finalizer, all participants withdraw graph grants
+and synchronize while retaining their proposed layouts and reserved addresses.
+No compilation occurs in that gap. Transport growth invalidates all proposals;
+otherwise the fixed proposals are admitted again. A fatal peer failure closes
+all local proposals and refunds their pending capacity.
+
+If a final estimate observes less physical free space than the planning sample,
+preparation can leave the observed loss as fresh-allocation headroom on its next
+attempt. Ordinary observations require unchanged accounting, epoch and independent pool limits;
+pool allowances must equal their complete group allowance. The guard preserves
+reusable cache capacity and disappears when accounting changes or preparation
+ends. A typed physical rejection also learns each other untruncated group's
+observed physical decline between those same-accounting snapshots, so several
+declining pools need not fail one at a time. Per-group observations take a
+maximum, never a sum. It changes only the compiler's private fit bound; native
+capacity admission still checks the actual request. The compiler instance is
+not reentrant. Compact fallback starts after the preferred-layout exception
+handler has exited, releasing its failed layout metadata before the next compile.
+
+A known, unaccepted shared physical-free reserve rejection is a separate
+observation. Its error carries only primitive facts from the last actual reserve
+snapshot. Local grant rollback can advance an epoch without changing balances;
+this specific path may rebase the epoch when compilation, last reserve and
+current snapshots agree on every nonphysical group, alias-pool limit and shared
+constraint. Changed peer balances or independent limits prevent learning.
+Pending is subtracted once from the raw failure sample, and idle cache remains
+reusable. Other capacity, permission and uncertain-commit errors keep their
+existing boundaries; reservation itself does not blindly retry capacity errors.
+
+A standalone one-provider Torch graph uses its provider's cold consensus. A graph
+with several independent transport groups uses explicit model-level preparation
+and its common coordinator. Neither interface encodes CPU sockets, NUMA domains
+or a fixed memory hierarchy.
+
+The native communicator's `provision_registered_capacity()` drains at a caller
+controlled cold boundary, proves that prior readers stopped, removes imported
+aliases, provisions the registered size/relay union, and waits for new peer
+mappings before returning. Its collective bool reports growth on any member.
+`preparation_consensus(bool)` exchanges only preparation metadata. Both operations
+are outside numeric replay; sealed replay uses the already provisioned roots.
+
+Frontend resource descriptions must follow the actual execution roles. A rank
+that only receives a result does not thereby require its producer's compute
+graph or workspace. A frontend can use a shared pure scheduling function for
+metadata discovery and execution, retain output geometry for receive-only
+participants, and omit compute requirements only when that schedule proves
+there are no local fragments. This is a frontend contract; the resource model
+does not interpret sample counts, ranks' model roles or operator names.

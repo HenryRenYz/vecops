@@ -6,8 +6,9 @@ import os
 
 from . import _C, graph, planner
 
-if hasattr(_C, "MemorySystem"):
+if hasattr(_C, "memory"):
   from . import memory as memory
+from ._build_session import BuildSession
 from ._compiler import Compiler, default_cache_dir
 from ._dtype import (
   Const,
@@ -34,11 +35,12 @@ from ._precompile import (
   PrecompileResult,
   collect_compile_requests,
   compile_batch,
+  is_discovering_graph_artifacts,
   is_precompiling,
   precompile,
 )
 from ._schema import Dynamic, KernelDef, TensorAccess, TensorDef, TensorMeta, ValueDef
-from ._thread_pool import native_thread_pool_region, cpu_thread_limit, cpu_thread_pool_capacity
+from ._thread_pool import cpu_thread_limit, cpu_thread_pool_capacity, native_thread_pool_region
 
 
 def set_flush_subnormals(enabled: bool) -> None:
@@ -64,6 +66,7 @@ def current_thread_flush_subnormals() -> bool:
 __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "_C",
   "Compiler",
+  "BuildSession",
   "CompileRequest",
   "CompileRequestCollector",
   "Const",
@@ -90,6 +93,7 @@ __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "int32",
   "int64",
   "is_precompiling",
+  "is_discovering_graph_artifacts",
   "normalize_dtype",
   "native_thread_pool_region",
   "cpu_thread_limit",
@@ -104,5 +108,5 @@ __all__ = [  # noqa: RUF022 - retain the established public API grouping
   "uint64",
 ]
 
-if hasattr(_C, "MemorySystem"):
+if hasattr(_C, "memory"):
   __all__.append("memory")

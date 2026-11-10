@@ -161,6 +161,9 @@ public:
     static_assert(Parallelism > 0,
                   "prepared Softmax parallelism must be positive");
     using ResourceRequirements = typename Softmax::ResourceRequirements;
+    // Exponentials, tile maxima/sums and operand materialization are populated
+    // on each call before use. Prepared state retains layouts, not contents.
+    static constexpr bool transient_workspace = true;
 
     VECOPS_INLINE PatternPrepared(
         Config config, InPattern in, OutPattern out,

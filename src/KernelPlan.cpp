@@ -92,7 +92,10 @@ KernelPlan KernelBuilder::finish() {
     } else {
       lifetimes.push_back({reusable ? accesses.front().first : 0, reusable ? accesses.back().first + 1 : end});
     }
-    data_->buffers.allocations.push_back({{slot + 1, 0}, spec.name,
+    // Labels describe the operator scratch, but nested/repeated operators may
+    // legitimately use the same label. Bind by the immutable frame slot instead
+    // of letting a descriptive label merge distinct storage requirements.
+    data_->buffers.allocations.push_back({{slot + 1, 0}, "slot" + std::to_string(slot) + "/" + spec.name,
       {spec.replicas == 1 ? spec.bytes : spec.worker_bytes, spec.alignment,
        spec.replicas == 1 ? BufferDomain::Global : BufferDomain::WorkerLocal,
        spec.replicas, spec.placement, spec.estimated_traffic_bytes}, std::move(lifetimes)});
@@ -116,25 +119,82 @@ KernelInstance::KernelInstance(KernelPlan plan, const VecopsThreadPoolV1* pool,
   bool required_fast = false;
   for (const auto& slot : plan_.data_->slots) {
     alignment = std::max(alignment, slot.alignment);
-    required_fast |= slot.placement == WorkspacePlacementPolicy::FastRequired;
+    required_fast |= slot.placement == BufferPlacementPolicy::FastRequired;
   }
   WorkspaceArena fast, slow;
   try {
-    fast = provider_->allocate(WorkspaceTier::Fast, placement.fast_bytes, alignment);
+    fast = provider_->allocate(BufferTier::Fast, placement.fast_bytes, alignment);
   } catch (const std::bad_alloc&) {
     if (required_fast)
       throw;
-    placement = place_workspace(logical, 0, provider_->capacity(WorkspaceTier::Slow));
+    placement = place_buffers(logical, 0, provider_->capacity(BufferTier::Slow));
   } catch (const WorkspaceArenaUnavailable&) {
     if (required_fast)
       throw;
-    placement = place_workspace(logical, 0, provider_->capacity(WorkspaceTier::Slow));
+    placement = place_buffers(logical, 0, provider_->capacity(BufferTier::Slow));
   }
-  slow = provider_->allocate(WorkspaceTier::Slow, placement.slow_bytes, alignment);
+  slow = provider_->allocate(BufferTier::Slow, placement.slow_bytes, alignment);
   bind_storage(placement, std::move(fast), std::move(slow));
 }
+KernelInstance::KernelInstance(KernelPlan plan, const VecopsThreadPoolV1* pool,
+                               std::vector<KernelBufferBinding> bindings)
+  : plan_(std::move(plan)), pool_(pool ? pool : vecops_cpu_thread_pool_v1()),
+    external_buffers_(true) {
+  initialize_frame();
+  const auto& logical = plan_.buffer_plan();
+  if (bindings.size() != logical.allocations.size())
+    throw std::invalid_argument("kernel buffer binding count differs from requirements");
+  std::vector<const KernelBufferBinding*> ordered;
+  ordered.reserve(bindings.size());
+  for (std::size_t i = 0; i < logical.allocations.size(); ++i) {
+    const auto& allocation = logical.allocations[i];
+    auto found = std::find_if(bindings.begin(), bindings.end(),
+                             [&](const auto& b) { return b.name == allocation.canonical_path; });
+    if (found == bindings.end() || std::any_of(ordered.begin(), ordered.end(), [&](auto p) { return p == &*found; }))
+      throw std::invalid_argument("missing or duplicate kernel buffer name");
+    const auto candidate = buffer_plan_details::candidate(logical, i);
+    const auto required = buffer_plan_details::checked_add(
+      buffer_plan_details::checked_mul(candidate.stride,allocation.request.replicas-1), allocation.request.bytes);
+    const auto address = reinterpret_cast<std::uintptr_t>(found->address);
+    if (found->replica_stride != static_cast<std::uint64_t>(candidate.stride) ||
+        found->bytes < static_cast<std::uint64_t>(required) ||
+        found->bytes > static_cast<std::uint64_t>(std::numeric_limits<nint_t>::max()) ||
+        (required && (!found->address || !found->owner)) ||
+        address % static_cast<std::uintptr_t>(candidate.alignment) ||
+        found->bytes > std::numeric_limits<std::uintptr_t>::max() - address)
+      throw std::invalid_argument("kernel buffer binding violates size, stride, alignment or ownership");
+    for (std::size_t j = 0; j < ordered.size(); ++j) {
+      const auto& other = *ordered[j];
+      const auto previous = buffer_plan_details::candidate(logical, j);
+      const auto other_address = reinterpret_cast<std::uintptr_t>(other.address);
+      const auto& old_request=logical.allocations[j].request;
+      const auto previous_bytes=buffer_plan_details::checked_add(
+        buffer_plan_details::checked_mul(previous.stride,old_request.replicas-1),old_request.bytes);
+      const bool overlaps = required && previous_bytes &&
+        address < other_address + previous_bytes && other_address < address + required;
+      if (overlaps) {
+        bool live = false;
+        for (const auto& a : allocation.lifetimes)
+          for (const auto& b : logical.allocations[j].lifetimes)
+            live |= a.begin < b.end && b.begin < a.end;
+        if (live) throw std::invalid_argument("live kernel buffer mappings overlap");
+      }
+    }
+    ordered.push_back(&*found);
+    auto& slot = frame_.slots.at(allocation.site.path_hash - 1);
+    slot.address = found->address;
+    slot.bound = true;
+  }
+  buffers_.reserve(bindings.size());
+  for (auto& b : bindings)
+    buffers_.push_back({b.address, static_cast<nint_t>(b.bytes), std::move(b.owner)});
+  frame_.states.reserve(plan_.data_->factories.size());
+  for (const auto& factory : plan_.data_->factories)
+    frame_.states.push_back(factory->make(frame_));
+  if (pool_->retain) pool_->retain(pool_->context);
+}
 void KernelInstance::initialize_frame() {
-  if (!provider_)
+  if (!provider_ && !external_buffers_)
     throw std::invalid_argument("kernel workspace provider is null");
   // Logical-task providers can virtualize lanes, but must never execute a
   // resident barrier. They retain an explicit synchronous-grid fallback.
@@ -145,15 +205,15 @@ void KernelInstance::initialize_frame() {
   frame_.provider = provider_;
 }
 KernelInstance::KernelInstance(KernelPlan plan, const VecopsThreadPoolV1* pool,
-    std::shared_ptr<WorkspaceArenaProvider> provider, const WorkspacePlacement& placement,
+    std::shared_ptr<WorkspaceArenaProvider> provider, const BufferPlacement& placement,
     WorkspaceArena fast, WorkspaceArena slow)
   : plan_(std::move(plan)), pool_(pool ? pool : vecops_cpu_thread_pool_v1()), provider_(std::move(provider)) {
   initialize_frame();
   bind_storage(placement, std::move(fast), std::move(slow));
 }
-void KernelInstance::bind_storage(const WorkspacePlacement& placement, WorkspaceArena fast, WorkspaceArena slow) {
+void KernelInstance::bind_storage(const BufferPlacement& placement, WorkspaceArena fast, WorkspaceArena slow) {
   for (const auto& entry : placement.entries) {
-    auto* base = static_cast<std::byte*>(entry.tier == WorkspaceTier::Fast ? fast.data : slow.data);
+    auto* base = static_cast<std::byte*>(entry.tier == BufferTier::Fast ? fast.data : slow.data);
     auto& slot = frame_.slots[entry.site.path_hash - 1];
     slot.address = base == nullptr ? nullptr : base + entry.offset;
     slot.bound = true;
@@ -184,14 +244,12 @@ void KernelInstance::validate_bindings() const {
   for (std::size_t i = 0; i < frame_.slots.size(); ++i) {
     const auto& slot = frame_.slots[i];
     const auto& spec = plan_.data_->slots[i];
-    if (spec.kind == kernel_plan_details::SlotKind::Buffer && spec.bytes &&
-        provider_->capacity(WorkspaceTier::Fast) == 0 && provider_->capacity(WorkspaceTier::Slow) == 0)
-      throw WorkspaceArenaUnavailable("kernel buffer provider is closed");
     if (!slot.bound || (spec.kind == kernel_plan_details::SlotKind::Tensor && spec.bytes && !slot.address))
       throw std::invalid_argument("kernel input slot is unbound or has no data");
   }
 }
 void KernelInstance::run_lane(nint_t lane, const GridTeam& team) const {
+  const PlannedWorkspaceScope workspace_scope;
   if (team.worker_count() < plan_.workers())
     throw std::runtime_error("resident executor supplied fewer workers than the plan requires");
   for (const auto& action : plan_.data_->actions) {
@@ -218,7 +276,10 @@ void KernelInstance::run_synchronous() {
   } else {
     for (const auto& action : plan_.data_->actions) {
       parallel_tasks(pool_, action->active,
-                     [&](ParallelContext task) { action->run(*action, frame_, task.thread_id); });
+                     [&](ParallelContext task) {
+                       const PlannedWorkspaceScope workspace_scope;
+                       action->run(*action, frame_, task.thread_id);
+                     });
     }
   }
 }
@@ -333,18 +394,18 @@ KernelProgram::KernelProgram(std::vector<KernelPlan> plans, const VecopsThreadPo
   placement_ = provider->place(buffers_);
   WorkspaceArena fast, slow;
   try {
-    fast = provider->allocate(WorkspaceTier::Fast, placement_.fast_bytes, alignment);
+    fast = provider->allocate(BufferTier::Fast, placement_.fast_bytes, alignment);
   } catch (const std::bad_alloc&) {
     if (required_fast) throw;
-    placement_ = place_buffers(buffers_, 0, provider->capacity(WorkspaceTier::Slow));
+    placement_ = place_buffers(buffers_, 0, provider->capacity(BufferTier::Slow));
   } catch (const WorkspaceArenaUnavailable&) {
     if (required_fast) throw;
-    placement_ = place_buffers(buffers_, 0, provider->capacity(WorkspaceTier::Slow));
+    placement_ = place_buffers(buffers_, 0, provider->capacity(BufferTier::Slow));
   }
-  slow = provider->allocate(WorkspaceTier::Slow, placement_.slow_bytes, alignment);
+  slow = provider->allocate(BufferTier::Slow, placement_.slow_bytes, alignment);
   // The common placer may reorder entries. Site IDs, not entry positions,
   // establish the map back to typed frame slots.
-  std::vector<WorkspacePlacement> local(plans.size());
+  std::vector<BufferPlacement> local(plans.size());
   for (const auto& entry : placement_.entries) {
     auto mapped = entry;
     mapped.site = {slots[entry.site.path_hash - 1] + 1, 0};

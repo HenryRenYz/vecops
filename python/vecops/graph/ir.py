@@ -10,8 +10,12 @@ without importing the framework that produced it.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from collections.abc import Mapping
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
+from functools import cache
+from types import MappingProxyType
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -149,17 +153,56 @@ class Loop:
   attributes: dict[str, Any] = field(default_factory=dict)
 
 
+@cache
+def _field_names(cls):
+  return tuple(item.name for item in fields(cls))
+
+
 def _plain(value: Any) -> Any:
   if isinstance(value, Enum):
     return value.value
-  if isinstance(value, tuple):
-    return [_plain(item) for item in value]
-  if isinstance(value, list):
-    return [_plain(item) for item in value]
-  if isinstance(value, dict):
-    return {str(key): _plain(item) for key, item in value.items()}
   if value is None or isinstance(value, (str, int, float, bool)):
     return value
+  if isinstance(value, (tuple, list)):
+    return [_plain(item) for item in value]
+  if isinstance(value, Mapping):
+    return {str(key): _plain(item) for key, item in value.items()}
+  if is_dataclass(value) and not isinstance(value, type):
+    return {name: _plain(getattr(value, name)) for name in _field_names(type(value))}
+  return str(value)
+
+
+class _FrozenNode:
+  """Read-only dataclass view; constructed without invoking mutable setters."""
+
+  def __setattr__(self, name, value):
+    raise TypeError("execution graph snapshot is immutable; edit the original and freeze again")
+
+  def __delattr__(self, name):
+    raise TypeError("execution graph snapshot is immutable")
+
+
+@cache
+def _frozen_type(cls):
+  return type(f"_Frozen{cls.__name__}", (_FrozenNode, cls), {"__module__": __name__})
+
+
+def _freeze(value):
+  if isinstance(value, Enum) or value is None or isinstance(value, (str, int, float, bool)):
+    return value
+  if isinstance(value, _FrozenNode):
+    return value
+  if isinstance(value, (tuple, list)):
+    return tuple(_freeze(item) for item in value)
+  if isinstance(value, Mapping):
+    return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+  if is_dataclass(value) and not isinstance(value, type):
+    node = object.__new__(_frozen_type(type(value)))
+    for name in _field_names(type(value)):
+      object.__setattr__(node, name, _freeze(getattr(value, name)))
+    return node
+  # Unknown annotation objects have always serialized as strings. Retain
+  # that value now, rather than keeping a mutable user object in the snapshot.
   return str(value)
 
 
@@ -177,8 +220,58 @@ class ExecutionGraph:
   attributes: dict[str, Any] = field(default_factory=dict)
   format_version: int = GRAPH_FORMAT_VERSION
 
+  def state_access_summary(self) -> "ExecutionGraph":
+    """Project state-only planning without dropping aliases or loop geometry.
+
+    Retain original event indexes/scopes and loop-carried storage, so weighted
+    accesses, first/last use and boundary checks keep their exact meaning. The
+    summary deliberately cannot be used for factory/temporary replay. It does
+    not change model tracing or execution, and must be frozen independently.
+    """
+    from vecops.planner.core import _metadata_only_event
+    keep = {key for key,storage in self.storages.items() if storage.external or storage.persistent}
+    keep.update(self.tensors[key].storage_id for loop in self.loops for sample in loop.samples
+                for key in (*sample.input_tensors,*sample.output_tensors))
+    tensors = {key:value for key,value in self.tensors.items() if value.storage_id in keep}
+    events = []
+    for event in self.events:
+      # Removing an untracked output may otherwise turn a payload operator
+      # into an apparent view. Preserve the original alias/metadata decision.
+      attributes = {'state_summary_metadata_only': _metadata_only_event(self,event)}
+      events.append(replace(event,uses=[x for x in event.uses if x.tensor_id in tensors],
+          outputs=[x for x in event.outputs if x in tensors],attributes=attributes))
+    return replace(self,events=events,tensors=tensors,
+        storages={key:value for key,value in self.storages.items() if key in keep},
+        inputs=[x for x in self.inputs if x in tensors],outputs=[x for x in self.outputs if x in tensors],
+        attributes={**self.attributes,'state_access_summary':True})
+
+  def freeze(self) -> "ExecutionGraph":
+    """Return a detached, recursively immutable planning snapshot.
+
+    Nested dataclasses reject assignment; mappings are read-only and sequences
+    become tuples. The original remains mutable (including metadata binding).
+    Re-freezing a snapshot returns itself. Serialization and content digests
+    retain format-v1 canonical JSON, so existing plans remain compatible.
+    """
+    return _freeze(self)
+
+  @property
+  def frozen(self) -> bool:
+    return isinstance(self, _FrozenNode)
+
+  def content_digest(self) -> str:
+    """Hash canonical graph JSON, memoizing only immutable snapshots."""
+    if self.frozen and (cached := getattr(self, "_content_digest", None)) is not None:
+      return cached
+    result = hashlib.sha256(self.dumps(indent=None).encode("utf-8")).hexdigest()
+    if self.frozen:
+      object.__setattr__(self, "_content_digest", result)
+    return result
+
   def validate(self) -> None:
     """Raise ``ValueError`` when IDs, ordering, aliasing, or lifetimes disagree."""
+    if self.frozen and getattr(self, '_validated', False):
+      return
     if self.format_version != GRAPH_FORMAT_VERSION:
       raise ValueError(f"unsupported execution graph format {self.format_version}")
     event_ids: set[str] = set()
@@ -261,7 +354,7 @@ class ExecutionGraph:
         raise ValueError(f"loop {loop.id} has an unknown begin event")
       if loop.end_event is not None and loop.end_event not in event_ids:
         raise ValueError(f"loop {loop.id} has an unknown end event")
-      if [sample.iteration for sample in loop.samples] != loop.observed_iterations:
+      if tuple(sample.iteration for sample in loop.samples) != tuple(loop.observed_iterations):
         raise ValueError(f"loop {loop.id} samples disagree with observed iterations")
       for sample in loop.samples:
         if sample.begin_event not in event_ids or sample.end_event not in event_ids:
@@ -269,26 +362,49 @@ class ExecutionGraph:
         for tensor_id in [*sample.input_tensors, *sample.output_tensors]:
           if tensor_id not in self.tensors:
             raise ValueError(f"loop {loop.id} sample references unknown tensor {tensor_id}")
+    # Only recursively immutable snapshots can retain this proof. Mutable
+    # graphs and every newly decoded cache entry are always checked afresh.
+    if self.frozen:
+      object.__setattr__(self, '_validated', True)
 
   def to_dict(self) -> dict[str, Any]:
-    return _plain(asdict(self))
+    return _plain(self)
 
   @classmethod
-  def from_dict(cls, values: dict[str, Any]) -> "ExecutionGraph":
+  def from_dict(cls, values: dict[str, Any], *, frozen: bool = False) -> "ExecutionGraph":
+    """Decode and validate, optionally constructing an immutable snapshot.
+
+    Frozen decoding avoids materializing a second complete mutable graph.
+    Validation proofs/digests are never accepted from serialized object fields.
+    """
+    def node(node_type, **items):
+      if not frozen:
+        return node_type(**items)
+      result=object.__new__(_frozen_type(node_type))
+      names=_field_names(node_type)
+      if items.keys()-set(names):
+        raise ValueError(f'unknown {node_type.__name__} fields')
+      for definition in fields(node_type):
+        if definition.name in items:value=items[definition.name]
+        elif definition.default is not MISSING:value=definition.default
+        elif definition.default_factory is not MISSING:value=definition.default_factory()
+        else:raise ValueError(f'missing {node_type.__name__}.{definition.name}')
+        object.__setattr__(result,definition.name,_freeze(value))
+      return result
     def metadata(item):
       item = dict(item)
       item["shape"] = tuple(item.get("shape", ()))
       item["strides"] = tuple(item.get("strides", ()))
-      return TensorMetadata(**item)
+      return node(TensorMetadata,**item)
 
     tensors = {}
     for key, item in values.get("tensors", {}).items():
       item = dict(item)
       item["metadata"] = metadata(item["metadata"])
       item["kind"] = TensorKind(item.get("kind", TensorKind.unknown.value))
-      tensors[key] = TensorValue(**item)
+      tensors[key] = node(TensorValue,**item)
     storages = {
-      key: StorageValue(**dict(item))
+      key: node(StorageValue,**dict(item))
       for key, item in values.get("storages", {}).items()
     }
     events = []
@@ -296,7 +412,7 @@ class ExecutionGraph:
       item = dict(raw)
       item["scope"] = tuple(item.get("scope", ()))
       item["uses"] = [
-        TensorUse(
+        node(TensorUse,
           **{
             **dict(use),
             "access": AccessKind(use["access"]),
@@ -304,14 +420,14 @@ class ExecutionGraph:
         )
         for use in item.get("uses", [])
       ]
-      events.append(Event(**item))
+      events.append(node(Event,**item))
     loops = []
     for raw in values.get("loops", []):
       item = dict(raw)
       item["scope"] = tuple(item.get("scope", ()))
-      item["samples"] = [LoopSample(**dict(sample)) for sample in item.get("samples", [])]
-      loops.append(Loop(**item))
-    graph = cls(
+      item["samples"] = [node(LoopSample,**dict(sample)) for sample in item.get("samples", [])]
+      loops.append(node(Loop,**item))
+    graph = node(cls,
       name=values["name"],
       events=events,
       tensors=tensors,
@@ -323,6 +439,23 @@ class ExecutionGraph:
       format_version=int(values.get("format_version", GRAPH_FORMAT_VERSION)),
     )
     graph.validate()
+    return graph
+
+  def planning_packet(self) -> dict:
+    """Canonical address-free IR bytes with a format-specific checksum."""
+    document=self.dumps(indent=None)
+    return dict(version=1,document=document,digest=hashlib.sha256(document.encode()).hexdigest())
+
+  @classmethod
+  def from_planning_packet(cls, packet: dict) -> "ExecutionGraph":
+    if packet['version']!=1:raise ValueError('unsupported planning packet')
+    document=packet['document']
+    digest=hashlib.sha256(document.encode()).hexdigest()
+    if digest!=packet['digest']:raise ValueError('planning packet checksum mismatch')
+    graph=cls.from_dict(json.loads(document),frozen=True)
+    # This digest is of the checked canonical document, not an untrusted flag.
+    # Round-trip format is owned by planning_packet and its implementation key.
+    object.__setattr__(graph,'_content_digest',digest)
     return graph
 
   def dumps(self, *, indent: int | None = 2) -> str:

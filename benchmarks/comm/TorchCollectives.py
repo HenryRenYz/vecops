@@ -3,7 +3,7 @@
 """AF3-shaped CPU transport benchmark, including prebound native execution.
 
 Run with torchrun. Binding is supplied explicitly as JSON CPU lists, and memory
-targets come from the independent platform file. All timing excludes allocation,
+targets come from the shared MemoryRuntime hardware/policy inputs. All timing excludes allocation,
 plan construction, validation and warmup. Other backends use identical tensors.
 """
 import argparse
@@ -34,7 +34,6 @@ def main():
   import torch
   import torch.distributed as dist
   from vecops import memory
-  from vecops.distributed.config import Platform, current_cpu_node
   torch.set_num_threads(1)
   if args.backend == 'vecops':
     import vecops.distributed as vd
@@ -43,20 +42,12 @@ def main():
   world = dist.get_world_size()
   assert args.tokens % world == 0
   local, channels = args.tokens//world, 128
-  system = memory.System()
-  _, target = Platform.load(args.config).resolve(current_cpu_node())
-  owners = []
-  def empty(shape):
-    count = 1
-    for n in shape:
-      count *= n
-    owner = system.allocate(count*2, os_numa_id=target if target>=0 else None, large_pages=False, fallback=None)
-    owners.append(owner)
-    return torch.frombuffer(owner, dtype=torch.bfloat16, count=count).reshape(shape)
+  from Memory import pool
+  factory,pool_id,runtime=pool()
+  def empty(shape):return factory.empty(shape,dtype=torch.bfloat16)
   records = []
   calibration = []
   for pattern in ('outgoing', 'incoming', 'exchange'):
-    owners.clear()
     if pattern == 'outgoing':
       source = empty((channels, local, args.tokens)).fill_(rank+1)
       target_tensor = empty((channels, args.tokens, args.tokens))
@@ -77,13 +68,9 @@ def main():
       if args.backend != 'vecops':
         raise ValueError('route tuning requires vecops')
       from vecops.distributed.tuning import tune_all_gather
-      signature = json.loads(vd.backend().tuning_context)
-      platform = Platform.load(args.config)
-      levels, defaults = platform.partitions([x['cpu_node'] for x in signature['members']])
-      if not levels:
-        defaults = [int(platform.communication.get('algorithm') == 'hierarchical')]
-      candidates = [defaults, [0]*len(defaults), [1]*len(defaults)]
-      candidates += [[int(i==j) for i in range(len(defaults))] for j in range(len(defaults))]
+      from vecops.distributed._routing import for_backend
+      compiler=for_backend(vd.backend()).compiler
+      candidates=[list(modes) for modes in compiler.candidates()] if compiler.topology.partitions else [[0]]
       calibration.append(tune_all_gather(inputs[0],outputs,candidates=candidates,iterations=args.iterations))
     if args.backend == 'vecops':
       handle = vd.backend().prepare('all_to_all' if pattern == 'exchange' else 'all_gather', outputs, inputs, [], [], 0)
@@ -114,7 +101,7 @@ def main():
   dist.all_gather_object(gathered, {'rank':rank, 'records':records})
   if rank == 0:
     Path(args.output).write_text(json.dumps({'backend':args.backend, 'tokens':args.tokens,
-        'threads':len(cpus), 'iterations':args.iterations, 'ranks':gathered}, indent=2)+'\n')
+        'pool':pool_id,'runtime_contract':runtime.contract(), 'threads':len(cpus), 'iterations':args.iterations, 'ranks':gathered}, indent=2)+'\n')
   dist.destroy_process_group()
 
 

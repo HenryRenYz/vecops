@@ -262,6 +262,24 @@ class LayerNorm {
   using YPolicy = tensor::OutputAccessPolicy<
       0, tensor::AccessPlan::direct>;
 
+  template <typename InSpec>
+  static constexpr bool TransposedInput = [] {
+    constexpr int Rank = InSpec::InputTensor::Ndim;
+    if constexpr (Rank < 2 || std::same_as<
+        tensor::stride_type_t<Rank - 1, typename InSpec::InputLayout>, meta::Const<1>>) {
+      return false;
+    } else {
+      return []<std::size_t... Axis>(std::index_sequence<Axis...>) {
+        return (std::same_as<tensor::stride_type_t<Axis, typename InSpec::InputLayout>,
+                             meta::Const<1>> || ...);
+      }(std::make_index_sequence<Rank - 1>{});
+    }
+  }();
+
+  template <typename InSpec>
+  using PlanePolicy = tensor::InputAccessPolicy<InSpec::InputTensor::Ndim - 1,
+      2, tensor::AccessPlan::materialize_before_transform>;
+
 public:
   using ComputeType = typename Config::ComputeType;
   using Tag = vec::ScalableTag<ComputeType, 0>;
@@ -289,6 +307,9 @@ public:
     static_assert(Parallelism > 0,
                   "prepared LayerNorm parallelism must be positive");
     using ResourceRequirements = typename LayerNorm::ResourceRequirements;
+    // Specs retain no scratch contents. Each execution recreates its cursor;
+    // operand materialization populates every scratch byte it subsequently reads.
+    static constexpr bool transient_workspace = true;
 
     VECOPS_INLINE PatternPrepared(
         Config config, InPattern in, ScalePattern scale,
@@ -681,8 +702,12 @@ private:
         in.input_layout(), out.output_layout());
     layernorm_details::validate_layernorm_param(n, scale);
     layernorm_details::validate_layernorm_param(n, bias);
-    return tensor::required_workspace(
-        tensor::take_trailing<1>(in), XPolicy{});
+    if constexpr (TransposedInput<InSpec>) {
+      return tensor::required_workspace(in, PlanePolicy<InSpec>{});
+    } else {
+      return tensor::required_workspace(
+          tensor::take_trailing<1>(in), XPolicy{});
+    }
   }
 
   template <typename InSpec, typename ScaleSpec, typename BiasSpec,
@@ -709,7 +734,17 @@ private:
 #else
     using Recipe = layernorm_details::GenericRowRecipe;
 #endif
-    run_rows<Recipe>(workspace, in, scale, bias, out);
+    if constexpr (TransposedInput<InSpec>) {
+      // Bind before slicing rows: a rank-one strided row has lost the unit
+      // axis needed to recognize a transpose. Preserve the memory dtype so
+      // BF16/FP16 still use the same row reduction recipe and rounding.
+      kernel::with_operands(workspace, tensor::operand(in, PlanePolicy<InSpec>{}),
+          [&](auto& canonical) VECOPS_INLINE_LAMBDA {
+            run_rows<Recipe>(workspace, canonical.spec(), scale, bias, out);
+          });
+    } else {
+      run_rows<Recipe>(workspace, in, scale, bias, out);
+    }
   }
 
   // COMPILER TUNING: GCC/Clang x86 generate a smaller and faster outer loop

@@ -149,6 +149,26 @@ TEST(TransposeTest, ConfigOnlyOperatorCanBindDifferentOperands) {
   EXPECT_EQ(second_output, (std::array<int32_t, 6>{7, 10, 8, 11, 9, 12}));
 }
 
+TEST(TransposeTest, ColumnMajorOutputCopiesContiguousLinesWithPaddingAndConversion) {
+  std::array<int16_t, 7*70> input{};
+  for (std::size_t i=0; i<input.size(); ++i) input[i]=static_cast<int16_t>(i)-200;
+  for (nint_t rows : {0,1,7}) {
+    for (nint_t columns : {0,17,65}) {
+      std::array<float32_t,7*68> output, expected;
+      output.fill(-9999); expected.fill(-9999);
+      auto m=meta::dyn<1,0,7>(rows);
+      auto n=meta::dyn<1,0,65>(columns);
+      auto source=make_tensor(input.data(),make_layout(make_shape(m,n),make_strides(cint<70>,cint<1>)));
+      auto destination=make_tensor(output.data(),make_layout(make_shape(n,m),make_strides(cint<1>,cint<68>)));
+      ExecutionSession execution{};
+      ops::transpose(ops::TransposeConfig<float32_t>{})(execution,source,destination);
+      for (nint_t i=0; i<rows; ++i)
+        for (nint_t j=0; j<columns; ++j) expected[i*68+j]=static_cast<float32_t>(input[i*70+j]);
+      EXPECT_EQ(output,expected);
+    }
+  }
+}
+
 TEST(TransposeTest, PatternPreparedBindsRuntimeStorage) {
   constexpr nint_t M = 5;
   constexpr nint_t N = 7;

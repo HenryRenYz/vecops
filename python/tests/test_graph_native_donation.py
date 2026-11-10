@@ -53,7 +53,9 @@ def test_cpp_inplace_permission_requires_dead_internal_input(native_call, monkey
     x = torch.arange(37.)
     capture = GraphCapture('cpp-inplace-contract')
     capture.capture_torch(function, x)
+    original = capture._torch_execution_graph.to_dict()
     program = capture.compile_torch(native_pointwise=True, native_donation=True, borrow_outputs=True)
+    assert capture._torch_execution_graph.to_dict() == original
     assert program.allocator_policy['native_kernel_donations'] == (0 if keep_old else 1)
     for repeat in range(4):
       value = x + repeat

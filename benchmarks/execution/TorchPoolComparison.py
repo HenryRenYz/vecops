@@ -19,31 +19,39 @@ p.add_argument('--node',type=int)
 p.add_argument('--iterations',type=int,default=50)
 a=p.parse_args()
 import torch
-import vecops
+from vecops import memory
+from vecops.planner import GraphMemoryCompiler
 from vecops.graph import GraphCapture
 
 torch.set_num_threads(a.threads)
 records=[]
-owners=[]
+runtime=memory.current_runtime() or memory.default_runtime()
+view=runtime.view()
+allowed_pools=()
+input_pool=None
+if a.node is not None:
+ matches={binding.object for binding in runtime.describe_bindings()
+          if binding.labels.get('os_numa')==str(a.node)
+          and binding.object in view.allocatable_pools}
+ if len(matches)!=1:
+  raise ValueError('--node must identify exactly one allocatable memory pool')
+ allowed_pools=tuple(matches)
+ input_pool=memory.Pool.create(runtime,allowed_pools[0],allowed_pools=allowed_pools,
+                               retain_idle_bytes=0)
 with torch.inference_mode():
  for n in (128,768):
   if a.node is not None:
-   from vecops import memory
-   owner=memory.System().allocate(n*24*768*4,os_numa_id=a.node,large_pages=True,fallback=None)
-   owners.append(owner)
-   x=torch.frombuffer(owner,dtype=torch.float32).reshape(1,n,24,768)
+   x=input_pool.empty((1,n,24,768),dtype=torch.float32,allow_domain_fallback=False)
    x.uniform_(-1,1)
   else:x=torch.rand(1,n,24,768)*2-1
   function=lambda x: ((x*.5).sum(-2)+1).relu()
   capture=GraphCapture('pool-boundary-payload')
   capture.capture_torch(function,x)
-  scratch=None
-  if a.node is not None:
-   owner=memory.System().allocate(80<<20,os_numa_id=a.node,large_pages=True,fallback=None)
-   owners.append(owner)
-   scratch=torch.frombuffer(owner,dtype=torch.uint8)
-  program=capture.compile_torch(native_pointwise=True,borrow_outputs=True,
-      scratch_allocator=(lambda required:scratch) if scratch is not None else None)
+  plan=capture.prepare_torch(native_pointwise=True,borrow_outputs=True)
+  requirements=tuple(req for req in plan.memory_requirements(allowed_pools=allowed_pools) if req.allocated)
+  compiled=GraphMemoryCompiler(runtime,view,runtime.snapshot(view)).compile(requirements)
+  prepared=compiled.prepare(runtime,view).materialize()
+  program=plan.compile(runtime=runtime,view=view,memory_program=prepared)
   expected=torch.softmax(function(x),dim=-1)
   torch.testing.assert_close(torch.softmax(program(x),dim=-1),expected)
   for _ in range(10):torch.softmax(program(x),dim=-1)

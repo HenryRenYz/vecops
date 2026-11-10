@@ -6,7 +6,58 @@ Importing the configuration types does not import Torch. Call register_backend
 before init_process_group('vecops'). No dependency on another communication
 library is required. Transport progress is cooperative and ordered at wait().
 """
-from .config import Hints, Options, Platform
+from .config import Hints, Options, Policy
+
+
+def _payload_runtime():
+  """Select an opaque runtime pool using public CPU access costs."""
+  import os
+  from vecops import memory
+  runtime=memory.current_runtime() or memory.default_runtime()
+  native=runtime.native
+  view=runtime.view()
+  module=memory.native
+  def value(name,**fields):
+    result=getattr(module,name)()
+    for key,item in fields.items():setattr(result,key,item)
+    return result
+  requested=os.environ.get('VECOPS_COMM_POOL','').strip()
+  pools=[pool for pool in view.graph.pools if pool.id in view.allocatable_pools
+         and (not requested or pool.id==requested)]
+  if not pools:
+    raise ValueError('VECOPS_COMM_POOL does not name an allocatable runtime pool' if requested
+                     else 'communication requires an allocatable runtime pool')
+  consumers=[agent.id for agent in view.graph.agents if agent.id in view.executable_agents
+             and 'host_load_store' in agent.capabilities]
+  if not consumers:raise ValueError('CPU communication requires an executable host_load_store agent')
+  context=value('CostContext',view_epoch=view.epoch,execution_slots=view.execution_slots,active=[],
+                include_preparation=False)
+  choices=[]
+  for index,pool in enumerate(pools):
+    capability=native.mapping_capabilities(view,[pool.id])
+    if not (capability.shareable and capability.remappable and capability.partial_backing_map):continue
+    page=capability.page_bytes
+    placement=value('PlacementPlan',address_space=pool.address_space,stripe_bytes=page,weights={pool.id:1})
+    resolved=native.resolve_placement(view,placement,page,module.BackingMode.shareable_remappable,
+                                    [module.AccessMode.read,module.AccessMode.write])
+    endpoint=value('TransferEndpoint',address_space=resolved.address_space,segments=resolved.segments)
+    unknown=False;cost=0.0
+    for consumer in consumers:
+      for access in (module.AccessMode.read,module.AccessMode.write):
+        try:
+          estimate=native.costs.estimate_access(view,value('AccessQuery',agent=consumer,memory=endpoint,
+              access=access,payload_bytes=page),context)
+        except RuntimeError:
+          # The allocation/mapping backend has already certified this pool;
+          # an absent reference path is an unknown cost, not zero bandwidth.
+          unknown=True
+        else:
+          unknown|=estimate.quality==module.CostQuality.incomplete or bool(estimate.missing_facts)
+          cost+=estimate.total_us
+    choices.append(((unknown,cost,index),pool.id,page))
+  if not choices:raise ValueError('no runtime pool supports shared communication page aliases')
+  _,pool,page=min(choices)
+  return runtime,pool,page
 
 
 
@@ -22,16 +73,12 @@ def _create(dist_options, pg_options=None):
   from pathlib import Path
   import torch
   from vecops import _C
-  from .config import current_cpu_node
   from ._build import load
   options = pg_options or Options()
   if not isinstance(options, Options):
     raise TypeError('vecops backend expects vecops.distributed.Options')
-  platform = Platform.load(options.config)
-  cpu_node = current_cpu_node()
-  domain, target = platform.resolve(cpu_node)
-  if platform.communication.get('require_placement', False) and target < 0:
-    raise ValueError(f'no concrete communication memory target configured for CPU NUMA {cpu_node}')
+  platform = Policy.load(options.config)
+  runtime,payload_pool,payload_page=_payload_runtime()
   rank, size = dist_options.group_rank, dist_options.group_size
   store = dist_options.store
   extension = load()
@@ -40,29 +87,39 @@ def _create(dist_options, pg_options=None):
     raise ValueError('vecops communication threads must be positive')
   policy = platform.communication
   from .tuning import context, load_profile, runtime_signature
-  local = {'host': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+  from .compiler import rank_facts, CommunicationCompiler
+  local = {'resources':rank_facts(runtime,payload_pool,threads), 'host': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
            'platform': platform.fingerprint, 'binary': extension.build_id,
-           'domain': domain, 'cpu_node': cpu_node,
-           'memory_node': target, 'threads':threads, 'runtime':runtime_signature(),
+           'threads':threads, 'runtime':runtime_signature(),
+           'payload_pool':payload_pool,'payload_page':payload_page,
+           'capacity_authority':runtime.native.capacity_authority(),
            'calibration':bool(policy.get('calibration'))}
   store.set(f'vecops/identity/{rank}', json.dumps(local))
   members = [json.loads(store.get(f'vecops/identity/{r}').decode()) for r in range(size)]
   if len({x['host'] for x in members}) != 1:
     raise RuntimeError('vecops shared-memory backend requires one host; network transport is not enabled')
+  if size>1 and (any(x['capacity_authority'] is None for x in members)
+                 or len({x['capacity_authority'] for x in members})!=1):
+    raise ValueError('multi-process communication requires one shared MemoryRuntime capacity authority; '
+                     'configure the same job-local capacity_directory before init_process_group')
   if len({x['platform'] for x in members}) != 1:
     raise ValueError('vecops platform configurations differ across ranks')
   if len({x['binary'] for x in members}) != 1:
     raise ValueError('vecops communication binaries differ across ranks')
   if len({x['calibration'] for x in members}) != 1:
     raise ValueError('communication calibration enablement differs across ranks')
-  domain_ids = {name: i for i, name in enumerate(sorted({x['domain'] for x in members}))}
-  groups = [domain_ids[x['domain']] for x in members]
+  if len({x['payload_page'] for x in members}) != 1:
+    raise ValueError('communication participants require a common runtime page quantum')
+  compiler=CommunicationCompiler([member['resources'] for member in members],
+      stage_us=policy.get('stage_us'))
+  groups=list(range(size))
   timeout = options.timeout_ms
   if timeout is None:
     timeout = int(policy.get('timeout_ms', dist_options.timeout.total_seconds()*1000))
   if timeout <= 0:
     raise ValueError('vecops communication timeout must be positive')
-  levels, modes = platform.partitions([x["cpu_node"] for x in members])
+  levels=[list(level) for level in compiler.topology.partitions]
+  modes=[0]*len(levels)
   # Use the identical process-local provider as source kernels when opting
   # into Torch resident teams; pointer identity is part of island composition.
   if (os.environ.get("VECOPS_THREAD_POOL", "native").strip().lower() == "torch"
@@ -72,24 +129,30 @@ def _create(dist_options, pg_options=None):
   else:
     pool_address = int(_C.native_thread_pool_address(threads))
   backend = extension.Backend(store, rank, size, timeout, threads,
-      pool_address, target, groups,
+      pool_address, runtime.native.export_bridge(), payload_pool, groups,
       int(policy.get('initial_capacity_bytes', 1 << 20)),
       int(policy.get('relay_threshold_bytes', 1 << 20)),
       int(policy.get('chunk_bytes', 256 << 10)),
-      bool(levels) or policy.get('algorithm', 'auto') == 'hierarchical',
-      bool(policy.get('require_placement', False)), levels, modes,
+      bool(levels),
+      levels, modes,
       policy.get('copy_schedule','auto')!='peer', bool(policy.get('early_snapshot',False)))
+  backend.payload_page=payload_page
+  from ._routing import install
+  install(backend,compiler,store,rank,size,policy)
   signature = context(platform, members, threads, extension.build_id)
   backend.tuning_context = json.dumps(signature, sort_keys=True)
+  # Performance portability must not weaken this full live authority context.
+  from .tuning import bind_profile_context, profile_context
+  bind_profile_context(backend,signature,runtime)
   if profile := policy.get('calibration'):
     path = Path(profile).expanduser()
     if not path.is_absolute():
       path = Path(platform.path).parent/path
     import hashlib
     try:
-      routes, digest = load_profile(path, signature)
+      routes, digest = load_profile(path, profile_context(backend))
       if any(len(route)!=(len(levels) or 1) for route in routes.values()):
-        raise ValueError('calibrated route level count differs from the platform')
+        raise ValueError('calibrated route level count differs from generated resource partitions')
       status = {'digest':digest, 'routes':hashlib.sha256(
           json.dumps(routes,sort_keys=True).encode()).hexdigest(), 'error':None}
     except Exception as error:
@@ -107,9 +170,10 @@ def _create(dist_options, pg_options=None):
       # A profile is usable by the entire collective or by nobody. Never let
       # one rank enter a replica stage while another silently falls back.
       import warnings
-      warnings.warn('calibration applicability differs across ranks; retaining platform routing',RuntimeWarning)
+      warnings.warn('calibration applicability differs across ranks; retaining resource-model routing',RuntimeWarning)
       routes={}
-    backend.configure_routes(routes)
+    from ._routing import install_profiles
+    install_profiles(backend,routes)
   return backend
 
 
@@ -123,7 +187,16 @@ def backend(group=None):
 
 
 def statistics(group=None):
-  return backend(group).statistics()
+  native=backend(group)
+  result=native.statistics()
+  result['payload_pool']=native.payload_pool
+  result['payload_page_bytes']=native.payload_page
+  from ._routing import for_backend
+  if compiler:=for_backend(native):
+    result['routing']={'partitions':[list(p) for p in compiler.compiler.topology.partitions],
+      'quality':compiler.compiler.topology.quality,'missing_facts':list(compiler.compiler.topology.missing_facts),
+      'synchronization':compiler.synchronization,'plans':compiler.records}
+  return result
 
 
 def seal(group=None):
@@ -159,6 +232,10 @@ def launch(kind, outputs, inputs, *, output=None, output_splits=(), input_splits
   else:
     handle = backend(group).prepare(kind, list(outputs), list(inputs),
         list(output_splits or ()), list(input_splits or ()), root)
+  from ._template import remember
+  remember('vecops_comm::run', handle, group, kind=kind,
+      options=dict(output_splits=list(output_splits or ()), input_splits=list(input_splits or ()),
+                   root=root, copy_levels=None if copy_levels is None else list(copy_levels)))
   from vecops.graph.capture import current_capture
   capture = current_capture()
   if capture is not None:
@@ -273,7 +350,7 @@ def group(process_group=None):
   return Group(process_group)
 
 
-__all__ = ['Hints', 'Options', 'Platform', 'all_gatherv_into_tensor', 'backend', 'group',
+__all__ = ['Hints', 'Options', 'Policy', 'all_gatherv_into_tensor', 'backend', 'group',
            'launch', 'native_operators', 'register_backend', 'seal', 'statistics']
 
 
@@ -287,11 +364,16 @@ def consume_all_gather(source, output, operator_name, specs=(), *, group=None, o
   for the graph lifetime. This explicit API grants borrowing; Hints never do.
   """
   import torch
+  from ._template import record_deferred_consumer
+  if record_deferred_consumer(source,output,operator_name,specs,group,owners):
+    return output
   # Preparing owns an internal address table, not part of the captured program.
   # Do not let its allocation become a graph factory or inspect its storage
   # through the capture's TorchFunction escape guard.
   with torch._C.DisableTorchFunction(), torch._C._DisableTorchDispatch():
     handle = backend(group).prepare_consumer(source, output, operator_name, list(specs))
+  from ._template import remember
+  remember('vecops_comm::consume', handle, group, operator_name=operator_name, specs=list(specs))
   from vecops.graph.capture import current_capture
   capture = current_capture()
   tape = getattr(capture, '_torch_replay_tape', None) if capture else None
@@ -325,6 +407,8 @@ class PageExchange:
   lifetime and never mutate consumer storage (the mapping is OS read-only).
   Use private clone/copy for an independently writable or retained result.
   Slots are bounded versions, not dynamically allocated replay state.
+  Process-group shutdown ends this region's access permission and removes its
+  aliases. All producer/consumer readers must finish before shutdown.
   """
   def __init__(self, block_shape, dtype, *, slots=1, placement='destination', group=None):
     import torch.distributed as dist

@@ -453,3 +453,59 @@ allocation, full-output/canary verification and producer gaps are outside the
 copy clocks. Compare wake policies in separate processes. The active blocks
 contain no ATen/OpenMP work. This is a local scheduling/transport diagnostic,
 not a measurement of cross-domain bandwidth or a substitute for model timing.
+
+## Pointwise artifact reuse during graph preparation
+
+Floating point replay kernels use runtime extents and outer strides. Artifact
+identity retains operation, rank, dtype, last-stride, contiguous-output policy,
+worker and vector contracts. Boolean feature broadcasts retain their singleton
+inner dimension. The bound graph still guards exact shapes/strides and owner
+capacities; artifact reuse does not weaken those guards or share graph buffers.
+Runtime indexing uses the same per-operation code and BF16 rounding boundary;
+copy keeps raw NaN payload bits and arithmetic retains signed-zero/NaN rules.
+Reduction and integer-scalar contracts are unchanged.
+
+
+## Prepared native buffer identity
+
+Metadata-only preparation describes each native workspace with a deterministic
+`slot<frame-index>/<label>` symbol, byte extent, replica stride and lifetimes.
+The frame index is local to the immutable kernel plan. Operator labels such as
+`normalized` may repeat; consumers preserve the complete symbol when planning
+and activating storage. Binding accepts each symbol once and validates size,
+alignment, ownership and overlapping live ranges before constructing state.
+Descriptions and plans contain no allocated addresses.
+
+Native source kernels declare buffer effects with `execution::read`, `write`,
+`read_write`, and `overwrite`. `overwrite` covers the declared root and promises
+that every subsequently read byte is initialized on every invocation, including
+active tails. `execution::call_temporary` describes scratch initialized before
+its first read inside each grid invocation; its contents cannot escape that grid.
+Such scratch can reuse storage between nonadjacent grids. Opaque bindings and
+state factories remain retained unless their operation supplies an audited
+`transient_workspace` contract. LayerNorm and Softmax materialization, matmul packing, matmul scratch, and
+attention sampling/accumulators use that contract; input tensors, caller-owned
+IBS maps, and cached packed weights do not.
+
+Ordinary native workspace allocation also uses resource admission. The default
+provider allocates page-backed roots through `MemoryRuntime`; it cannot bypass
+a hard limit by falling back to the heap. `resource_workspace_arena_provider`
+accepts an explicit application runtime and opaque pool IDs. Its `Fast`/`Slow`
+slots only adapt native buffer metadata to the provider ABI, and do not identify
+HBM/DDR hardware classes. Explicit `KernelBufferBinding` instances already own
+their storage and never open a second default runtime.
+
+Recorded grid actions use declared buffers and borrowed workspace views. Owning
+`Workspace`/`ParallelWorkspace` or a dynamic scratch spill inside an action is
+rejected on every worker, so replay cannot silently allocate outside its plan.
+Source kernels using a dynamic `WorkspaceContext` perform scoped allocations
+through the supplied resource provider and release them after the invocation;
+the generated DSO retains no independent workspace cache.
+
+Managed eager registrations can retain the same signature in several programs.
+`PreparedEagerKernel.select()` selects that owner's existing instance;
+`unselect()` removes its routing selection without releasing its buffers.
+Activation selects and suspension unselects automatically. Selection is local
+to the preparation thread; an AF3 invocation scope selects its own registrations
+and clears them on exit. Switching owners preserves each program's distinct
+buffer offsets and capacity charge.

@@ -18,6 +18,8 @@ import re
 import shutil
 import tempfile
 import threading
+import types
+import weakref
 from pathlib import Path
 
 try:
@@ -31,11 +33,14 @@ def digest(value):
 
 
 _trace_lock = threading.Lock()
+_code_cache_lock = threading.RLock()
+_code_digests = {}
 
 
 def _reset_trace_lock_after_fork():
-  global _trace_lock
+  global _trace_lock, _code_cache_lock
   _trace_lock = threading.Lock()
+  _code_cache_lock = threading.RLock()
 
 
 if hasattr(os, "register_at_fork"):
@@ -122,20 +127,91 @@ def _code_identity(code):
   )
 
 
+def _code_digest(code):
+  """Reuse immutable code bytes; mutable callable state stays freshly read.
+
+  Key by object identity, since CodeType equality omits some source locations.
+  Weak references neither retain unloaded plugins nor allow recycled object IDs
+  to reuse an earlier digest. Nonstandard mutable constants/metadata disable reuse.
+  """
+  token = id(code)
+  with _code_cache_lock:
+    previous = _code_digests.get(token)
+    if previous is not None and previous[0]() is code:
+      if previous[1] is not None:
+        return previous[1]
+      return digest(_code_identity(code))
+
+    def immutable(value):
+      if value is None or value is Ellipsis or type(value) in (bool, int, float, complex, str, bytes):
+        return True
+      if type(value) in (tuple, frozenset):
+        return all(immutable(item) for item in value)
+      if isinstance(value, types.CodeType):
+        # Check original constants before encoding: a tuple subclass can have
+        # a mutable iterator even when its encoded result is an ordinary tuple.
+        return immutable(value.co_consts) and immutable(_code_identity(value))
+      return False
+
+    contents = _code_identity(code)
+    result = digest(contents)
+
+    def discard(reference):
+      with _code_cache_lock:
+        current = _code_digests.get(token)
+        if current is not None and current[0] is reference:
+          _code_digests.pop(token, None)
+
+    _code_digests[token] = (weakref.ref(code, discard), result if immutable(code) else None)
+    return result
+
+
 def file_identity(path):
   path = Path(path)
+  from ._build_session import snapshot_value
   from ._watch import content_hash
-
-  return str(path.absolute()), content_hash(path)
+  return snapshot_value('file', str(path.absolute()),
+                        lambda: (str(path.absolute()), content_hash(path)), leaf=True)
 
 
 def tree_identity(path, suffixes=None):
+  from ._build_session import current_build_session, snapshot_value
   from ._watch import tree_hash
-
-  return tree_hash(path, suffixes)
+  path = Path(path).absolute()
+  suffixes = frozenset(suffixes) if suffixes is not None else None
+  session = current_build_session()
+  parallelism = min(4, session.parallelism) if session is not None else 1
+  cpus = session.hash_cpus() if session is not None else None
+  return snapshot_value('tree', (str(path), suffixes),
+      lambda: tree_hash(path, suffixes, parallelism=parallelism, cpus=cpus), leaf=True)
 
 
 def implementation_identity():
+  from ._build_session import snapshot_value
+  return snapshot_value('implementation', None, _implementation_identity)
+
+
+def binary_implementation_identity():
+  """Native generator/ABI identity, independent of audited runtime-only code.
+
+  Frontend/tape caches retain implementation_identity(). Native artifacts still
+  attest all generators, schemas, compiled SDK code/headers and toolchains.
+  Unknown/new Python modules are conservative binary dependencies. Even for
+  excluded runtime modules, adding/removing paths changes the inventory.
+  """
+  from ._build_session import snapshot_value
+  return snapshot_value('binary-implementation', None, lambda:_implementation_identity(binary=True))
+
+
+_RUNTIME_ONLY_PYTHON = frozenset({
+    'graph/_replay.py', 'graph/_replay_scratch.py', 'graph/_replay_arena.py',
+    'graph/_metadata.py', 'graph/_template.py', 'graph/_pointwise_recipe.py', 'graph/_donation.py',
+    'planner/runtime.py', 'memory/_buffers.py', '_prepare_cache.py',
+    'distributed/_template.py',
+})
+
+
+def _implementation_identity(*, binary=False):
   from ._compiler import _sdk
 
   sdk, layout = _sdk()
@@ -144,12 +220,35 @@ def implementation_identity():
 
   from . import _C
 
-  items = [sys.version, file_identity(_C.__file__), tree_identity(package, {".py"}), tree_identity(sdk / "include")]
+  if binary:
+    from ._build_session import snapshot_value
+    paths = snapshot_value('binary-python-inventory', str(package),
+        lambda:tuple(str(p.relative_to(package))for p in sorted(package.rglob('*.py'))if p.is_file()),leaf=True)
+    python = ['native-python-v1',paths,
+              [(name,file_identity(package/name))for name in paths if name not in _RUNTIME_ONLY_PYTHON]]
+  else:
+    python = tree_identity(package, {".py"})
+  items = [sys.version, file_identity(_C.__file__), python, tree_identity(sdk / "include")]
   if layout.name == "source_tree":
     items += [tree_identity(sdk / "src"), tree_identity(sdk / "cmake"), file_identity(sdk / "CMakeLists.txt")]
   else:
     items += [tree_identity(sdk / "lib")]
   return digest(items)
+
+
+def _callable_source_identity(function):
+  """Reuse source resolution only inside the byte-validated build session.
+
+  Live globals/defaults/closures are deliberately not cached. The function is
+  retained by the session's leaf validator, so recycled IDs cannot alias it.
+  Changed source resolution or file bytes reject publication at checkpoint.
+  """
+  from ._build_session import snapshot_value
+  def compute():
+    source=inspect.getsourcefile(function)
+    return file_identity(source) if source else None
+  return snapshot_value('callable-source',
+      (id(function),id(function.__code__),function.__module__),compute,leaf=True)
 
 
 def callable_identity(function, *, include_state=True):
@@ -165,7 +264,6 @@ def callable_identity(function, *, include_state=True):
       # Unknown native/plugin state cannot be promised cacheable.
       return (type(function).__module__, type(function).__qualname__, os.urandom(16).hex())
     return (type(function).__qualname__, token)
-  source = inspect.getsourcefile(function)
 
   def freeze(value):
     if value is None or isinstance(value, (str, bool, int, float, bytes)):
@@ -191,8 +289,7 @@ def callable_identity(function, *, include_state=True):
     if inspect.ismodule(value):
       return (value.__name__, getattr(value, "__version__", None))
     if inspect.isfunction(value):
-      path = inspect.getsourcefile(value)
-      return (digest(_code_identity(value.__code__)), file_identity(path) if path else None)
+      return (_code_digest(value.__code__), _callable_source_identity(value))
     if inspect.isbuiltin(value):
       return (value.__module__, value.__qualname__)
     if type(value).__module__ == "vecops.language.dsl" and hasattr(value, "function"):
@@ -224,8 +321,8 @@ def callable_identity(function, *, include_state=True):
   variables = inspect.getclosurevars(function)
   captures = tuple((k, freeze(v)) for k, v in sorted({**variables.globals, **variables.nonlocals}.items()))
   return (
-    digest(_code_identity(code)),
-    file_identity(source) if source else None,
+    _code_digest(code),
+    _callable_source_identity(function),
     getattr(function, "__vecops_cache_token__", None),
     captures,
     freeze(function.__defaults__),
@@ -234,6 +331,27 @@ def callable_identity(function, *, include_state=True):
 
 
 def source_inputs(source, include_dirs=(), dependencies=(), *, definition_cwd=None, inventory_excludes=()):
+  """Reuse include-closure structure inside a byte-validated BuildSession.
+
+  Leaf bytes and inventories remain part of every checkpoint. Resolution
+  guards also track newly shadowing quoted headers, including in intentionally
+  excluded CWD inventories. No dependency structure is cached across sessions.
+  """
+  from ._build_session import snapshot_value
+  source = str(source)
+  include_dirs, dependencies = tuple(map(str, include_dirs)), tuple(map(str, dependencies))
+  inventory_excludes = tuple(map(str, inventory_excludes))
+  definition_cwd = str(definition_cwd) if definition_cwd is not None else None
+  uses_cwd = (definition_cwd is None or not Path(definition_cwd).is_absolute()
+              or any(not Path(path).is_absolute() for path in inventory_excludes))
+  key = (source, include_dirs, dependencies, definition_cwd, inventory_excludes,
+         os.getcwd() if uses_cwd else None)
+  return snapshot_value('source-inputs', key, lambda: _source_inputs(
+      source, include_dirs, dependencies, definition_cwd=definition_cwd,
+      inventory_excludes=inventory_excludes))
+
+
+def _source_inputs(source, include_dirs=(), dependencies=(), *, definition_cwd=None, inventory_excludes=()):
   """Conservative quoted/angle include closure plus user include inventories.
 
   The SDK is tracked separately in implementation_identity. System headers are
@@ -247,6 +365,14 @@ def source_inputs(source, include_dirs=(), dependencies=(), *, definition_cwd=No
   sdk, _ = _sdk()
   base = Path(definition_cwd).resolve() if definition_cwd is not None else Path.cwd().resolve()
   roots = tuple((Path(p) if Path(p).is_absolute() else base / p).resolve() for p in include_dirs)
+  from ._build_session import current_build_session, snapshot_value
+  session = current_build_session()
+  if session is not None:
+    paths = (source, *dependencies, *include_dirs)
+    def resolutions():
+      return (tuple(str((Path(p) if Path(p).is_absolute() else base / p).resolve()) for p in paths),
+              tuple(str(Path(p).resolve()) for p in inventory_excludes))
+    snapshot_value('source-resolution', (str(base), paths, tuple(inventory_excludes)), resolutions, leaf=True)
   visited, inputs = set(), []
 
   def visit(path):
@@ -266,6 +392,17 @@ def source_inputs(source, include_dirs=(), dependencies=(), *, definition_cwd=No
       # particular, an unrelated sibling must not hide an angle include
       # selected from the implicit cwd search root whose inventory we omit.
       search = (path.parent, *roots, sdk / "include") if delimiter == '"' else (*roots, sdk / "include")
+      if session is not None:
+        def resolution(search=search, name=name):
+          candidates = []
+          for root in search:
+            candidate = root / name
+            exists = candidate.is_file()
+            candidates.append((str(candidate), exists, str(candidate.resolve()) if exists else None))
+            if exists:
+              break
+          return tuple(candidates)
+        snapshot_value('include-search', (tuple(map(str, search)), name), resolution, leaf=True)
       for include_base in search:
         candidate = include_base / name
         if candidate.is_file():
@@ -304,6 +441,16 @@ def include_roots(compiler):
 
 def compiler_identity(compiler):
   """Persist the full build policy; output/jobs/build paths are presentation only."""
+  from ._build_session import snapshot_value
+  from .language._compiler.cache import _compiler_key
+  key = (_compiler_key(compiler), str(compiler.definition_cwd), compiler.cache_mode,
+         tuple((name, os.environ.get(name)) for name in (
+             'CC', 'CXX', 'CMAKE', 'PATH', 'CMAKE_GENERATOR', 'CPATH', 'CPLUS_INCLUDE_PATH',
+             'C_INCLUDE_PATH', 'LIBRARY_PATH', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS', 'SDKROOT')))
+  return snapshot_value('compiler', key, lambda: _compiler_identity(compiler))
+
+
+def _compiler_identity(compiler):
   from . import _C
   from ._compiler import _tool
 
@@ -332,7 +479,7 @@ def compiler_identity(compiler):
       )
     ),
   )
-  sdk_identity = implementation_identity()
+  sdk_identity = binary_implementation_identity()
   libraries = []
   for name in compiler.libraries:
     p = Path(name)

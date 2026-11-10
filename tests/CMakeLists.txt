@@ -60,17 +60,60 @@ vecops_add_test(NAME KernelLoopTest FILES kernel/LoopTest.cpp FOLDER kernel/loop
 vecops_add_test(NAME KernelTile2DTest FILES kernel/Tile2DTest.cpp FOLDER kernel/tile2d)
 vecops_add_test(NAME WorkspaceTest FILES kernel/WorkspaceTest.cpp
     FOLDER kernel/workspace ARCH Scalar)
-vecops_add_test(NAME WorkspacePlanTest FILES execution/WorkspacePlanTest.cpp
+vecops_add_test(NAME BufferPlanTest FILES execution/BufferPlanTest.cpp
     FOLDER execution/workspace_plan ARCH Scalar)
 vecops_add_test(NAME WorkspaceContextTest FILES execution/WorkspaceContextTest.cpp
     FOLDER execution/workspace_context ARCH Scalar)
 vecops_add_test(NAME WorkspaceTensorTest FILES execution/WorkspaceTensorTest.cpp
     FOLDER execution/workspace_tensor ARCH Scalar)
+vecops_add_test(NAME NativeBufferBindingTest FILES execution/NativeBufferBindingTest.cpp
+    FOLDER execution/native_buffers ARCH Scalar)
 vecops_add_test(NAME KernelPlanTest FILES execution/KernelPlanTest.cpp
     FOLDER execution/kernel_plan ARCH Scalar)
 if(TARGET vecops::memory)
-    vecops_add_test(NAME MemorySystemTest FILES memory/MemorySystemTest.cpp
-        FOLDER memory/system ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME CalibrationTest FILES memory/CalibrationTest.cpp
+        FOLDER memory/calibration ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME LinuxSdmaTest FILES memory/LinuxSdmaTest.cpp
+        FOLDER memory/linux_sdma ARCH Scalar LIBRARIES vecops::memory)
+    add_executable(LinuxSdmaSmoke memory/LinuxSdmaSmoke.cpp)
+    target_link_libraries(LinuxSdmaSmoke PRIVATE vecops::memory)
+    target_compile_features(LinuxSdmaSmoke PRIVATE cxx_std_20)
+    add_executable(LinuxRuntimeSmoke memory/LinuxRuntimeSmoke.cpp)
+    target_link_libraries(LinuxRuntimeSmoke PRIVATE vecops::memory)
+    target_compile_features(LinuxRuntimeSmoke PRIVATE cxx_std_20)
+    vecops_add_test(NAME SharedCapacityAuthorityTest FILES memory/SharedCapacityAuthorityTest.cpp
+        FOLDER memory/shared_capacity ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME RuntimePolicyTest FILES memory/RuntimePolicyTest.cpp
+        FOLDER memory/runtime_policy ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME HostEventsTest FILES memory/HostEventsTest.cpp
+        FOLDER memory/host_events ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME LinuxRuntimeTest FILES memory/LinuxRuntimeTest.cpp
+        FOLDER memory/linux_runtime ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME LinuxDiscoveryTest FILES memory/LinuxDiscoveryTest.cpp
+        FOLDER memory/linux_discovery ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME HardwareTemplateTest FILES memory/HardwareTemplateTest.cpp
+        FOLDER memory/hardware_template ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME CapacityLedgerTest FILES memory/CapacityLedgerTest.cpp
+        FOLDER memory/capacity_ledger ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME MemorySerializationTest FILES memory/SerializationTest.cpp
+        FOLDER memory/serialization ARCH Scalar LIBRARIES vecops::memory)
+    vecops_add_test(NAME LinuxBackendTest FILES memory/LinuxBackendTest.cpp
+        FOLDER memory/linux_backend ARCH Scalar LIBRARIES vecops::memory)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        foreach(consumer IN ITEMS A B)
+            add_library(SharedNameConsumer${consumer} SHARED memory/SharedNameDsoFixture.cpp)
+            target_link_libraries(SharedNameConsumer${consumer} PRIVATE vecops::memory)
+            target_compile_features(SharedNameConsumer${consumer} PRIVATE cxx_std_20)
+        endforeach()
+        add_executable(LinuxSharedNameDsoTest memory/LinuxSharedNameDsoTest.cpp)
+        target_compile_features(LinuxSharedNameDsoTest PRIVATE cxx_std_20)
+        target_link_libraries(LinuxSharedNameDsoTest PRIVATE ${CMAKE_DL_LIBS})
+        add_dependencies(LinuxSharedNameDsoTest SharedNameConsumerA SharedNameConsumerB)
+        add_test(NAME LinuxSharedNameDsoTest COMMAND LinuxSharedNameDsoTest
+            "$<TARGET_FILE:SharedNameConsumerA>" "$<TARGET_FILE:SharedNameConsumerB>")
+    endif()
+    vecops_add_test(NAME ResourceModelTest FILES memory/ResourceModelTest.cpp
+        FOLDER memory/resource_model ARCH Scalar LIBRARIES vecops::memory)
 endif()
 vecops_add_test(NAME MatmulTilerTest FILES matmul/TilerTest.cpp FOLDER matmul/tiler)
 vecops_add_test(

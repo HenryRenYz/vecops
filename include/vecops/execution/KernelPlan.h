@@ -110,7 +110,7 @@ struct SlotSpec {
   nint_t bytes = 0;
   nint_t alignment = 64;
   const std::type_info* scalar_type = nullptr;
-  WorkspacePlacementPolicy placement = WorkspacePlacementPolicy::FastPreferred;
+  BufferPlacementPolicy placement = BufferPlacementPolicy::FastPreferred;
   std::string name;
   double estimated_traffic_bytes = 0;
   nint_t replicas = 1;
@@ -240,6 +240,17 @@ template <tensor::UnboundTensorLike P>
 auto overwrite(TensorArgument<P> arg) {
   static_assert(!std::is_const_v<typename P::ElementType>);
   return TensorAccess<TensorArgument<P>, kernel_plan_details::AccessMode::Overwrite>{std::move(arg)};
+}
+
+/** Scratch whose contents never escape one grid invocation. Every byte read
+ * inside that grid must first be written there, including each dynamic tail
+ * and worker task. No incoming contents or factory initialization may be used.
+ * The storage may be reused in gaps between grids and between replays.
+ */
+template <tensor::UnboundTensorLike P>
+auto call_temporary(TensorArgument<P> arg) {
+  static_assert(!std::is_const_v<typename P::ElementType>);
+  return TensorAccess<TensorArgument<P>, kernel_plan_details::AccessMode::CallTemporary>{std::move(arg)};
 }
 
 /** Grid boundary in one builder. Valid only for metadata declarations. */
@@ -460,7 +471,7 @@ public:
   auto worker_tensor(std::string_view name, Layout layout, WorkspaceTensorOptions options = {}) {
     static_assert(Replicas > 0 && (sizeof(T) & (sizeof(T) - 1)) == 0);
     const auto bytes = workspace_tensor_details::storage_bytes<T>(layout);
-    const auto stride = workspace_plan_details::checked_align_up(
+    const auto stride = buffer_plan_details::checked_align_up(
       bytes, std::max<nint_t>(64, workspace_tensor_details::allocation_alignment<T>(options)));
     auto result = tensor<T>(name,
       workspace_tensor_details::prepend_worker_layout(meta::cint<Replicas>, layout, stride / sizeof(T)), options);
@@ -526,8 +537,16 @@ public:
   [[nodiscard]] const std::vector<VecopsKernelInplaceV1>& inplace_contracts() const noexcept {
     return data_->inplace;
   }
-  /** Prepared logical storage and grid-level lifetimes; no addresses. */
+  /** Prepared logical storage and grid-level lifetimes; no addresses.
+   * Each canonical path is a deterministic, unique frame-slot symbol followed
+   * by its descriptive label. Repeated operator scratch labels remain distinct.
+   */
   [[nodiscard]] const LogicalBufferPlan& buffer_plan() const noexcept { return data_->buffers; }
+  /** True only after audited effects prove overwrite/reuse. Otherwise prepared
+   * state may preserve initialized contents until its instance is destroyed. */
+  [[nodiscard]] bool buffer_reusable(std::size_t index) const {
+    return data_->reusable.at(data_->buffers.allocations.at(index).site.path_hash-1);
+  }
   [[nodiscard]] std::size_t slot_count() const noexcept {
     return data_->slots.size();
   }
@@ -645,10 +664,23 @@ private:
  * the plan. set() retains no external owner: the caller must keep input/output
  * storage alive until replay returns. A graph owner must retain its Tensor owners.
  */
+struct KernelBufferBinding {
+  /** Exact canonical symbol from KernelPlan::buffer_plan(), not a debug label. */
+  std::string name;
+  void* address;
+  std::uint64_t bytes, replica_stride;
+  std::shared_ptr<void> owner;
+};
 class KernelInstance {
 public:
   explicit KernelInstance(KernelPlan plan, const VecopsThreadPoolV1* pool = nullptr,
                           std::shared_ptr<WorkspaceArenaProvider> provider = default_workspace_arena_provider());
+  /** Bind already planned storage. This constructor performs no placement and
+   * never obtains tensor/workspace storage from an allocator. Each binding owner
+   * survives all prepared-state destructors. Unknown/duplicate/missing buffers,
+   * bad alignment or overlapping live virtual byte ranges are rejected. */
+  KernelInstance(KernelPlan, const VecopsThreadPoolV1*, std::vector<KernelBufferBinding>);
+  [[nodiscard]] bool running() const noexcept { return running_.test(std::memory_order_acquire); }
   KernelInstance(const KernelInstance&) = delete;
   KernelInstance& operator=(const KernelInstance&) = delete;
   ~KernelInstance();
@@ -678,10 +710,10 @@ private:
   friend class KernelSequence;
   friend class KernelProgram;
   KernelInstance(KernelPlan plan, const VecopsThreadPoolV1* pool,
-                 std::shared_ptr<WorkspaceArenaProvider> provider, const WorkspacePlacement& placement,
+                 std::shared_ptr<WorkspaceArenaProvider> provider, const BufferPlacement& placement,
                  WorkspaceArena fast, WorkspaceArena slow);
   void initialize_frame();
-  void bind_storage(const WorkspacePlacement&, WorkspaceArena fast, WorkspaceArena slow);
+  void bind_storage(const BufferPlacement&, WorkspaceArena fast, WorkspaceArena slow);
   void acquire();
   void release() noexcept;
   void run_lane(nint_t lane, const GridTeam& team) const;
@@ -691,6 +723,7 @@ private:
   const VecopsThreadPoolV1* pool_;
   std::shared_ptr<WorkspaceArenaProvider> provider_;
   std::vector<WorkspaceArena> buffers_;
+  bool external_buffers_ = false;
   kernel_plan_details::Frame frame_;
   std::atomic_flag running_ = ATOMIC_FLAG_INIT;
   std::uint64_t replay_count_ = 0;

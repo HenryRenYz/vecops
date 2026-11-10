@@ -39,7 +39,8 @@
 #include "vecops/compiler/Compiler.h"
 #include "vecops/compiler/details/KernelBatch.h"
 #include "vecops/execution/Parallel.h"
-#include "vecops/execution/WorkspacePlan.h"
+#include "vecops/execution/BufferPlan.h"
+#include "vecops/execution/ResourceWorkspace.h"
 #include "vecops/execution/Grid.h"
 #include "vecops/execution/FloatControl.h"
 #include "vecops/kernel/Workspace.h"
@@ -48,9 +49,9 @@
 #include "vecops/runtime/Provider.h"
 #include "ContentWatch.h"
 #if defined(VECOPS_PYTHON_HAS_MEMORY)
-#  include "vecops/execution/MemoryWorkspaceSession.h"
-#  include "vecops/execution/BufferMemorySession.h"
-#  include "vecops/memory/Memory.h"
+#  include "MemoryModelBindings.h"
+#  include "vecops/memory/Model.h"
+#  include "MemoryRuntimeBindings.h"
 #endif
 
 namespace py = pybind11;
@@ -388,6 +389,7 @@ vecops::runtime::SpecializationValues specialization_values(py::dict values) {
 
 /** Metadata identity used by the allocation-free framework hot path. */
 struct BridgeValueSignature {
+  bool operator==(const BridgeValueSignature&) const = default;
   std::uint32_t kind = VECOPS_VALUE_NONE;
   std::uint32_t dtype = VECOPS_DTYPE_INVALID;
   std::uint32_t device_type = 0;
@@ -398,6 +400,7 @@ struct BridgeValueSignature {
 };
 
 struct BridgeSpecializationSignature {
+  bool operator==(const BridgeSpecializationSignature&) const = default;
   std::string name;
   std::uint32_t kind = 0;
   std::int64_t integer = 0;
@@ -405,6 +408,7 @@ struct BridgeSpecializationSignature {
 };
 
 struct BridgeCallSignature {
+  bool operator==(const BridgeCallSignature&) const = default;
   std::vector<BridgeValueSignature> values;
   std::vector<BridgeSpecializationSignature> specializations;
   vecops::nint_t parallelism = 1;
@@ -570,10 +574,29 @@ struct BridgePlanContext {
   }
 };
 
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-const VecopsWorkspaceArenaProvider* current_memory_workspace_provider();
-#endif
 const VecopsAllocationObserverV1* active_allocation_observer();
+
+struct ManagedEagerPlan {
+  std::mutex mutex;
+  std::thread::id owner_thread=std::this_thread::get_id();
+  bool selected=false;
+  uint64_t handle;
+  BridgeCallSignature signature;
+  BridgePlanContext context;
+  std::shared_ptr<vecops::runtime::PreparedKernelLease> lease;
+  void close() { std::lock_guard lock(mutex); selected=false;lease.reset(); }
+  void unselect() {std::lock_guard lock(mutex);selected=false;}
+};
+thread_local std::map<uint64_t,std::vector<std::weak_ptr<ManagedEagerPlan>>> managed_eager_plans;
+std::mutex prepared_origins_mutex;
+std::map<const vecops::runtime::PreparedKernelLease*,
+         std::pair<std::weak_ptr<vecops::runtime::PreparedKernelLease>,uint64_t>> prepared_origins;
+void remember_origin(const std::shared_ptr<vecops::runtime::PreparedKernelLease>& lease,uint64_t handle) {
+  std::lock_guard lock(prepared_origins_mutex);
+  for(auto it=prepared_origins.begin();it!=prepared_origins.end();)
+    if(it->second.first.expired()) it=prepared_origins.erase(it); else ++it;
+  prepared_origins[lease.get()]={lease,handle};
+}
 
 class PyKernelCall {
 public:
@@ -598,6 +621,7 @@ private:
   KernelCall call_;
 };
 
+struct BridgeHotEntry;
 class PyOperator {
 public:
   struct BatchItem {
@@ -626,12 +650,6 @@ public:
     memory_context.struct_size = sizeof(VecopsExecutionContext);
     memory_context.thread_pool = vecops_cpu_thread_pool_v1();
     memory_context.allocation_observer = active_allocation_observer();
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-    if (const auto* provider = current_memory_workspace_provider(); provider != nullptr) {
-      memory_context.struct_size = sizeof(VecopsExecutionContext);
-      memory_context.workspace_provider = provider;
-    }
-#endif
     Status last(StatusCode::NotApplicable, "no registered recipe accepted the invocation");
     for (std::size_t index = 0; index < state_->operator_instances.size(); ++index) {
       auto values = state_->default_values[index];
@@ -674,7 +692,7 @@ public:
                                             vecops::nint_t execution_parallelism);
   static std::shared_ptr<vecops::runtime::PreparedKernelLease> prepare_grid_plan(
       std::uint64_t handle, ArgumentMetadata arguments, vecops::runtime::SpecializationValues specialization,
-      const VecopsThreadPoolV1* pool) {
+      const VecopsThreadPoolV1* pool, bool describe_only = false) {
     std::shared_ptr<State> state;
     {
       std::lock_guard lock(operator_registry_mutex);
@@ -685,10 +703,8 @@ public:
     VecopsExecutionContext context{};
     context.struct_size = sizeof(context);
     context.thread_pool = pool ? pool : vecops_cpu_thread_pool_v1();
+    context.defer_buffer_binding = describe_only;
     context.requested_threads = context.thread_pool->max_parallelism(context.thread_pool->context);
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-    context.workspace_provider = current_memory_workspace_provider();
-#endif
     for (std::size_t i = 0; i < state->operator_instances.size(); ++i) {
       auto values = state->default_values[i];
       for (const auto& [name, value] : specialization) values.insert_or_assign(name, value);
@@ -702,7 +718,9 @@ public:
       vecops::runtime::CallFrame frame(arguments, nullptr, 0, &context);
       auto prepared = executable.value()->prepare_prevalidated(frame.abi());
       if (!prepared) throw_status(prepared.status());
-      return prepared.value()->export_abi();
+      auto lease = prepared.value()->export_abi();
+      remember_origin(lease,handle);
+      return lease;
     }
     return {};
   }
@@ -813,6 +831,7 @@ private:
   static std::mutex operator_registry_mutex;
   static std::map<std::uint64_t, std::weak_ptr<State>> operator_registry;
 
+  friend struct BridgeHotEntry;
   friend Status invoke_registered_operator(std::uint64_t, const VecopsCall*, std::uint32_t,
                                            const VecopsSpecializationArgument*);
   std::shared_ptr<const KernelDef> definition_;
@@ -924,367 +943,63 @@ Status PyOperator::prepare_batch(std::span<const BatchItem> items, std::size_t p
   return Status::success();
 }
 
-vecops::execution::LogicalWorkspacePlan python_buffer_plan(const py::list& requirements) {
-  using namespace vecops::execution;
-  LogicalWorkspacePlan logical;
-  for (const auto& item : requirements) {
-    const auto r = py::cast<py::dict>(item);
-    const auto bytes = py::cast<vecops::nint_t>(r["bytes"]);
-    const auto alignment = r.contains("alignment") ? py::cast<vecops::nint_t>(r["alignment"]) : 64;
-    const auto replicas = r.contains("replicas") ? py::cast<vecops::nint_t>(r["replicas"]) : 1;
-    if (bytes < 0 || alignment < 1 || (alignment & (alignment-1)) || replicas < 1 ||
-        bytes > (std::numeric_limits<vecops::nint_t>::max() / replicas) - alignment)
-      throw py::value_error("invalid buffer size/alignment/replicas");
-    const auto policy = r.contains("placement") ? py::cast<std::string>(r["placement"]) : "preferred";
-    if (policy != "required" && policy != "preferred" && policy != "slow")
-      throw py::value_error("buffer placement must be required, preferred or slow");
-    const auto index = logical.allocations.size();
-    LogicalWorkspaceAllocation a{{index+1, 0}, py::cast<std::string>(r["name"]),
-      {bytes, alignment, replicas == 1 ? WorkspaceDomain::Global : WorkspaceDomain::WorkerLocal, replicas,
-        policy == "required" ? WorkspacePlacementPolicy::FastRequired : policy == "slow" ?
-        WorkspacePlacementPolicy::SlowAllowed : WorkspacePlacementPolicy::FastPreferred,
-        r.contains("traffic_bytes") ? py::cast<double>(r["traffic_bytes"]) : 0.0}, {}};
-    const auto times = r.contains("lifetimes") ? py::cast<std::vector<std::pair<std::uint64_t, std::uint64_t>>>(r["lifetimes"])
-      : std::vector<std::pair<std::uint64_t, std::uint64_t>>{{0, 1}};
-    for (const auto& [begin, end] : times) {
-      if (begin >= end) throw py::value_error("buffer lifetime must be a nonempty half-open interval");
-      a.lifetimes.push_back({begin, end});
-    }
-    if (a.lifetimes.empty()) throw py::value_error("buffer needs at least one lifetime");
-    logical.allocations.push_back(std::move(a));
-  }
-  return logical;
-}
-
-void bind_buffer_planning(py::module_& module) {
-  module.def("plan_buffers", [](const py::list& requests, vecops::nint_t fast, vecops::nint_t slow) {
-    using namespace vecops::execution;
-    if (fast < 0 || slow < 0) throw py::value_error("buffer capacities must be nonnegative");
-    auto logical = python_buffer_plan(requests);
-    auto placement = place_workspace(logical, fast, slow);
-    py::dict result, entries;
-    for (const auto& p : placement.entries) {
-      py::dict entry;
-      entry["tier"] = p.tier == WorkspaceTier::Fast ? "fast" : "slow";
-      entry["offset"] = p.offset;
-      entry["size"] = p.replica_stride * p.replicas;
-      entries[py::str(logical.allocations[p.site.path_hash-1].canonical_path)] = entry;
-    }
-    result["buffers"] = entries;
-    result["fast_bytes"] = placement.fast_bytes;
-    result["slow_bytes"] = placement.slow_bytes;
-    return result;
-    });
-
-}
-
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-
-void set_memory_provider_error(VecopsError* error, std::int32_t code, std::string_view message) {
-  if (error == nullptr || error->struct_size < sizeof(VecopsError))
-    return;
-  error->code = code;
-  error->message_required = message.size() + 1;
-  if (error->message == nullptr || error->message_capacity == 0)
-    return;
-  const auto copied = std::min(message.size(), error->message_capacity - 1);
-  std::memcpy(error->message, message.data(), copied);
-  error->message[copied] = '\0';
-}
-
-struct BridgeMemoryWorkspaceProvider {
-  explicit BridgeMemoryWorkspaceProvider(std::shared_ptr<vecops::execution::WorkspaceArenaProvider> provider)
-    : provider(std::move(provider)) {
-    static std::atomic<std::uint64_t> next_identity{1};
-    abi = {sizeof(VecopsWorkspaceArenaProvider),
-           0,
-           next_identity.fetch_add(1, std::memory_order_relaxed),
-           this,
-           capacity,
-           allocate,
-           release_arena,
-           retain,
-           release_context,
-           this->provider->shares_arenas_between_plans() ? VECOPS_WORKSPACE_ARENA_PROVIDER_FLAG_SHARED_ARENAS : 0,
-           place_buffers};
-  }
-
-  static std::uint64_t capacity(void* context, std::uint32_t tier) {
-    auto& self = *static_cast<BridgeMemoryWorkspaceProvider*>(context);
-    const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? vecops::execution::WorkspaceTier::Fast
-                                                                 : vecops::execution::WorkspaceTier::Slow;
-    return static_cast<std::uint64_t>(self.provider->capacity(logical_tier));
-  }
-
-  static std::int32_t allocate(void* context, std::uint32_t tier, std::uint64_t bytes, std::uint64_t alignment,
-                               VecopsWorkspaceArena* result, VecopsError* error) {
-    if (result == nullptr || result->struct_size < sizeof(VecopsWorkspaceArena)) {
-      set_memory_provider_error(error, VECOPS_STATUS_INVALID_ARGUMENT, "workspace arena result is truncated");
-      return VECOPS_STATUS_INVALID_ARGUMENT;
-    }
-    if (bytes > static_cast<std::uint64_t>(std::numeric_limits<vecops::nint_t>::max()) ||
-        alignment > static_cast<std::uint64_t>(std::numeric_limits<vecops::nint_t>::max())) {
-      set_memory_provider_error(error, VECOPS_STATUS_INVALID_ARGUMENT,
-                                "workspace arena request exceeds the host address space");
-      return VECOPS_STATUS_INVALID_ARGUMENT;
-    }
-    try {
-      auto& self = *static_cast<BridgeMemoryWorkspaceProvider*>(context);
-      const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? vecops::execution::WorkspaceTier::Fast
-                                                                   : vecops::execution::WorkspaceTier::Slow;
-      auto arena = self.provider->allocate(logical_tier, static_cast<vecops::nint_t>(bytes),
-                                           static_cast<vecops::nint_t>(alignment));
-      std::shared_ptr<void>* owner = nullptr;
-      if (arena.owner)
-        owner = new std::shared_ptr<void>(std::move(arena.owner));
-      *result = {sizeof(VecopsWorkspaceArena), 0, arena.data, static_cast<std::uint64_t>(arena.capacity), owner};
-      return VECOPS_STATUS_OK;
-    } catch (const std::exception& exception) {
-      set_memory_provider_error(error, VECOPS_STATUS_EXECUTION_ERROR, exception.what());
-      return VECOPS_STATUS_EXECUTION_ERROR;
-    } catch (...) {
-      set_memory_provider_error(error, VECOPS_STATUS_EXECUTION_ERROR, "workspace arena allocation failed");
-      return VECOPS_STATUS_EXECUTION_ERROR;
-    }
-  }
-
-  static std::int32_t place_buffers(void* context, const VecopsBufferRequirementV1* requests, std::size_t count,
-                                     VecopsBufferPlacementV1* result, VecopsError* error) {
-    using namespace vecops::execution;
-    try {
-      LogicalWorkspacePlan logical;
-      for (std::size_t i = 0; i < count; ++i) {
-        const auto& r = requests[i];
-        LogicalWorkspaceAllocation a{{i + 1, 0}, r.name ? r.name : "buffer",
-          {static_cast<vecops::nint_t>(r.bytes), static_cast<vecops::nint_t>(r.alignment),
-           static_cast<WorkspaceDomain>(r.domain), static_cast<vecops::nint_t>(r.replicas),
-           static_cast<WorkspacePlacementPolicy>(r.placement), r.estimated_traffic_bytes}, {}};
-        for (std::size_t j = 0; j < r.lifetime_count; ++j)
-          a.lifetimes.push_back({r.lifetimes[j].begin, r.lifetimes[j].end});
-        logical.allocations.push_back(std::move(a));
-      }
-      auto placement = static_cast<BridgeMemoryWorkspaceProvider*>(context)->provider->place(logical);
-      for (const auto& p : placement.entries)
-        result[p.site.path_hash - 1] = {static_cast<std::uint64_t>(p.offset),
-          p.tier == WorkspaceTier::Fast ? VECOPS_WORKSPACE_TIER_FAST : VECOPS_WORKSPACE_TIER_SLOW};
-      return VECOPS_STATUS_OK;
-    } catch (const std::exception& e) {
-      set_memory_provider_error(error, VECOPS_STATUS_EXECUTION_ERROR, e.what());
-      return VECOPS_STATUS_EXECUTION_ERROR;
-    }
-  }
-
-  static void release_arena(void*, void* owner) {
-    delete static_cast<std::shared_ptr<void>*>(owner);
-  }
-
-  static void retain(void* context) {
-    static_cast<BridgeMemoryWorkspaceProvider*>(context)->references.fetch_add(1, std::memory_order_relaxed);
-  }
-
-  static void release_context(void* context) {
-    auto* self = static_cast<BridgeMemoryWorkspaceProvider*>(context);
-    if (self->references.fetch_sub(1, std::memory_order_acq_rel) == 1)
-      delete self;
-  }
-
-  std::atomic<std::uint64_t> references{1};
-  std::shared_ptr<vecops::execution::WorkspaceArenaProvider> provider;
-  VecopsWorkspaceArenaProvider abi{};
+struct BridgeHotEntry {
+  std::uint64_t handle = 0;
+  std::weak_ptr<PyOperator::State> state;
+  std::shared_ptr<Executable> executable;
+  BridgeCallSignature signature;
+  std::uint64_t last_use = 0;
+  BridgePlanContext context;
+  std::shared_ptr<vecops::runtime::PreparedKernel> prepared;
 };
+static thread_local std::array<std::optional<BridgeHotEntry>, bridge_hot_max_capacity> hot_entries;
+static thread_local std::uint64_t hot_clock = 0;
 
-thread_local std::vector<BridgeMemoryWorkspaceProvider*> memory_workspace_sessions;
-
-const VecopsWorkspaceArenaProvider* current_memory_workspace_provider() {
-  return memory_workspace_sessions.empty() ? nullptr : &memory_workspace_sessions.back()->abi;
+thread_local std::shared_ptr<vecops::execution::WorkspaceArenaProvider> ambient_workspace_provider;
+thread_local std::shared_ptr<const VecopsWorkspaceArenaProvider> ambient_workspace_abi;
+void clear_eager_workspace_cache() {
+  for(auto& entry:hot_entries) entry.reset();
+  ambient_workspace_abi.reset();
+  ambient_workspace_provider.reset();
 }
-
-struct PyPlacedBuffer {
-  void* data = nullptr;
-  vecops::nint_t bytes = 0;
-  std::string tier;
-  std::shared_ptr<void> storage, lease;
-  vecops::nint_t offset = 0, large_page_bytes = 0;
-  std::optional<vecops::memory::MemoryTargetId> target_id;
-};
-
-class PyBufferMemorySession {
+const VecopsWorkspaceArenaProvider* current_workspace_abi() {
+  auto provider=vecops::execution::default_workspace_arena_provider();
+  if(provider!=ambient_workspace_provider) {
+    auto abi=vecops::execution::workspace_arena_provider_to_abi(provider);
+    ambient_workspace_provider=std::move(provider);
+    ambient_workspace_abi=std::move(abi);
+  }
+  return ambient_workspace_abi.get();
+}
+thread_local std::uint64_t runtime_scope_top=0;
+std::atomic<std::uint64_t> runtime_scope_sequence{1};
+class NativeRuntimeScope {
+  std::thread::id thread=std::this_thread::get_id();
+  std::uint64_t id=0,previous_id=0;
+  std::shared_ptr<vecops::execution::WorkspaceArenaProvider> previous;
 public:
-  PyBufferMemorySession(vecops::memory::MemorySystem system, std::uint64_t fast, std::uint64_t slow,
-                         std::optional<vecops::memory::CpuDomainId> domain, bool fallback, bool large) {
-    if (fast > std::uint64_t(std::numeric_limits<vecops::nint_t>::max()) || slow > std::uint64_t(std::numeric_limits<vecops::nint_t>::max()))
-      throw py::value_error("buffer capacities exceed address space");
-    session_ = std::make_shared<vecops::execution::BufferMemorySession>(std::move(system),
-      vecops::execution::BufferMemorySessionConfig{
-        domain ? vecops::memory::CpuDomainSelector::specific(*domain) : vecops::memory::CpuDomainSelector::current(),
-        static_cast<vecops::nint_t>(fast), static_cast<vecops::nint_t>(slow), fallback, large});
-    state_ = new BridgeMemoryWorkspaceProvider(session_);
+  explicit NativeRuntimeScope(std::shared_ptr<vecops::memory::model::MemoryRuntime> runtime) {
+    auto provider=vecops::execution::resource_workspace_arena_provider(std::move(runtime));
+    clear_eager_workspace_cache();
+    previous=vecops::execution::exchange_workspace_arena_provider(std::move(provider));
+    previous_id=runtime_scope_top;
+    id=runtime_scope_sequence.fetch_add(1);
+    runtime_scope_top=id;
   }
-  ~PyBufferMemorySession() {
-    if (active_) {
-      auto p = std::find(memory_workspace_sessions.begin(), memory_workspace_sessions.end(), state_);
-      if (p != memory_workspace_sessions.end()) memory_workspace_sessions.erase(p);
-    }
-    session_->close();
-    BridgeMemoryWorkspaceProvider::release_context(state_);
-  }
-  PyBufferMemorySession& enter() {
-    if (entered_ || session_->closed()) throw std::runtime_error("buffer sessions are single use");
-    if (!memory_workspace_sessions.empty()) throw std::runtime_error("buffer sessions cannot nest workspace providers");
-    memory_workspace_sessions.push_back(state_);
-    entered_ = active_ = true;
-    return *this;
-  }
-  bool exit(const py::object&, const py::object&, const py::object&) { close(); return false; }
+  NativeRuntimeScope(const NativeRuntimeScope&)=delete;
+  NativeRuntimeScope& operator=(const NativeRuntimeScope&)=delete;
   void close() {
-    if (active_) {
-      if (memory_workspace_sessions.empty() || memory_workspace_sessions.back() != state_)
-        throw std::runtime_error("buffer sessions must close in LIFO order");
-      memory_workspace_sessions.pop_back();
-      active_ = false;
-    }
-    session_->close();
+    if(!id) return;
+    if(thread!=std::this_thread::get_id() || runtime_scope_top!=id)
+      throw std::runtime_error("memory runtime scopes must close on their entering thread in LIFO order");
+    clear_eager_workspace_cache();
+    vecops::execution::exchange_workspace_arena_provider(std::move(previous));
+    runtime_scope_top=previous_id;id=0;
   }
-  py::dict bind(const py::list& requests, const std::string& group) {
-    using namespace vecops::execution;
-    auto logical = python_buffer_plan(requests);
-    auto binding = session_->bind(logical, group);
-    py::dict result;
-    for (const auto& p : binding.placement.entries) {
-      const auto& a = logical.allocations[p.site.path_hash - 1];
-      const auto& arena = p.tier == WorkspaceTier::Fast ? binding.fast : binding.slow;
-      const auto size = workspace_plan_details::checked_mul(p.replica_stride, p.replicas);
-      const auto [target, large] = session_->metadata(p.tier, p.offset, size);
-      result[py::str(a.canonical_path)] = py::cast(PyPlacedBuffer{
-        size ? static_cast<std::byte*>(arena.data) + p.offset : nullptr, size,
-        p.tier == WorkspaceTier::Fast ? "fast" : "slow", arena.owner, binding.lease, p.offset, large, target});
-    }
-    return result;
+  ~NativeRuntimeScope() {
+    if(id && thread==std::this_thread::get_id() && runtime_scope_top==id) close();
   }
-  py::list manifest() const {
-    py::list result;
-    for (const auto& e : session_->manifest()) {
-      py::dict row;
-      row["plan"] = e.plan; row["group"] = e.group; row["name"] = e.name;
-      row["tier"] = e.placement.tier == vecops::execution::WorkspaceTier::Fast ? "fast" : "slow";
-      row["offset"] = e.placement.offset; row["bytes"] = e.placement.bytes;
-      row["replicas"] = e.placement.replicas; row["replica_stride"] = e.placement.replica_stride;
-      row["traffic_bytes"] = e.traffic_bytes;
-      const auto bytes = e.placement.replica_stride * e.placement.replicas;
-      const auto [target, large] = session_->metadata(e.placement.tier, e.placement.offset, bytes);
-      row["target_id"] = py::cast(target);
-      row["large_page_bytes"] = large;
-      row["address"] = session_->arena_address(e.placement.tier) + e.placement.offset;
-      result.append(row);
-    }
-    return result;
-  }
-  py::dict stats() const {
-    const auto s = session_->stats();
-    py::dict r;
-    r["fast_capacity"] = s.fast_capacity; r["slow_capacity"] = s.slow_capacity;
-    r["fast_reserved"] = s.fast_reserved; r["slow_reserved"] = s.slow_reserved;
-    r["groups"] = s.groups; r["plans"] = s.plans;
-    r["largest_fast_free"] = s.largest_fast_free;
-    return r;
-  }
-private:
-  std::shared_ptr<vecops::execution::BufferMemorySession> session_;
-  BridgeMemoryWorkspaceProvider* state_;
-  bool active_ = false, entered_ = false;
 };
-
-class PyMemoryWorkspaceSession {
-public:
-  PyMemoryWorkspaceSession(vecops::memory::MemorySystem memory, std::optional<vecops::memory::CpuDomainId> domain,
-                           std::uint64_t fast_capacity, std::optional<std::uint64_t> slow_capacity,
-                           bool allow_fast_fallback, bool use_large_pages) {
-    constexpr auto limit = static_cast<std::uint64_t>(std::numeric_limits<vecops::nint_t>::max());
-    if (fast_capacity > limit || (slow_capacity.has_value() && slow_capacity.value() > limit))
-      throw py::value_error("workspace capacity exceeds the host address space");
-    vecops::execution::MemoryWorkspaceSessionConfig config{
-      .domain = domain.has_value() ? vecops::memory::CpuDomainSelector::specific(domain.value())
-                                   : vecops::memory::CpuDomainSelector::current(),
-      .fast_capacity = static_cast<vecops::nint_t>(fast_capacity),
-      .slow_capacity = static_cast<vecops::nint_t>(slow_capacity.value_or(fast_capacity)),
-      .allow_fast_fallback = allow_fast_fallback,
-      .use_large_pages = use_large_pages,
-    };
-    session_ = std::make_shared<vecops::execution::MemoryWorkspaceSession>(std::move(memory), config);
-    state_ = new BridgeMemoryWorkspaceProvider(session_);
-  }
-
-  PyMemoryWorkspaceSession(const PyMemoryWorkspaceSession&) = delete;
-  PyMemoryWorkspaceSession& operator=(const PyMemoryWorkspaceSession&) = delete;
-
-  ~PyMemoryWorkspaceSession() {
-    close_noexcept();
-    BridgeMemoryWorkspaceProvider::release_context(state_);
-  }
-
-  PyMemoryWorkspaceSession& enter() {
-    if (entered_)
-      throw std::runtime_error("memory workspace session cannot be re-entered");
-    memory_workspace_sessions.push_back(state_);
-    active_ = true;
-    entered_ = true;
-    return *this;
-  }
-
-  bool exit(const py::object&, const py::object&, const py::object&) {
-    if (!active_ || memory_workspace_sessions.empty() || memory_workspace_sessions.back() != state_)
-      throw std::runtime_error("memory workspace sessions must exit in LIFO order");
-    memory_workspace_sessions.pop_back();
-    active_ = false;
-    session_->close();
-    return false;
-  }
-
-  void close() {
-    if (active_) {
-      if (memory_workspace_sessions.empty() || memory_workspace_sessions.back() != state_)
-        throw std::runtime_error("memory workspace sessions must close in LIFO order");
-      memory_workspace_sessions.pop_back();
-      active_ = false;
-    }
-    entered_ = true;
-    session_->close();
-  }
-
-  [[nodiscard]] bool closed() const noexcept {
-    return session_->closed();
-  }
-
-  [[nodiscard]] std::uint64_t fast_capacity() const noexcept {
-    return static_cast<std::uint64_t>(session_->fast_capacity());
-  }
-
-  [[nodiscard]] std::uint64_t slow_capacity() const noexcept {
-    return static_cast<std::uint64_t>(session_->slow_capacity());
-  }
-
-  [[nodiscard]] vecops::memory::CpuDomainId domain() const noexcept {
-    return session_->domain();
-  }
-
-private:
-  void close_noexcept() noexcept {
-    if (active_) {
-      const auto found = std::find(memory_workspace_sessions.rbegin(), memory_workspace_sessions.rend(), state_);
-      if (found != memory_workspace_sessions.rend())
-        memory_workspace_sessions.erase(std::next(found).base());
-    }
-    active_ = false;
-    session_->close();
-  }
-
-  std::shared_ptr<vecops::execution::MemoryWorkspaceSession> session_;
-  BridgeMemoryWorkspaceProvider* state_ = nullptr;
-  bool active_ = false;
-  bool entered_ = false;
-};
-
-#endif
 
 Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, std::uint32_t num_specs,
                                   const VecopsSpecializationArgument* specs) {
@@ -1293,44 +1008,48 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
   if (num_specs != 0 && specs == nullptr)
     return Status(StatusCode::InvalidArgument, "framework bridge received no specialization array");
 
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-  VecopsCall routed_call{};
-  VecopsExecutionContext routed_context{};
-  const bool has_explicit_provider =
-    call->context != nullptr &&
-    call->context->struct_size >=
-      offsetof(VecopsExecutionContext, workspace_provider) + sizeof(call->context->workspace_provider) &&
-    call->context->workspace_provider != nullptr;
-  if (!has_explicit_provider && call->workspace == nullptr && call->workspace_size == 0) {
-    if (const auto* provider = current_memory_workspace_provider(); provider != nullptr) {
-      if (call->context != nullptr) {
-        const auto copied = std::min<std::size_t>(call->context->struct_size, sizeof(VecopsExecutionContext));
-        std::memcpy(&routed_context, call->context, copied);
-      }
-      routed_context.struct_size = sizeof(VecopsExecutionContext);
-      routed_context.workspace_provider = provider;
-      routed_call = *call;
-      routed_call.context = &routed_context;
-      call = &routed_call;
+
+  // An application-prepared eager signature uses the exact instance whose
+  // buffers were included in its model memory program. No second instance or
+  // allocator is consulted, even on the first real invocation.
+  if(auto it=managed_eager_plans.find(handle);it!=managed_eager_plans.end()) {
+    bool active=false;
+    for(auto record=it->second.begin();record!=it->second.end();) {
+      auto plan=record->lock();
+      if(!plan) { record=it->second.erase(record); continue; }
+      ++record;
+      std::lock_guard lock(plan->mutex);
+      if(!plan->lease || !plan->selected) continue;
+      active=true;
+      if(!(plan->context==BridgePlanContext::capture(*call)) || !plan->signature.matches(*call,num_specs,specs))
+        continue;
+      const auto& abi=plan->lease->abi();
+      std::array<char,2048> message{};VecopsError error{sizeof(error),0,message.data(),message.size(),0};
+      auto code=abi.bind(abi.context,call,&error);
+      if(code==VECOPS_STATUS_OK) code=abi.replay(abi.context,&error);
+      return code==VECOPS_STATUS_OK ? Status::success() : Status(StatusCode::ExecutionError,message.data());
     }
+    if(active) return Status(StatusCode::InvalidArgument,"managed eager operator metadata/context was not prepared");
   }
-#endif
+
+  // Carry the selected authority across the generated-DSO ABI boundary.
+  // Managed leases above already carry explicit planned bindings.
+  VecopsExecutionContext resource_context{};
+  VecopsCall resource_call=*call;
+  if(!call->context || call->context->struct_size<offsetof(VecopsExecutionContext,workspace_provider)+sizeof(void*) ||
+     !call->context->workspace_provider) {
+    if(call->context)
+      std::memcpy(&resource_context,call->context,std::min<std::size_t>(call->context->struct_size,sizeof(resource_context)));
+    resource_context.struct_size=sizeof(resource_context);
+    resource_context.workspace_provider=current_workspace_abi();
+    resource_call.context=&resource_context;
+    call=&resource_call;
+  }
 
   // Generated Torch bridges use no external context or workspace.  Retain a
   // small per-thread set of exact metadata specializations so alternating AF3
   // operators can bypass registry locking, schema binding, provider lookup,
   // and owning metadata conversion after one successful slow invocation.
-  struct HotEntry {
-    std::uint64_t handle = 0;
-    std::weak_ptr<PyOperator::State> state;
-    std::shared_ptr<Executable> executable;
-    BridgeCallSignature signature;
-    std::uint64_t last_use = 0;
-    BridgePlanContext context;
-    std::shared_ptr<vecops::runtime::PreparedKernel> prepared;
-  };
-  static thread_local std::array<std::optional<HotEntry>, bridge_hot_max_capacity> hot_entries;
-  static thread_local std::uint64_t hot_clock = 0;
   static const bool hot_path_enabled = [] {
     const char* value = std::getenv("VECOPS_TORCH_PREPARED_CALL");
     return value == nullptr || std::strcmp(value, "0") != 0;
@@ -1477,7 +1196,7 @@ Status invoke_registered_operator(std::uint64_t handle, const VecopsCall* call, 
               replace = candidate;
           }
           if (bridge_hot_stats_enabled() && hot_entries[replace]) ++bridge_hot_stats.evictions;
-          hot_entries[replace].emplace(HotEntry{handle, state, executable.value(), std::move(*signature), ++hot_clock,
+          hot_entries[replace].emplace(BridgeHotEntry{handle, state, executable.value(), std::move(*signature), ++hot_clock,
                                                BridgePlanContext::capture(*call),
                                                std::move(prepared)});
         }
@@ -1508,7 +1227,10 @@ Status invoke(const Executable& executable, const PyArgumentMetadata& arguments)
   void* workspace = required.value() == 0
                       ? nullptr
                       : view.allocate(static_cast<vecops::nint_t>(required.value()), vecops::vec::DEFAULT_ALIGNMENT);
-  return executable.invoke(arguments.metadata(), workspace, required.value());
+  VecopsExecutionContext context{};
+  context.struct_size=sizeof(context);
+  context.workspace_provider=current_workspace_abi();
+  return executable.invoke(arguments.metadata(), workspace, required.value(), &context);
 }
 
 /** Joins the configure and build logs while preserving their stage labels. */
@@ -1532,7 +1254,14 @@ std::string build_log(const compiler::BuildResult& result) {
 extern "C" VECOPS_RUNTIME_EXPORT int32_t
 vecops_operator_bridge_invoke_v1(std::uint64_t handle, const VecopsCall* call, std::uint32_t num_specialization_values,
                                  const VecopsSpecializationArgument* specialization_values, VecopsError* error) {
-  const auto result = invoke_registered_operator(handle, call, num_specialization_values, specialization_values);
+  Status result;
+  try {
+    result=invoke_registered_operator(handle, call, num_specialization_values, specialization_values);
+  } catch(const std::exception& failure) {
+    result=Status(StatusCode::ExecutionError,failure.what());
+  } catch(...) {
+    result=Status(StatusCode::ExecutionError,"native operator bridge failed");
+  }
   if (result.ok())
     return VECOPS_STATUS_OK;
   if (error != nullptr && error->struct_size >= sizeof(VecopsError)) {
@@ -1546,206 +1275,6 @@ vecops_operator_bridge_invoke_v1(std::uint64_t handle, const VecopsCall* call, s
   }
   return static_cast<std::int32_t>(result.code());
 }
-
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-namespace {
-
-void bind_memory(py::module_& module) {
-  namespace memory = vecops::memory;
-
-  py::enum_<memory::BackendPreference>(module, "MemoryBackend")
-    .value("auto", memory::BackendPreference::Auto)
-    .value("system", memory::BackendPreference::System)
-    .value("hwloc", memory::BackendPreference::Hwloc);
-  py::enum_<memory::MemoryKind>(module, "MemoryKind")
-    .value("unknown", memory::MemoryKind::Unknown)
-    .value("dram", memory::MemoryKind::DRAM)
-    .value("hbm", memory::MemoryKind::HBM)
-    .value("cxl", memory::MemoryKind::CXL)
-    .value("pmem", memory::MemoryKind::PMEM);
-  py::enum_<memory::PlacementIntent>(module, "MemoryPlacement")
-    .value("default", memory::PlacementIntent::Default)
-    .value("high_bandwidth", memory::PlacementIntent::HighBandwidth)
-    .value("low_latency", memory::PlacementIntent::LowLatency)
-    .value("exact_target", memory::PlacementIntent::ExactTarget);
-  py::enum_<memory::FallbackPolicy>(module, "MemoryFallback")
-    .value("none", memory::FallbackPolicy::None)
-    .value("to_default", memory::FallbackPolicy::ToDefault);
-  py::enum_<memory::RankingObjective>(module, "MemoryRanking")
-    .value("bandwidth", memory::RankingObjective::Bandwidth)
-    .value("latency", memory::RankingObjective::Latency);
-
-  py::class_<memory::TargetOverride>(module, "MemoryTargetOverride")
-    .def(py::init<>())
-    .def_readwrite("os_numa_id", &memory::TargetOverride::os_numa_id)
-    .def_readwrite("kind", &memory::TargetOverride::kind)
-    .def_readwrite("max_managed_bytes", &memory::TargetOverride::max_managed_bytes)
-    .def_readwrite("min_free_bytes", &memory::TargetOverride::min_free_bytes);
-  py::class_<memory::PathOverride>(module, "MemoryPathOverride")
-    .def(py::init<>())
-    .def_readwrite("initiator_os_numa_id", &memory::PathOverride::initiator_os_numa_id)
-    .def_readwrite("target_os_numa_id", &memory::PathOverride::target_os_numa_id)
-    .def_readwrite("bandwidth_mib_s", &memory::PathOverride::bandwidth_mib_s)
-    .def_readwrite("latency_ns", &memory::PathOverride::latency_ns);
-  py::class_<memory::MemoryConfig>(module, "MemoryConfig")
-    .def(py::init<>())
-    .def_readwrite("backend", &memory::MemoryConfig::backend)
-    .def_readwrite("target_overrides", &memory::MemoryConfig::target_overrides)
-    .def_readwrite("path_overrides", &memory::MemoryConfig::path_overrides);
-  py::class_<memory::AllocationRequest>(module, "MemoryAllocationRequest")
-    .def(py::init<>())
-    .def_readwrite("bytes", &memory::AllocationRequest::bytes)
-    .def_property(
-      "domain",
-      [](const memory::AllocationRequest& self) -> py::object {
-        if (self.domain.kind == memory::CpuDomainSelector::Kind::Current)
-          return py::none();
-        return py::int_(self.domain.id);
-      },
-      [](memory::AllocationRequest& self, py::object value) {
-        self.domain = value.is_none() ? memory::CpuDomainSelector::current()
-                                      : memory::CpuDomainSelector::specific(py::cast<memory::CpuDomainId>(value));
-      })
-    .def_readwrite("intent", &memory::AllocationRequest::intent)
-    .def_readwrite("objective_rank", &memory::AllocationRequest::objective_rank)
-    .def_readwrite("exact_os_numa_id", &memory::AllocationRequest::exact_os_numa_id)
-    .def_readwrite("fallback", &memory::AllocationRequest::fallback)
-    .def_readwrite("alignment", &memory::AllocationRequest::alignment)
-    .def_readwrite("use_large_pages", &memory::AllocationRequest::use_large_pages);
-
-  py::class_<memory::Allocation>(module, "MemoryAllocation", py::buffer_protocol())
-    .def_buffer([](memory::Allocation& self) {
-      return py::buffer_info(self.data(), 1, py::format_descriptor<std::uint8_t>::format(), 1,
-                             {static_cast<py::ssize_t>(self.size())}, {1});
-    })
-    .def_property_readonly("size", &memory::Allocation::size)
-    .def_property_readonly("large_page_bytes", &memory::Allocation::large_page_bytes)
-    .def_property_readonly("regular_page_bytes", &memory::Allocation::regular_page_bytes)
-    .def_property_readonly("target_id", [](const memory::Allocation& self) -> py::object {
-      return self.target().has_value() ? py::cast(self.target().value()) : py::none();
-    });
-
-  py::class_<PyPlacedBuffer>(module, "PlacedBuffer", py::buffer_protocol())
-    .def_buffer([](PyPlacedBuffer& b) {
-      return py::buffer_info(b.data, 1, py::format_descriptor<std::uint8_t>::format(), 1, {b.bytes}, {1});
-    })
-    .def_readonly("tier", &PyPlacedBuffer::tier)
-    .def_readonly("size", &PyPlacedBuffer::bytes)
-    .def_readonly("offset", &PyPlacedBuffer::offset)
-    .def_readonly("target_id", &PyPlacedBuffer::target_id)
-    .def_readonly("large_page_bytes", &PyPlacedBuffer::large_page_bytes)
-    .def_property_readonly("regular_page_bytes", [](const PyPlacedBuffer& b){return b.bytes-b.large_page_bytes;});
-  py::class_<PyBufferMemorySession>(module, "BufferMemorySession")
-    .def(py::init<memory::MemorySystem, std::uint64_t, std::uint64_t, std::optional<memory::CpuDomainId>, bool, bool>())
-    .def("__enter__", &PyBufferMemorySession::enter, py::return_value_policy::reference_internal)
-    .def("__exit__", &PyBufferMemorySession::exit)
-    .def("close", &PyBufferMemorySession::close)
-    .def("bind", &PyBufferMemorySession::bind, py::arg("requirements"), py::arg("reuse_group") = "")
-    .def("stats", &PyBufferMemorySession::stats)
-    .def("manifest", &PyBufferMemorySession::manifest);
-
-  py::class_<PyMemoryWorkspaceSession>(module, "MemoryWorkspaceSession")
-    .def("__enter__", &PyMemoryWorkspaceSession::enter, py::return_value_policy::reference_internal)
-    .def("__exit__", &PyMemoryWorkspaceSession::exit)
-    .def("close", &PyMemoryWorkspaceSession::close)
-    .def_property_readonly("closed", &PyMemoryWorkspaceSession::closed)
-    .def_property_readonly("domain", &PyMemoryWorkspaceSession::domain)
-    .def_property_readonly("fast_capacity", &PyMemoryWorkspaceSession::fast_capacity)
-    .def_property_readonly("slow_capacity", &PyMemoryWorkspaceSession::slow_capacity);
-
-  py::class_<memory::MemorySystem>(module, "MemorySystem")
-    .def_static("discover", &memory::MemorySystem::discover, py::arg("config") = memory::MemoryConfig{})
-    .def("allocate", &memory::MemorySystem::allocate, py::arg("request"))
-    .def("current_cpu_domain", &memory::MemorySystem::current_cpu_domain)
-    .def("describe", &memory::MemorySystem::describe)
-    .def(
-      "workspace_session",
-      [](memory::MemorySystem self, std::uint64_t fast_capacity, std::optional<std::uint64_t> slow_capacity,
-         std::optional<memory::CpuDomainId> domain, bool allow_fast_fallback, bool use_large_pages) {
-        return std::make_unique<PyMemoryWorkspaceSession>(std::move(self), domain, fast_capacity, slow_capacity,
-                                                          allow_fast_fallback, use_large_pages);
-      },
-      py::arg("fast_capacity"), py::arg("slow_capacity") = py::none(), py::arg("domain") = py::none(),
-      py::arg("allow_fast_fallback") = true, py::arg("use_large_pages") = true)
-    .def("topology",
-         [](const memory::MemorySystem& self) {
-           const auto& topology = self.topology();
-           py::dict result;
-           result["backend"] = topology.backend;
-           py::list domains;
-           for (const auto& domain : topology.cpu_domains) {
-             py::dict item;
-             item["id"] = domain.id;
-             item["os_numa_id"] = domain.os_numa_id.has_value() ? py::cast(domain.os_numa_id.value()) : py::none();
-             item["cpu_ids"] = domain.cpu_ids;
-             domains.append(std::move(item));
-           }
-           result["cpu_domains"] = std::move(domains);
-           py::list targets;
-           for (const auto& target : topology.memory_targets) {
-             py::dict item;
-             item["id"] = target.id;
-             item["os_numa_id"] = target.os_numa_id;
-             item["kind"] = memory::to_string(target.kind);
-             item["capacity_bytes"] = target.capacity_bytes;
-             targets.append(std::move(item));
-           }
-           result["memory_targets"] = std::move(targets);
-           py::list paths;
-           for (const auto& path : topology.memory_paths) {
-             py::dict item;
-             item["initiator"] = path.initiator;
-             item["target"] = path.target;
-             item["bandwidth_mib_s"] =
-               path.bandwidth_mib_s.has_value() ? py::cast(path.bandwidth_mib_s.value()) : py::none();
-             item["latency_ns"] = path.latency_ns.has_value() ? py::cast(path.latency_ns.value()) : py::none();
-             item["exact_locality"] = path.exact_locality;
-             paths.append(std::move(item));
-           }
-           result["memory_paths"] = std::move(paths);
-           return result;
-         })
-    .def(
-      "tiers",
-      [](const memory::MemorySystem& self, memory::CpuDomainId domain, memory::RankingObjective objective) {
-        py::list result;
-        for (const auto& rank : self.tiers(domain, objective).ranks) {
-          py::dict item;
-          item["rank"] = rank.rank;
-          item["targets"] = rank.targets;
-          item["value"] =
-            rank.representative_value.has_value() ? py::cast(rank.representative_value.value()) : py::none();
-          result.append(std::move(item));
-        }
-        return result;
-      },
-      py::arg("domain"), py::arg("objective"))
-    .def("stats", [](const memory::MemorySystem& self) {
-      py::list result;
-      for (const auto& stats : self.stats()) {
-        py::dict item;
-        item["target"] = stats.target;
-        item["os_numa_id"] = stats.os_numa_id;
-        item["managed_bytes"] = stats.managed_bytes;
-        item["peak_managed_bytes"] = stats.peak_managed_bytes;
-        item["allocation_count"] = stats.allocation_count;
-        item["failed_allocation_count"] = stats.failed_allocation_count;
-        item["fallback_count"] = stats.fallback_count;
-        item["managed_large_page_bytes"] = stats.managed_large_page_bytes;
-        item["peak_managed_large_page_bytes"] = stats.peak_managed_large_page_bytes;
-        item["os_free_bytes"] = stats.os_free_bytes.has_value() ? py::cast(stats.os_free_bytes.value()) : py::none();
-        item["os_large_page_free_bytes"] =
-          stats.os_large_page_free_bytes.has_value() ? py::cast(stats.os_large_page_free_bytes.value()) : py::none();
-        item["budget_remaining_bytes"] =
-          stats.budget_remaining_bytes.has_value() ? py::cast(stats.budget_remaining_bytes.value()) : py::none();
-        result.append(std::move(item));
-      }
-      return result;
-    });
-}
-
-} // namespace
-#endif
 
 namespace {
 
@@ -1856,8 +1385,47 @@ const VecopsAllocationObserverV1* active_allocation_observer() {
 
 } // namespace
 
+ArgumentMetadata memory_operator_arguments(const py::list& records) {
+  std::vector<Value> arguments; arguments.reserve(records.size());
+  for(const auto item:records) {
+    if(item.is_none()) {arguments.emplace_back(std::monostate{});continue;}
+    auto record=py::cast<py::dict>(item);auto dtype=py::cast<DType>(record["dtype"]);
+    if(py::cast<std::string>(record["kind"])=="tensor")
+      arguments.emplace_back(TensorView{.data=reinterpret_cast<void*>(py::cast<std::uintptr_t>(record["data"])),
+        .device_index=record.contains("device_index") ? py::cast<int32_t>(record["device_index"]) : 0,
+        .dtype=dtype,.sizes=py::cast<std::vector<int64_t>>(record["sizes"]),
+        .strides=py::cast<std::vector<int64_t>>(record["strides"]),.flags=py::cast<uint64_t>(record["flags"])});
+    else arguments.emplace_back(python_scalar(record["value"],dtype));
+  }
+  return ArgumentMetadata(std::move(arguments));
+}
+
+// Physical binding ownership crosses the exported prepared C ABI as well as
+// Python. The record, rather than the Python wrapper, survives foreign leases.
+struct PreparedPythonOwner {
+  std::atomic<unsigned> refs{1};
+  PyObject* value;
+  explicit PreparedPythonOwner(py::handle object) : value(object.ptr()) { Py_INCREF(value); }
+  static void retain(void* p) { static_cast<PreparedPythonOwner*>(p)->refs.fetch_add(1,std::memory_order_relaxed); }
+  static void release(void* p) {
+    auto* self=static_cast<PreparedPythonOwner*>(p);
+    if (self->refs.fetch_sub(1,std::memory_order_acq_rel)!=1) return;
+    if (Py_IsInitialized()) { py::gil_scoped_acquire gil; Py_DECREF(self->value); }
+    delete self;
+  }
+};
+
 PYBIND11_MODULE(_C, module) {
-  bind_buffer_planning(module);
+#if defined(VECOPS_PYTHON_HAS_MEMORY)
+  auto memory = module.def_submodule("memory", "Generic memory resources and native runtime.");
+  bind_memory_model_types(memory);
+  bind_memory_runtime(memory);
+  memory.def("default_workspace_runtime", &vecops::execution::default_workspace_runtime);
+  py::class_<NativeRuntimeScope>(memory,"_WorkspaceRuntimeScope")
+    .def(py::init<std::shared_ptr<vecops::memory::model::MemoryRuntime>>())
+    .def("close", &NativeRuntimeScope::close);
+#endif
+  module.def("_clear_eager_workspace_cache",&clear_eager_workspace_cache);
   module.doc() = R"doc(Expert-level bindings for the vecops C++ runtime.
 
 Most applications should use :mod:`vecops`, whose Python wrappers normalize
@@ -1880,31 +1448,120 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
           result.emplace_back(abi.inplace[i].input, abi.inplace[i].output);
       }
       return result;
+    })
+    .def_property_readonly("buffer_requirements", [](const vecops::runtime::PreparedKernelLease& self) {
+      const auto& abi=self.abi();
+      if (abi.struct_size < sizeof(abi) || !abi.activate_buffers || !abi.suspend_buffers)
+        throw std::runtime_error("artifact has no explicit buffer binding contract");
+      py::list result;
+      for (uint32_t i=0; i<abi.buffer_count; ++i) {
+        const auto& b=abi.buffers[i]; py::dict row;
+        row["name"]=b.name; row["bytes"]=b.bytes; row["alignment"]=b.alignment;
+        row["replicas"]=b.replicas; row["replica_stride"]=b.replica_stride;
+        row["domain"]=b.domain == static_cast<uint32_t>(vecops::execution::BufferDomain::Global) ? "global" : "worker_local";
+        row["traffic_bytes"]=b.estimated_traffic_bytes; row["retained"]=bool(b.retained);
+        py::list times;
+        for (size_t j=0;j<b.lifetime_count;++j) times.append(py::make_tuple(b.lifetimes[j].begin,b.lifetimes[j].end));
+        row["lifetimes"]=std::move(times); result.append(std::move(row));
+      }
+      return result;
+    })
+    .def("activate_buffers", [](vecops::runtime::PreparedKernelLease& self, py::dict values, py::object owner) {
+      if(owner.is_none()) throw py::value_error("physical buffer owner is required");
+      const auto& abi=self.abi();
+      if(abi.struct_size<sizeof(abi) || !abi.activate_buffers)
+        throw std::runtime_error("artifact has no explicit buffer activation contract");
+      std::vector<std::string> names; names.reserve(values.size());
+      std::vector<VecopsKernelBufferBindingV1> bindings; bindings.reserve(values.size());
+      for (auto [name,value] : values) {
+        names.push_back(py::cast<std::string>(name));
+        auto row=py::cast<py::dict>(value);
+        bindings.push_back({names.back().c_str(),reinterpret_cast<void*>(py::cast<std::uintptr_t>(row["address"])),
+          py::cast<uint64_t>(row["bytes"]),py::cast<uint64_t>(row["replica_stride"])});
+      }
+      auto* lifetime=new PreparedPythonOwner(owner);
+      const VecopsBufferOwnerV1 token{lifetime,&PreparedPythonOwner::retain,&PreparedPythonOwner::release};
+      std::array<char,2048> message{};
+      VecopsError error{sizeof(error),0,message.data(),message.size(),0};
+      int32_t status;
+      {
+        py::gil_scoped_release release;
+        status=abi.activate_buffers(abi.context,bindings.data(),bindings.size(),&token,&error);
+      }
+      PreparedPythonOwner::release(lifetime);
+      if(status != VECOPS_STATUS_OK) throw std::runtime_error(message.data());
+    })
+    .def("suspend_buffers", [](vecops::runtime::PreparedKernelLease& self) {
+      const auto& abi=self.abi();
+      if(abi.struct_size<sizeof(abi) || !abi.suspend_buffers)
+        throw std::runtime_error("artifact has no explicit buffer suspension contract");
+      std::array<char,2048> message{};
+      VecopsError error{sizeof(error),0,message.data(),message.size(),0};
+      int32_t status;
+      {
+        py::gil_scoped_release release;
+        status=abi.suspend_buffers(abi.context,&error);
+      }
+      if(status != VECOPS_STATUS_OK) throw std::runtime_error(message.data());
     });
   module.def("prepare_operator_plan", [](std::uint64_t handle, py::list records, py::dict values,
-                                         std::uintptr_t pool) {
-    std::vector<Value> arguments;
-    arguments.reserve(records.size());
-    for (const auto item : records) {
-      if (item.is_none()) { arguments.emplace_back(std::monostate{}); continue; }
-      auto record = py::cast<py::dict>(item);
-      auto dtype = py::cast<DType>(record["dtype"]);
-      if (py::cast<std::string>(record["kind"]) == "tensor") {
-        arguments.emplace_back(TensorView{
-          .data = reinterpret_cast<void*>(py::cast<std::uintptr_t>(record["data"])),
-          .dtype = dtype,
-          .sizes = py::cast<std::vector<std::int64_t>>(record["sizes"]),
-          .strides = py::cast<std::vector<std::int64_t>>(record["strides"]),
-          .flags = py::cast<std::uint64_t>(record["flags"])});
-      } else {
-        arguments.emplace_back(python_scalar(record["value"], dtype));
-      }
-    }
+                                         std::uintptr_t pool, bool describe_only) {
+    auto arguments=memory_operator_arguments(records);
     auto specialization = specialization_values(std::move(values));
     py::gil_scoped_release release;
-    return PyOperator::prepare_grid_plan(handle, ArgumentMetadata(std::move(arguments)), std::move(specialization),
-                                         reinterpret_cast<const VecopsThreadPoolV1*>(pool));
-  }, py::arg("handle"), py::arg("records"), py::arg("values"), py::arg("pool"));
+    return PyOperator::prepare_grid_plan(handle, std::move(arguments), std::move(specialization),
+                                         reinterpret_cast<const VecopsThreadPoolV1*>(pool), describe_only);
+  }, py::arg("handle"), py::arg("records"), py::arg("values"), py::arg("pool"),
+     py::arg("describe_only") = false);
+  py::class_<ManagedEagerPlan,std::shared_ptr<ManagedEagerPlan>>(module,"ManagedEagerPlan")
+    .def("close",[](ManagedEagerPlan& self) {py::gil_scoped_release release;self.close();})
+    .def("unselect",&ManagedEagerPlan::unselect)
+    .def("select",[](ManagedEagerPlan& self) {
+      if(self.owner_thread!=std::this_thread::get_id())
+        throw std::runtime_error("eager plan selection requires its preparation thread");
+      auto it=managed_eager_plans.find(self.handle);
+      if(it==managed_eager_plans.end()) throw std::runtime_error("eager plan is not registered");
+      {std::lock_guard lock(self.mutex);if(!self.lease) throw std::runtime_error("eager plan is closed");}
+      for(auto& weak:it->second) {
+        auto other=weak.lock();
+        if(!other) continue;
+        std::lock_guard lock(other->mutex);
+        if(other->context==self.context && other->signature==self.signature)
+          other->selected=other.get()==&self;
+      }
+    });
+  module.def("register_prepared_operator_plan",[](std::shared_ptr<vecops::runtime::PreparedKernelLease> lease,
+      uint64_t handle,py::list records,py::dict values,uintptr_t pool) {
+    {
+      std::lock_guard lock(prepared_origins_mutex);
+      auto it=prepared_origins.find(lease.get());
+      if(it==prepared_origins.end() || it->second.first.lock()!=lease || it->second.second!=handle)
+        throw py::value_error("prepared plan belongs to another operator");
+    }
+    auto arguments=memory_operator_arguments(records);
+    std::vector<std::string> names; names.reserve(values.size());
+    std::vector<VecopsSpecializationArgument> specs;specs.reserve(values.size());
+    for(auto [name,value]:values) {
+      names.push_back(py::cast<std::string>(name));
+      VecopsSpecializationArgument item{}; item.struct_size=sizeof(item);item.name=names.back().c_str();
+      if(py::isinstance<py::int_>(value)) {item.kind=VECOPS_SPECIALIZATION_CONST_INT;item.value.integer=py::cast<int64_t>(value);}
+      else {item.kind=VECOPS_SPECIALIZATION_DTYPE;item.value.dtype=static_cast<uint32_t>(py::cast<DType>(value));}
+      specs.push_back(item);
+    }
+    VecopsExecutionContext context{};context.struct_size=sizeof(context);
+    context.thread_pool=reinterpret_cast<const VecopsThreadPoolV1*>(pool);
+    if(!context.thread_pool) throw py::value_error("eager registration requires a thread pool");
+    context.requested_threads=context.thread_pool->max_parallelism(context.thread_pool->context);
+    vecops::runtime::CallFrame frame(arguments,nullptr,0,&context);
+    auto signature=BridgeCallSignature::capture(frame.abi(),specs.size(),specs.data());
+    if(!signature) throw py::value_error("invalid eager metadata signature");
+    auto plan=std::make_shared<ManagedEagerPlan>();plan->handle=handle;plan->signature=std::move(*signature);
+    plan->context=BridgePlanContext::capture(frame.abi());plan->lease=std::move(lease);
+    auto& installed=managed_eager_plans[handle];
+    std::erase_if(installed,[](const auto& previous){return previous.expired();});
+    installed.push_back(plan);
+    return plan;
+  });
   module.def("bridge_hot_cache_stats", [] {
     py::dict result;
     result["enabled"] = bridge_hot_stats_enabled(); result["capacity"] = bridge_hot_capacity();
@@ -1950,9 +1607,6 @@ its constructor-level interfaces intentionally expose native concepts.)doc";
   module.def(
     "native_thread_pool_end_active", [] { vecops_native_thread_pool_end_active(); },
     "End one bounded native-worker active region.");
-#if defined(VECOPS_PYTHON_HAS_MEMORY)
-  bind_memory(module);
-#endif
 
   py::enum_<DType>(module, "DType", "Element types understood by the vecops runtime.")
     .value("invalid", DType::Invalid)

@@ -31,6 +31,9 @@ struct Gather {};
 
 namespace transpose2d_implementation {
 
+/** Select a backend from the bound raw-storage and layout contracts. */
+struct Automatic {};
+
 /** Vector implementation selected by the current transpose backend. */
 struct Vector {};
 

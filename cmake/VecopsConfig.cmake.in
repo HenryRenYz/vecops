@@ -1,15 +1,11 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-if(@VECOPS_BUILD_COMMUNICATION@)
+if(@VECOPS_BUILD_COMMUNICATION@ OR NOT "@VECOPS_BUILD_MEMORY@" STREQUAL "OFF")
     find_dependency(Threads)
 endif()
 if(@VECOPS_ENABLE_OPENMP@)
     find_dependency(OpenMP COMPONENTS CXX)
-endif()
-if(@VECOPS_MEMORY_HAVE_HWLOC@)
-    find_dependency(PkgConfig)
-    pkg_check_modules(HWLOC REQUIRED IMPORTED_TARGET hwloc>=2.7)
 endif()
 
 # Preserve the richer native ARM contract detected while building the SDK.

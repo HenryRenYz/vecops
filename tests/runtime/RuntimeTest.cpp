@@ -274,10 +274,10 @@ struct RuntimeArenaProvider {
       return VECOPS_STATUS_OK;
     }
     auto& self = *static_cast<RuntimeArenaProvider*>(context);
-    const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? vecops::execution::WorkspaceTier::Fast
-                                                                 : vecops::execution::WorkspaceTier::Slow;
+    const auto logical_tier = tier == VECOPS_WORKSPACE_TIER_FAST ? vecops::execution::BufferTier::Fast
+                                                                 : vecops::execution::BufferTier::Slow;
     auto* owner = new vecops::execution::WorkspaceArena(
-      self.heap.allocate(logical_tier, static_cast<vecops::nint_t>(bytes), static_cast<vecops::nint_t>(alignment)));
+      self.heap->allocate(logical_tier, static_cast<vecops::nint_t>(bytes), static_cast<vecops::nint_t>(alignment)));
     *result = {sizeof(VecopsWorkspaceArena), 0, owner->data, static_cast<std::uint64_t>(owner->capacity), owner};
     self.allocations.fetch_add(1);
     return VECOPS_STATUS_OK;
@@ -299,7 +299,7 @@ struct RuntimeArenaProvider {
 
   std::atomic<unsigned> references{1};
   std::atomic<unsigned> allocations{0};
-  vecops::execution::HeapWorkspaceArenaProvider heap;
+  std::shared_ptr<vecops::execution::WorkspaceArenaProvider> heap = vecops::execution::default_workspace_arena_provider();
   VecopsWorkspaceArenaProvider abi{};
 };
 

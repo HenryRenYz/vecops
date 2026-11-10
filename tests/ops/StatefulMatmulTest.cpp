@@ -9,7 +9,7 @@
 
 #include "MatmulTestArch.h"
 #include "vecops/execution/WorkspaceContext.h"
-#include "vecops/execution/WorkspacePlan.h"
+#include "vecops/execution/BufferPlan.h"
 #include "vecops/ops/Matmul.h"
 #include "vecops/ops/MatmulPack.h"
 
@@ -52,11 +52,11 @@ TEST(StatefulMatmulTest, ConstructionBindsScratchAndRepeatedRunSkipsPlanning) {
     operation();
   }
   const auto first = c;
-  auto placement = execution::place_workspace(tracing.finish_trace());
+  auto placement = execution::place_buffers(tracing.finish_trace());
   kernel::Workspace arena(placement.fast_bytes);
   auto arena_view = arena.view();
   void* arena_base = arena_view.allocate(placement.fast_bytes, vec::DEFAULT_ALIGNMENT);
-  execution::BoundWorkspacePlan bound{placement, arena_base, placement.fast_bytes, nullptr, 0};
+  execution::BoundBufferPlan bound{placement, arena_base, placement.fast_bytes, nullptr, 0};
   execution::WorkspaceContext replay{"stateful_matmul", bound};
   std::fill(c.begin(), c.end(), 0.0f);
   {
@@ -141,7 +141,7 @@ TEST(StatefulMatmulTest, UnboundPatternsRebindPerLaneWithoutPublicScratchHandlin
 
   auto plan = workspace.finish_trace();
   ASSERT_EQ(plan.allocations.size(), matmul::WorkspacePart::Count);
-  EXPECT_EQ(plan.allocations.front().request.domain, execution::WorkspaceDomain::WorkerLocal);
+  EXPECT_EQ(plan.allocations.front().request.domain, execution::BufferDomain::WorkerLocal);
   EXPECT_EQ(plan.allocations.front().request.replicas, P);
   for (nint_t lane = 0; lane < P; ++lane) {
     const float expected = float(K) * float(lane + 1) * float(2 * lane + 1);
@@ -202,7 +202,7 @@ TEST(StatefulMatmulTest, IndependentNamedPatternsRemainLiveAndUseDistinctPlaceme
   ASSERT_EQ(plan.allocations.size(), 2u * matmul::WorkspacePart::Count);
   for (unsigned i=0; i<matmul::WorkspacePart::Count; ++i)
     EXPECT_NE(plan.allocations[i].site,plan.allocations[i+matmul::WorkspacePart::Count].site);
-  auto placement = execution::place_workspace(plan);
+  auto placement = execution::place_buffers(plan);
   ASSERT_EQ(placement.entries.size(), plan.allocations.size());
   nint_t expected_peak = 0;
   for (std::size_t i=0; i<placement.entries.size(); ++i) {

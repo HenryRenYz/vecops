@@ -12,11 +12,45 @@ import shutil
 import subprocess
 
 
+def _resolve_memory_library(sdk, native_extension, override=None):
+  """Find the runtime archive without importing Torch or creating artifacts.
+
+  A selected SDK owns its ``lib`` first. Editable Python can select checkout
+  headers while the active extension and installed SDK remain in site-packages;
+  in that case use the archive adjacent to that extension. The last implicit
+  candidate is restricted to the CMake ``build/python/bindings/_C`` layout.
+  An explicit override, including an empty value, never falls back.
+  """
+  if override is not None:
+    path = Path(override).expanduser()
+    if not override or not path.is_file():
+      raise RuntimeError('VECOPS_MEMORY_LIBRARY must name an existing runtime archive file: '
+                         + repr(str(override)))
+    return path.resolve()
+  native = Path(native_extension).expanduser()
+  candidates = [Path(sdk)/'lib/libvecops_memory.a',
+                native.parent/'_sdk/lib/libvecops_memory.a']
+  # Keep the original module-path adjacency above: a site extension symlink
+  # must not make its installed SDK disappear when its target is resolved.
+  built = native.resolve()
+  if built.parent.name == 'bindings' and built.parent.parent.name == 'python':
+    candidates.append(built.parent.parent.parent/'src/libvecops_memory.a')
+  for path in candidates:
+    if path.is_file():
+      return path.resolve()
+  raise RuntimeError('the communication adapter requires libvecops_memory.a from its SDK '
+                     'or the active extension; searched: '
+                     + ', '.join(str(path) for path in candidates)
+                     + '. For a separately copied source/frozen extension, set '
+                     'VECOPS_MEMORY_LIBRARY to its matching archive')
+
+
 @functools.cache
 def load():
   import torch
   from torch.utils.cpp_extension import include_paths, library_paths
   from vecops._compiler import _sdk, default_cache_dir
+  from vecops import _C
   from vecops._cache_lock import file_lock
   sdk, _ = _sdk()
   checkout = Path(__file__).resolve().parents[3]
@@ -44,6 +78,8 @@ def load():
                   for p in sorted((sdk/'include').rglob('*')) if p.is_file())
   compiler = shlex.split(os.environ.get('VECOPS_COMM_CXX') or os.environ.get('CXX') or 'g++')
   compiler[0] = shutil.which(compiler[0]) or compiler[0]
+  memory_library = _resolve_memory_library(sdk, _C.__file__, os.environ.get('VECOPS_MEMORY_LIBRARY'))
+  memory_archive = memory_library.read_bytes()
   compile_flags = shlex.split(os.environ.get('VECOPS_COMM_CXXFLAGS', os.environ.get('CXXFLAGS', '')))
   link_flags = shlex.split(os.environ.get('VECOPS_COMM_LDFLAGS', os.environ.get('LDFLAGS', '')))
   copy_text, dispatch_text = copy_source.read_bytes(), copy_dispatch.read_bytes()
@@ -51,7 +87,8 @@ def load():
               (sdk/'include/vecops/runtime/CallAbi.h').read_bytes(),
               torch.__version__, torch.compiled_with_cxx11_abi(), compiler,
               subprocess.check_output(compiler + ['--version']),
-              copy_text, dispatch_text, variants, headers, compile_flags, link_flags)
+              copy_text, dispatch_text, variants, headers, compile_flags, link_flags,
+              hashlib.sha256(memory_archive).hexdigest())
   key = hashlib.sha256(repr(identity).encode()).hexdigest()[:24]
   directory = default_cache_dir() / 'communication' / key
   directory.mkdir(parents=True, exist_ok=True)
@@ -66,6 +103,7 @@ def load():
       (directory/'core.cpp').write_bytes(identity[1])
       (directory/'copy.cpp').write_bytes(copy_text)
       (directory/'copy_dispatch.cpp').write_bytes(dispatch_text)
+      (directory/'libvecops_memory.a').write_bytes(memory_archive)
       for relative, contents in headers:
         target=directory/'include'/relative
         target.parent.mkdir(parents=True,exist_ok=True)
@@ -80,6 +118,7 @@ def load():
           *['-I'+p for p in include_paths('cpu')], str(directory/'torch.cpp'), str(directory/'core.cpp'), str(directory/'copy_dispatch.cpp'), '-o', str(temporary),
           *['-L'+p for p in library_paths('cpu')],
           *['-Wl,-rpath,'+p for p in library_paths('cpu')],
+          str(directory/'libvecops_memory.a'),
           '-ltorch_python', '-ltorch_cpu', '-ltorch', '-lc10', '-lrt', *link_flags]
       try:
         for variant, flags in variants:

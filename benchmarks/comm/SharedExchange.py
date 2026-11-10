@@ -40,14 +40,9 @@ def main():
     private=vd.PageExchange(shape,torch.bfloat16,placement='destination')
     # The materialized case uses the same memory tier as aliases. Its private
     # tensors retain independent writable storage, unlike either shared view.
-    from vecops import memory
-    from vecops.distributed.config import Platform,current_cpu_node
-    system=memory.System();_,node=Platform.load(args.config).resolve(current_cpu_node())
-    owners=[]
-    def empty():
-      owner=system.allocate(seed.numel()*seed.element_size(),os_numa_id=node if node>=0 else None,large_pages=False,fallback=None)
-      owners.append(owner)
-      return torch.frombuffer(owner,dtype=seed.dtype,count=seed.numel()).reshape_as(seed)
+    from Memory import pool
+    factory,pool_id,runtime=pool()
+    def empty():return factory.empty(tuple(seed.shape),dtype=seed.dtype)
     ordinary_source,ordinary_target=empty(),empty()
     for reuse in (1,4):
       results={}

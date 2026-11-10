@@ -54,6 +54,9 @@ public:
   class PatternPrepared {
   public:
     using ResourceRequirements = typename IBSAttentionIndexer::ResourceRequirements;
+    // Block means/top-k and sampled maps/attention accumulators are rebuilt
+    // inside every invocation. Base index/weight maps remain caller operands.
+    static constexpr bool transient_workspace = true;
 
     VECOPS_INLINE PatternPrepared(Config config, WorkerScratch scratch, nint_t workspace_bytes)
       : config_(std::move(config))
@@ -540,6 +543,9 @@ public:
   class PatternPrepared {
   public:
     using ResourceRequirements = typename IBSAttention::ResourceRequirements;
+    // Block means/top-k and sampled maps/attention accumulators are rebuilt
+    // inside every invocation. Base index/weight maps remain caller operands.
+    static constexpr bool transient_workspace = true;
 
     VECOPS_INLINE PatternPrepared(Config config, WorkerScratch scratch, nint_t workspace_bytes)
       : config_(std::move(config))

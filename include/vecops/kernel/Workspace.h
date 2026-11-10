@@ -6,6 +6,7 @@
 
 #include "vecops/Assertion.h"
 #include "vecops/CoreTypes.h"
+#include "vecops/execution/WorkspaceArena.h"
 #include "vecops/tensor/Tensor.h"
 #include "vecops/util/Math.h"
 #include "vecops/vec/Vec.h"
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 
 /**
  * @file Workspace.h
@@ -301,21 +303,27 @@ public:
   /**
    * @brief Set the requested payload size exactly (may shrink).
    *
-   * The uninitialized backing storage is allocated as `bytes` plus one
+   * The uninitialized backing storage passes MemoryRuntime admission and is
+   * allocated as `bytes` plus one
    * DEFAULT_ALIGNMENT of slack so views can satisfy their first aligned
    * allocation. Calling reserve() invalidates every previously returned view
-   * and pointer.
+   * and pointer. An empty payload allocates no physical storage.
    */
   void reserve(nint_t bytes) {
     VECOPS_ASSERT(bytes >= 0, "workspace reserve size must be non-negative");
+    VECOPS_CHECK(bytes <= std::numeric_limits<nint_t>::max() - vec::DEFAULT_ALIGNMENT,
+                 "workspace size exceeds host address range");
+    const nint_t size = bytes ? bytes + vec::DEFAULT_ALIGNMENT : 0;
+    auto storage = size ? execution::default_workspace_arena_provider()->allocate(
+      execution::BufferTier::Fast, size, vec::DEFAULT_ALIGNMENT) : execution::WorkspaceArena{};
+    _storage = std::move(storage);
     _requested = bytes;
-    _storage_size = bytes + vec::DEFAULT_ALIGNMENT;
-    _storage.reset(new std::byte[static_cast<size_t>(_storage_size)]);
+    _storage_size = size;
   }
 
   /** @brief Borrow a view over the (padded) storage; not synchronized. */
   WorkspaceView view() {
-    return WorkspaceView(_storage.get(), _storage_size);
+    return WorkspaceView(_storage.data, _storage_size);
   }
 
   /** @brief Caller-requested payload, without the alignment padding. */
@@ -330,7 +338,7 @@ public:
 private:
   nint_t _requested = 0;
   nint_t _storage_size = 0;
-  std::unique_ptr<std::byte[]> _storage;
+  execution::WorkspaceArena _storage;
 };
 
 /**
@@ -360,11 +368,19 @@ public:
   void reserve(nint_t num_threads, nint_t per_thread_bytes) {
     VECOPS_ASSERT(num_threads >= 0, "thread count must be non-negative");
     VECOPS_ASSERT(per_thread_bytes >= 0, "per-thread workspace size must be non-negative");
+    VECOPS_CHECK(per_thread_bytes <= std::numeric_limits<nint_t>::max() - 2 * vec::DEFAULT_ALIGNMENT,
+                 "per-thread workspace exceeds host address range");
+    const nint_t stride = per_thread_bytes ? align_up(per_thread_bytes + vec::DEFAULT_ALIGNMENT, vec::DEFAULT_ALIGNMENT) : 0;
+    VECOPS_CHECK(!num_threads || stride <= (std::numeric_limits<nint_t>::max() - vec::DEFAULT_ALIGNMENT) / num_threads,
+                 "parallel workspace exceeds host address range");
+    const nint_t size = stride && num_threads ? stride * num_threads + vec::DEFAULT_ALIGNMENT : 0;
+    auto storage = size ? execution::default_workspace_arena_provider()->allocate(
+      execution::BufferTier::Fast, size, vec::DEFAULT_ALIGNMENT) : execution::WorkspaceArena{};
     _num_threads = num_threads;
     _per_thread_bytes = per_thread_bytes;
-    _stride = align_up(per_thread_bytes + vec::DEFAULT_ALIGNMENT, vec::DEFAULT_ALIGNMENT);
-    _storage_size = _stride * num_threads + vec::DEFAULT_ALIGNMENT;
-    _storage.reset(new std::byte[static_cast<size_t>(_storage_size)]);
+    _stride = stride;
+    _storage_size = size;
+    _storage = std::move(storage);
   }
 
   /**
@@ -376,7 +392,7 @@ public:
    */
   WorkspaceView thread_view(nint_t tid) {
     VECOPS_ASSERT(0 <= tid && tid < _num_threads, "thread id is out of range");
-    return WorkspaceView(_storage.get() + tid * _stride, _stride);
+    return WorkspaceView(_storage.data ? static_cast<std::byte*>(_storage.data) + tid * _stride : nullptr, _stride);
   }
 
   /** @brief Number of per-thread regions reserved. */
@@ -401,7 +417,7 @@ private:
   nint_t _per_thread_bytes = 0;
   nint_t _stride = 0;
   nint_t _storage_size = 0;
-  std::unique_ptr<std::byte[]> _storage;
+  execution::WorkspaceArena _storage;
 };
 
 } // namespace vecops::kernel

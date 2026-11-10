@@ -58,7 +58,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf1f5;padding:18px;
 </tbody></table>
 <p>920f-4的每die共享DDR控制器、每NUMA HBM和跨die cut分别建模，不在代码里写rank/4、NUMA+16或固定128/150 GB/s。hwloc/sysfs提供候选关系，配置补充OS未报告的分组，离线校准提供并发路径曲线。当前机器die_id未知，不把距离相近直接当成硬件事实。</p>
 <p>Xeon Max flat/SNC配置可呈现CPU域与独立HBM target；cache模式的HBM通常不能作为可分配target，应当作硬件管理层。Blackwell MLOPart说明compute分区、物理GPU和内存/访问权限的关系也不总是一对一。GPU插件可复用拓扑和计划概念，但页映射、原子scope和完成协议必须使用设备API；MLOPart/P2P可寻址不等于CPU memfd可映射，也不等于跨进程raw pointer通用。</p>
-<p>配置应有schema_version、平台/allowed-resource匹配、测量来源和校准有效期。手写关系优先修正发现信息；容量和合法能力仍要实际验证。当前MemorySystem预算是进程内统计；共享区域必须新增job级物理owner账本，物理页只记一次，另统计每进程映射和lease，不能每rank重复计费或完全漏计。</p>
+<p>配置应有schema_version、平台/allowed-resource匹配、测量来源和校准有效期。手写关系优先修正发现信息；容量和合法能力仍要实际验证。MemoryRuntime 的共享容量 authority 维护 job 级物理 owner 账本：物理页只记一次，进程映射与 lease 单独记录；本地容量视图保留共享约束。</p>
 </section>
 
 <section id="storage"><h2>4. 共享存储先成为一等资源</h2>
@@ -233,7 +233,7 @@ mode = "prefer"
 
 <section id="references"><h2>14. 源码与一手资料</h2>
 <ul>
-<li><a href="/home/renyz/project/vecops-neo/include/vecops/memory/Types.h">现有memory拓扑与预算类型</a>；<a href="/home/renyz/project/vecops-neo/include/vecops/memory/MemorySystem.h">MemorySystem</a>；<a href="/home/renyz/project/vecops-neo/include/vecops/execution/KernelPlan.h">KernelPlan</a>；<a href="/home/renyz/project/vecops-neo/python/vecops/graph/ir.py">graph IR</a>。</li>
+<li><a href="/home/renyz/project/vecops-neo/include/vecops/memory/Model.h">资源与容量契约</a>；<a href="/home/renyz/project/vecops-neo/include/vecops/memory/LinuxRuntime.h">LinuxRuntime</a>；<a href="/home/renyz/project/vecops-neo/include/vecops/execution/KernelPlan.h">KernelPlan</a>；<a href="/home/renyz/project/vecops-neo/python/vecops/graph/ir.py">graph IR</a>。</li>
 <li><a href="/home/renyz/project/af3-torchneo/benchmark-results/critical-path-20261029/runtime/collectives.cpp">实际Kutacc compact255归档源码</a>：ControlHeader、wait_for_previous_completion、wait_for_sequence与CopyPool；作为行为分析依据，新框架不复制其实现。</li>
 <li><a href="/home/renyz/project/af3-torchneo/docs/920f4_communication_memory_2026-10-30.html">AF3通信与内存归因报告</a>；<a href="/home/renyz/project/vecops-neo/build/memory-bench/campaign-20261029/report/920f-4-socket1-report-zh.html">最新内存报告（含10月30日页交织补充）</a>。</li>
 <li><a href="https://docs.pytorch.org/docs/main/distributed/custom_backends.html">PyTorch custom backends</a>：注册、后端与Work适配；应以实际目标版本头文件和测试为准。</li>

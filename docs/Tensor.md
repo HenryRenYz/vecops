@@ -625,3 +625,18 @@ correlation after integer arithmetic. Bound and unbound views preserve strides
 and the corresponding pointer/element displacement. Plain `range(0, end)`
 uses the integer overload when either endpoint is an integer; use
 `range(cint<0>, end)` when `end` carries meta constraints.
+
+Automatic layout materialization retains the complete plane and selects the
+SME transpose leaf for raw, unit-column-stride source and destination accesses
+on SME+FA64 targets. Explicit Vector and Gather requests retain their chosen
+implementation. LayerNorm binds such transposed input planes before slicing
+rows; the canonical buffer retains the memory dtype so its row recipe and
+rounding stay unchanged. Pass bounded tiles to bound this workspace.
+
+For raw accesses, automatic C++ transpose selection also recognizes a physical
+line copy: the source column stride and destination row stride must both be
+`cint<1>`. The logical transpose then preserves each contiguous line, so the
+generic vector load/store path avoids gathers and register permutations. It
+supports dtype conversion, padding and masked tails. Explicit Gather or SME
+selection remains authoritative; dynamic unit strides alone do not select this
+type-based path.
