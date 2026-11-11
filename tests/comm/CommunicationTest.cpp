@@ -194,6 +194,11 @@ void worker(int rank,Bootstrap* store,const std::string& directory) {
     check(cold->preparation_consensus(true));
     check(cold->statistics().calls==before_consensus.calls &&
         cold->statistics().capacity_growths==before_consensus.capacity_growths);
+    Specification deferred;deferred.operation=Operation::AllGather;
+    deferred.inputs={Layout{{static_cast<int64_t>(page*4+17)},{1},1}};
+    deferred.outputs.assign(ranks,deferred.inputs.front());deferred.copy_levels={0,0};
+    auto deferred_plan=cold->prepare(deferred, /*defer_capacity=*/true);
+    check(cold->statistics().capacity_growths==before_consensus.capacity_growths);
     Specification barrier;barrier.operation=Operation::Barrier;
     auto control=cold->prepare(barrier);control->execute(nullptr,nullptr);
     Specification broadcast;broadcast.operation=Operation::Broadcast;
@@ -228,6 +233,9 @@ void worker(int rank,Bootstrap* store,const std::string& directory) {
       if(rank==2)store->cold_reader_stopped.store(1,std::memory_order_release);
     });
     if(!rank)store->cold_provision_entered.store(1,std::memory_order_release);
+    const auto before_probe=cold->statistics().capacity_growths;
+    check(cold->provision_registered_capacity(false));
+    check(cold->statistics().capacity_growths==before_probe);
     check(cold->provision_registered_capacity());
     check(store->cold_reader_stopped.load(std::memory_order_acquire)==1);
     check(!cold->provision_registered_capacity());
@@ -254,7 +262,7 @@ void worker(int rank,Bootstrap* store,const std::string& directory) {
       filler=std::make_shared<mm::Allocation>(take(options.memory_runtime->allocate(view,request)));
     }
     exchange("cold-budget-nearly-full");check(take(authority->snapshot()).groups.front().hard_remaining_bytes==page);
-    cold->seal();check(!cold->provision_registered_capacity());
+    cold->seal();check(!cold->provision_registered_capacity(false));
     const auto growths=cold->statistics().capacity_growths;
     std::vector<uint8_t> input(bytes),output(bytes*ranks);
     for(size_t i=0;i<bytes;++i)input[i]=static_cast<uint8_t>(i+rank*17);

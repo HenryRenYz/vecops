@@ -34,13 +34,14 @@ class _Lease:
   def capacity_provider_id(self):
     return self.native.capacity_provider_id
 
-  def provision_capacity(self):
+  def provision_capacity(self, *, allow_growth=True):
     """Collectively provision this provider after all local plans are registered.
 
     The native adapter drains queued work and releases the GIL for the cold
-    stopped/remap handshake. Return is any-rank root growth, identical on peers.
+    stopped/remap handshake. Return is any-rank root growth, or the need for
+    growth if allocation was deferred by the caller.
     """
-    return self.native.provision_capacity()
+    return self.native.provision_capacity(allow_growth)
 
   def preparation_consensus(self,local_success):
     """Cold all-rank AND; false does not poison a valid preparation group."""

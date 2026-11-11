@@ -418,19 +418,22 @@ before admitting its graph capacity:
 1. Compile an offset-only proposal and query `PreparedProgram.planned_placement`.
    This describes the recipe; `placement()` continues to require actual backing.
 2. Call each graph plan's `configure_communication_placements` with that proposal.
-   Provision each distinct transport through public
-   `vecops.graph.provision_communication_capacity(plans)`.
-3. If any participant added transport roots, refresh the budget snapshot and
-   replan. Once provisioning reports no growth, call
+   Probe each distinct transport through
+   `vecops.graph.provision_communication_capacity(plans, allow_growth=False)`.
+3. If any transport needs more backing, stop and withdraw pending graph grants,
+   provision with growth enabled, then refresh the budget snapshot and replan.
+   Once the probe reports no growth, call
    `plan.finalize_communication_contract()` for each plan.
 4. Admit the graph, then materialize backing and compile the final executables.
    Final binding retains the closed routing contract; new observations of an
    external pointer do not silently select another route after backing.
 
-`GraphMemoryCompiler.prepare_model(..., finalize_resources=callback,
-preparation_consensus=agree)` implements this fixed point. The callback receives
-an address-only `PreparedProgram` and returns a bool indicating changed external
-resource capacity. Distributed callers provide an all-participant boolean AND
+`GraphMemoryCompiler.prepare_model` implements this fixed point. Its local
+`configure_resources` callback receives an address-only `PreparedProgram`
+and declares transport demand. After all configurations succeed,
+`probe_resources` closes the contract or reports that growth is needed without
+allocating backing. `finalize_resources` performs any required growth.
+Distributed callers provide an all-participant boolean AND
 for `agree`; local compilation, resource growth and admission then follow the
 same retry branch on every participant. The coordinator must cover the complete
 model preparation, including any smaller communication groups. Graph backing is
@@ -439,11 +442,11 @@ never acquired inside that loop.
 When only some participants obtain their pending grants, those participants
 retain their proposals and grants while unsuccessful peers recompile against
 the remaining capacity. This prevents repeated competition for the same preferred
-pool. Before every collective finalizer, all participants withdraw graph grants
-and synchronize while retaining their proposed layouts and reserved addresses.
-No compilation occurs in that gap. Transport growth invalidates all proposals;
-otherwise the fixed proposals are admitted again. A fatal peer failure closes
-all local proposals and refunds their pending capacity.
+pool. A no-growth probe leaves those grants untouched. Before actual transport
+growth (or a finalizer with no probe), all participants withdraw graph grants
+and synchronize while retaining proposed layouts and reserved addresses.
+No compilation occurs in that gap. Transport growth invalidates all proposals.
+A fatal peer failure closes all local proposals and refunds pending capacity.
 
 If a final estimate observes less physical free space than the planning sample,
 preparation can leave the observed loss as fresh-allocation headroom on its next
@@ -482,6 +485,8 @@ The native communicator's `provision_registered_capacity()` drains at a caller
 controlled cold boundary, proves that prior readers stopped, removes imported
 aliases, provisions the registered size/relay union, and waits for new peer
 mappings before returning. Its collective bool reports growth on any member.
+With `allow_growth=false`, a positive result reports that growth is needed,
+without replacing roots or aliases. A false result closes the existing mappings.
 `preparation_consensus(bool)` exchanges only preparation metadata. Both operations
 are outside numeric replay; sealed replay uses the already provisioned roots.
 

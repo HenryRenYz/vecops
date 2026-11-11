@@ -191,7 +191,7 @@ struct Queue {
   const uint64_t capacity_provider_id=next_capacity_provider.fetch_add(1);
   void wait(Pending* target);
   void drain();
-  bool provision_capacity();
+  bool provision_capacity(bool allow_growth);
   bool preparation_consensus(bool local_success);
 };
 class Pending final:public c10d::Work {
@@ -236,7 +236,7 @@ void Queue::drain() {
     if(auto error=current->exception())std::rethrow_exception(error);
   }
 }
-bool Queue::provision_capacity() {
+bool Queue::provision_capacity(bool allow_growth) {
   // Holding the queue lock through the cold collective also prevents a new
   // Work from being published between drain and the stopped handshake.
   std::lock_guard lock(mutex);
@@ -245,7 +245,7 @@ bool Queue::provision_capacity() {
     pending.fetch_sub(1,std::memory_order_release);
     if(auto error=current->exception())std::rethrow_exception(error);
   }
-  return communicator->provision_registered_capacity();
+  return communicator->provision_registered_capacity(allow_growth);
 }
 bool Queue::preparation_consensus(bool local_success) {
   std::lock_guard lock(mutex);
@@ -296,7 +296,7 @@ struct ResidentKernel {
     replacement->queue=publication->queue;
     replacement->specification=publication->specification;
     replacement->specification.copy_levels=modes;
-    replacement->plan=queue->communicator->prepare(replacement->specification);
+    replacement->plan=queue->communicator->prepare(replacement->specification, /*defer_capacity=*/true);
     replacement->in_refs=publication->in_refs;replacement->out_refs=publication->out_refs;
     replacement->input_metadata=publication->input_metadata;replacement->output_metadata=publication->output_metadata;
     replacement->input_types=publication->input_types;replacement->output_types=publication->output_types;
@@ -399,7 +399,7 @@ struct ResidentLease {
   void configure_route(std::vector<int> modes){kernel->configure_route(std::move(modes));}
   std::vector<int> route_modes()const{return kernel->configured_modes;}
   std::string capacity_provider_id()const{return "comm-capacity/"+std::to_string(kernel->queue->capacity_provider_id);}
-  bool provision_capacity(){std::lock_guard lock(kernel->mutex);return kernel->queue->provision_capacity();}
+  bool provision_capacity(bool allow_growth){std::lock_guard lock(kernel->mutex);return kernel->queue->provision_capacity(allow_growth);}
   bool preparation_consensus(bool success){std::lock_guard lock(kernel->mutex);return kernel->queue->preparation_consensus(success);}
 };
 void check_metadata(at::TensorList actual,const std::vector<vc::Layout>& expected,const std::vector<at::ScalarType>& types) {
@@ -663,7 +663,7 @@ public:
   }
   void seal(){std::lock_guard lock(plans_mutex_);communicator_->seal();sealed_=true;}
   std::string capacity_provider_id()const{return "comm-capacity/"+std::to_string(queue_->capacity_provider_id);}
-  bool provision_capacity(){std::lock_guard lock(plans_mutex_);return queue_->provision_capacity();}
+  bool provision_capacity(bool allow_growth){std::lock_guard lock(plans_mutex_);return queue_->provision_capacity(allow_growth);}
   bool preparation_consensus(bool success){std::lock_guard lock(plans_mutex_);return queue_->preparation_consensus(success);}
   void abort(){communicator_->abort();for(auto& p:exchanges_)p->buffer->abort();}
 };
@@ -687,7 +687,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
     .def_property_readonly("abi_address",&ResidentLease::address)
     .def_property_readonly("route_modes",&ResidentLease::route_modes)
     .def_property_readonly("capacity_provider_id",&ResidentLease::capacity_provider_id)
-    .def("provision_capacity",&ResidentLease::provision_capacity,py::call_guard<py::gil_scoped_release>())
+    .def("provision_capacity",&ResidentLease::provision_capacity,py::arg("allow_growth")=true,py::call_guard<py::gil_scoped_release>())
     .def("preparation_consensus",&ResidentLease::preparation_consensus,py::call_guard<py::gil_scoped_release>())
     .def("configure_route",&ResidentLease::configure_route);
   py::class_<RoutingLifetime,std::shared_ptr<RoutingLifetime>>(m,"_RoutingLifetime")
@@ -711,7 +711,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
     .def_property_readonly("_routing_id",&Backend::routing_id)
     .def_property_readonly("_routing_lifetime",&Backend::routing_lifetime)
     .def_property_readonly("capacity_provider_id",&Backend::capacity_provider_id)
-    .def("provision_capacity",&Backend::provision_capacity,py::call_guard<py::gil_scoped_release>())
+    .def("provision_capacity",&Backend::provision_capacity,py::arg("allow_growth")=true,py::call_guard<py::gil_scoped_release>())
     .def("preparation_consensus",&Backend::preparation_consensus,py::call_guard<py::gil_scoped_release>())
     .def("prepare_routed",[](Backend& b,const std::string& k,const std::vector<at::Tensor>& o,const std::vector<at::Tensor>& i,std::vector<int> modes){return b.prepare(k,o,i,{}, {},0,std::move(modes))->id;})
     .def("plan_key",[](Backend& b,const std::string& k,const std::vector<at::Tensor>& o,const std::vector<at::Tensor>& i){return b.plan_key(k,o,i);})

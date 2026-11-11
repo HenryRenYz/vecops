@@ -1209,6 +1209,7 @@ class GraphMemoryCompiler:
 
 
     def prepare_model(self, programs, calls, *, serialized, admission_attempts=16,
+                      configure_resources=None, probe_resources=None,
                       finalize_resources=None, preparation_consensus=None, **options):
         """Close cold resource capacity, then admit an offset-only model plan.
 
@@ -1218,10 +1219,14 @@ class GraphMemoryCompiler:
         all-participant AND with stopped submissions. Planning, resource changes
         and admission outcomes then take the same retry branch on every rank.
         Accepted grants stay held while unsuccessful peers replan against the
-        remaining budget. Before a collective finalizer, every grant is withdrawn
-        at a barrier while proposals and reserved VA remain intact; changed
-        external resources invalidate all proposals. Fatal failure closes all
-        local proposals and grants. No graph backing is acquired.
+        remaining budget. Optional local `configure_resources(prepared)` runs
+        before collective resource callbacks. A `probe_resources(prepared)`
+        may close a no-growth resource contract, but must never allocate
+        backing. When it reports growth on any participant, withdraw grants
+        at a barrier before `finalize_resources` provisions the new backing.
+        A finalizer without a probe is treated as potentially allocating.
+        Growth invalidates all proposals. Failure closes local proposals and
+        grants. No graph backing is acquired.
 
         A typed fresh-capacity rejection may leave observed physical sampling
         headroom on a later attempt of this call. Learning requires identical
@@ -1236,10 +1241,13 @@ class GraphMemoryCompiler:
         """
         if type(admission_attempts) is not int or not 1 <= admission_attempts <= 64:
             raise ValueError('admission_attempts must be in [1,64]')
-        for name,callback in (('finalize_resources',finalize_resources),
+        for name,callback in (('configure_resources',configure_resources),
+                              ('probe_resources',probe_resources),('finalize_resources',finalize_resources),
                               ('preparation_consensus',preparation_consensus)):
             if callback is not None and not callable(callback):
                 raise TypeError(name+' must be callable')
+        if probe_resources is not None and finalize_resources is None:
+            raise ValueError('a resource probe requires a growth finalizer')
         def agree(local):
             result=local if preparation_consensus is None else preparation_consensus(local)
             if type(result) is not bool or (result and not local):
@@ -1284,7 +1292,25 @@ class GraphMemoryCompiler:
                         error=failure
                 if agree(error is None):
                     changed=False
-                    if finalize_resources is not None:
+                    if configure_resources is not None:
+                        try:
+                            configure_resources(prepared)
+                        except Exception as failure:
+                            error=failure
+                        if not agree(error is None):
+                            raise error if error is not None else RuntimeError('peer cold resource configuration failed')
+                    needs_growth=finalize_resources is not None
+                    if probe_resources is not None:
+                        try:
+                            needs_growth=probe_resources(prepared)
+                            if type(needs_growth) is not bool:
+                                raise TypeError('probe_resources must return bool')
+                        except Exception as failure:
+                            error=failure
+                        if not agree(error is None):
+                            raise error if error is not None else RuntimeError('peer cold resource probe failed')
+                        needs_growth=not agree(not needs_growth)
+                    if needs_growth:
                         # Keep successful grants while peers replan. Once every
                         # proposal is ready, withdraw those grants and synchronize
                         # before a collective finalizer can provision its roots.
@@ -1301,17 +1327,22 @@ class GraphMemoryCompiler:
                         if not agree(error is None):
                             raise error if error is not None else RuntimeError('peer cold resource finalization failed')
                         changed=not agree(not changed)
+                        # A positive probe required synchronized withdrawal.
+                        # Even if the provider no longer needs backing, the
+                        # proposals' admission budgets must be refreshed.
+                        changed=changed or probe_resources is not None
                     if changed:
                         prepared.close();prepared=None
                         if attempt+1==admission_attempts:
                             raise RuntimeError('external resource capacity did not stabilize before admission')
                         self.budgets=self.queries.snapshot(self.view,list(self.caches))
                         continue
-                    try:
-                        prepared.admit()
-                        held=True
-                    except Exception as failure:
-                        error=failure
+                    if not held:
+                        try:
+                            prepared.admit()
+                            held=True
+                        except Exception as failure:
+                            error=failure
                     if agree(error is None):
                         return prepared
                 # Accepted grants remain visible to unsuccessful peers. Releasing

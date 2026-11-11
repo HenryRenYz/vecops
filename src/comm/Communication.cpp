@@ -526,7 +526,7 @@ std::shared_ptr<Communicator> Communicator::create(int rank,int size,Options opt
   for(auto& peer:s->peers)peer.map_data(*s->payload,load(&peer.header->capacity),size+1);
   return std::shared_ptr<Communicator>(new Communicator(std::move(s)));
 }
-std::shared_ptr<Plan> Communicator::prepare(Specification spec) {
+std::shared_ptr<Plan> Communicator::prepare(Specification spec, bool defer_capacity) {
   const auto op=spec.operation;
   if(static_cast<uint32_t>(op)>static_cast<uint32_t>(Operation::SumFloat32))
     throw std::invalid_argument("unknown collective operation");
@@ -583,14 +583,14 @@ std::shared_ptr<Plan> Communicator::prepare(Specification spec) {
     // Before the first invocation there are no publication readers. Provision
     // exact registered relay requirements cold, so metadata-only preparation
     // followed by seal does not depend on a hidden warm-up allocation.
-    if(!state_->epoch) {
+    if(!state_->epoch && !defer_capacity) {
       state_->reserve(p.required,p.relay_needed);
     }
     ++state_->stats.plans;
   }
   return plan;
 }
-bool Communicator::provision_registered_capacity() {
+bool Communicator::provision_registered_capacity(bool allow_growth) {
   auto& c=*state_;
   std::lock_guard lock(c.mutex);
   const auto prefix="vecops-capacity/v1/"+std::to_string(++c.provision_epoch)+"/"+std::to_string(c.epoch)+"/";
@@ -634,9 +634,10 @@ bool Communicator::provision_registered_capacity() {
       rebuild|=needed[source] && !existing;
       needed[source]=needed[source] || existing;
     }
-    checkpoint("validated",attempt([&] {
+    const bool needs_growth=checkpoint(allow_growth ? "validated" : "probe",attempt([&] {
       if(rebuild && c.sealed)throw std::runtime_error("sealed communicator requires unregistered capacity");
-    }));
+    }),rebuild);
+    if(needs_growth && !allow_growth)return true;
     // A remote imported mapping keeps physical pages alive even after an
     // owner's receipt is released. Remove all aliases BEFORE refunding roots.
     for(auto& peer:c.peers){peer.window.reset();peer.data=nullptr;peer.mapped=0;}

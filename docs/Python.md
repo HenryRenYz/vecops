@@ -1961,12 +1961,12 @@ backing. `TorchGraphPlan.configure_communication_placements(...)` selects routes
 from the proposal, and `vecops.graph.provision_communication_capacity(plans)`
 provisions each distinct stopped transport provider collectively. A no-growth
 fixed point is retained with `finalize_communication_contract()` before final
-compilation. `GraphMemoryCompiler.prepare_model` accepts `finalize_resources` and
-`preparation_consensus` callbacks to coordinate this ordering and all-participant
-admission retries. Successful grants stay held while peers replan; a collective
-finalizer runs only after all proposals are ready and all graph grants are
-withdrawn at a barrier. It retains the offset plans and reserved VA unless
-resource growth requires recompilation. Fatal failure refunds the local grant;
+compilation. `GraphMemoryCompiler.prepare_model` coordinates this ordering with
+`configure_resources`, `probe_resources`, `finalize_resources` and
+`preparation_consensus` callbacks. A no-growth probe closes the transport
+contract while successful graph grants stay held. Only an allocating finalizer
+requires withdrawal at a barrier and a new plan. A finalizer without a probe
+must be treated as potentially allocating. Fatal failure refunds the local grant;
 see `docs/WorkspacePlanning.md` for the complete sequence.
 
 Each compilation freezes its budget scalars and reuses only exact placement and

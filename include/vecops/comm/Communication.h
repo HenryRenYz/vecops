@@ -80,7 +80,10 @@ public:
   static std::shared_ptr<Communicator> create(int rank, int size, Options options,
       Exchange exchange, const VecopsThreadPoolV1* executor = nullptr);
   ~Communicator();
-  std::shared_ptr<Plan> prepare(Specification specification);
+  /** A deferred plan registers demand without growing backing, even before
+   * the first invocation. The cold provisioner must close its capacity before
+   * a sealed execution. */
+  std::shared_ptr<Plan> prepare(Specification specification, bool defer_capacity = false);
   /** Collectively provision the maximum publication size and union of relay
    * segments of every registered plan, after the embedding stops submissions
    * and drains its local queue. All ranks must enter in the same cold order,
@@ -92,12 +95,14 @@ public:
    * and only then retires/rebuilds roots. Existing publication contents and
    * borrowed addresses are invalidated; user input/output tensors are not.
    * New descriptors are published and all peer mappings acknowledged before
-   * return. Returns the SAME bool on every rank: true if any rank allocated
-   * publication/relay roots, false for an already provisioned fixed point.
+   * return. With growth allowed, returns the SAME bool on every rank: true if
+   * any rank allocated publication/relay roots. With growth disabled, returns
+   * true before changing backing or aliases when any rank needs to grow.
+   * False means the registered capacity and peer mappings are ready.
    * Failures poison the communicator and retain unproven owners as usual.
    * No exchange, allocation or remapping is added to unchanged hot replay.
    */
-  bool provision_registered_capacity();
+  bool provision_registered_capacity(bool allow_growth = true);
   /** Cold all-rank AND of a local planning/admission result, using only the
    * metadata exchange. Call in the same order after stopping local submissions
    * and draining work. False is a normal consensus result, not an abort. This

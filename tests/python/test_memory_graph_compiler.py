@@ -1265,7 +1265,7 @@ def test_pending_budget_rejects_invalid_quantum_and_uint64_rounding_overflow():
     assert not value.recipes
 
 
-@pytest.mark.parametrize('finalizer',['none','stable','growth'])
+@pytest.mark.parametrize('finalizer',['none','stable','growth','probe-stable','probe-growth'])
 def test_concurrent_native_admission_holds_winner_and_spills_loser(runtime,finalizer):
     import threading
     value,view=runtime
@@ -1279,7 +1279,7 @@ def test_concurrent_native_admission_holds_winner_and_spills_loser(runtime,final
             plans[self.rank].append(result)
             return result
     engines=[Engine(value,view,value.snapshot(view),native_module=native) for _ in range(2)]
-    finalized=[[],[]]
+    finalized=[[],[]];probed=[[],[]]
     def work(rank):
         engines[rank].rank=rank
         def finalize(prepared):
@@ -1289,11 +1289,16 @@ def test_concurrent_native_admission_holds_winner_and_spills_loser(runtime,final
             assert sum(g.unbacked_reserved_bytes for g in value.snapshot(view).groups)==0
             finalized[rank].append(prepared)
             agree(rank,True)
-            return finalizer=='growth' and len(finalized[rank])==2
+            return (finalizer=='growth' and len(finalized[rank])==2) or finalizer=='probe-growth'
+        def probe(prepared):
+            pending=sum(g.unbacked_reserved_bytes for g in value.snapshot(view).groups)
+            probed[rank].append(pending)
+            return finalizer=='probe-growth' and len(probed[rank])==2 and rank==1
         try:
             results[rank]=engines[rank].prepare_model({'region':[Buffer('tensor',6*Q,read_bytes=6*Q)]},
                 [compiler.ProgramCall('call','region')],serialized=True,admission_attempts=4,
                 preparation_consensus=lambda ok:agree(rank,ok),
+                probe_resources=probe if finalizer.startswith('probe-') else None,
                 finalize_resources=finalize if finalizer!='none' else None)
         except BaseException as error:
             errors[rank]=error;barrier.abort()
@@ -1303,13 +1308,17 @@ def test_concurrent_native_admission_holds_winner_and_spills_loser(runtime,final
         for thread in threads:thread.join(20)
         assert not any(thread.is_alive() for thread in threads)
         assert errors==[None,None],errors
-        assert (sum(map(len,plans))==6 if finalizer=='growth' else sorted(len(items) for items in plans)==[1,2])
+        growth=finalizer in ('growth','probe-growth')
+        assert (sum(map(len,plans))==6 if growth else sorted(len(items) for items in plans)==[1,2])
         assert sorted(next(iter(result.program.peak_bytes_by_capacity_group)) for result in results)==[
             'capacity:cowos_superdie','capacity:uma']
         assert sum(g.unbacked_reserved_bytes for g in value.snapshot(view).groups)==12*Q
         assert committed(runtime)==0
-        if finalizer!='none':
-            assert [len(items) for items in finalized]==([4,4] if finalizer=='growth' else [2,2])
+        expected={'none':0,'stable':2,'growth':4,'probe-stable':0,'probe-growth':1}
+        assert [len(items) for items in finalized]==[expected[finalizer]]*2
+        if finalizer.startswith('probe-'):
+            expected_pending=[0,6*Q,0,6*Q] if growth else [0,6*Q]
+            assert probed==[expected_pending,expected_pending]
         # Grants independently own accepted capacity until the stopped plans
         # close; real backing is not required to test this protocol.
     finally:
@@ -1319,12 +1328,13 @@ def test_concurrent_native_admission_holds_winner_and_spills_loser(runtime,final
     assert sum(g.unbacked_reserved_bytes for g in value.snapshot(view).groups)==0
 
 
-@pytest.mark.parametrize('failure_stage',['replan','finalizer'])
+@pytest.mark.parametrize('failure_stage',['replan','configuration','probe','finalizer'])
 def test_concurrent_peer_fatal_failure_refunds_retained_native_grants(runtime,failure_stage):
     import threading
     value,view=runtime
     barrier=threading.Barrier(2,timeout=10);votes=[None,None]
     errors=[None,None];results=[None,None];counts=[0,0];finals=[0,0]
+    configs=[0,0];probes=[0,0]
     def agree(rank,ok):
         votes[rank]=ok;barrier.wait();result=all(votes);barrier.wait();return result
     class Engine(compiler.GraphMemoryCompiler):
@@ -1341,11 +1351,22 @@ def test_concurrent_peer_fatal_failure_refunds_retained_native_grants(runtime,fa
             assert prepared._lease is None
             if finals[rank]==2 and rank==0:raise RuntimeError('fatal peer finalizer')
             return False
+        def configure(_prepared):
+            configs[rank]+=1
+            if configs[rank]==2 and rank==0 and failure_stage=='configuration':
+                raise RuntimeError('fatal peer resource configuration')
+        def probe(_prepared):
+            probes[rank]+=1
+            if probes[rank]==2 and rank==0 and failure_stage=='probe':
+                raise RuntimeError('fatal peer resource probe')
+            return False
         try:
             results[rank]=engines[rank].prepare_model({'region':[Buffer('tensor',6*Q,read_bytes=6*Q)]},
                 [compiler.ProgramCall('call','region')],serialized=True,admission_attempts=4,
                 preparation_consensus=lambda ok:agree(rank,ok),
-                finalize_resources=finalize if failure_stage=='finalizer' else None)
+                configure_resources=configure if failure_stage=='configuration' else None,
+                probe_resources=probe if failure_stage in ('configuration','probe') else None,
+                finalize_resources=finalize if failure_stage!='replan' else None)
         except BaseException as error:errors[rank]=error
     threads=[threading.Thread(target=work,args=(rank,),daemon=True) for rank in range(2)]
     try:
@@ -1354,8 +1375,12 @@ def test_concurrent_peer_fatal_failure_refunds_retained_native_grants(runtime,fa
         assert not any(thread.is_alive() for thread in threads)
         assert all(isinstance(error,RuntimeError) for error in errors),errors
         assert all('fatal peer' in str(error) or 'peer model preparation' in str(error)
-            or 'peer cold resource finalization' in str(error) for error in errors)
+            or 'peer cold resource' in str(error) for error in errors)
         assert results==[None,None] and sorted(counts)==[1,2]
+        if failure_stage=='configuration':
+            assert probes==[1,1] and finals==[0,0]
+        if failure_stage=='probe':
+            assert probes==[2,2] and finals==[0,0]
     finally:
         barrier.abort()
         for result in results:

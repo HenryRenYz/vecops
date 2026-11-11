@@ -572,13 +572,14 @@ class TorchGraphPlan:
       raise
 
 
-def provision_communication_capacity(plans,*,providers=()):
+def provision_communication_capacity(plans,*,providers=(),allow_growth=True):
   """Collectively provision each distinct stopped transport provider once.
 
   Every participant must traverse the same provider order within its groups.
   All providers are visited even when an earlier one grew. The returned bool is
-  collective per provider and asks the graph planner to refresh its budgets.
-  This only provisions transport roots, never graph tensor/workspace backing.
+  collective per provider. With growth disabled, true requests a second,
+  allocating pass after graph grants are withdrawn. A no-growth pass still
+  closes the transport contract. This never allocates graph tensor backing.
   """
   plans=tuple(plans)
   unique={provider.capacity_provider_id:provider for provider in providers}
@@ -587,7 +588,7 @@ def provision_communication_capacity(plans,*,providers=()):
       unique.setdefault(lease.capacity_provider_id,lease)
   changed=False
   for lease in unique.values():
-    grew=lease.provision_capacity()
+    grew=lease.provision_capacity(allow_growth=allow_growth)
     if type(grew) is not bool:
       raise TypeError('communication capacity provider must return bool')
     changed=grew or changed
@@ -660,9 +661,10 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
     if len(providers)>1:
       raise ValueError('multiple graph transport groups require model-level prepare_model with a shared preparation_consensus')
     consensus=next(iter(providers.values())).preparation_consensus if providers else None
-    def finalize(proposed):
+    def configure(proposed):
       _lowered.configure_communication_placements(proposed,memory_call='graph',runtime=native_runtime,view=view)
-      changed=provision_communication_capacity((_lowered,))
+    def provision(_proposed, *, allow_growth):
+      changed=provision_communication_capacity((_lowered,),allow_growth=allow_growth)
       if not changed:_lowered.finalize_communication_contract()
       return changed
     from vecops.planner.compiler import ProgramCall
@@ -670,7 +672,10 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
     memory_program=GraphMemoryCompiler(native_runtime,view,native_runtime.snapshot(view),
         native_module=memory.native).prepare_model({'graph':_lowered.managed_requirements},
             [ProgramCall('graph','graph',bindings=ids)],serialized=True,
-            finalize_resources=finalize,preparation_consensus=consensus)
+            configure_resources=configure,
+            probe_resources=lambda p:provision(p,allow_growth=False),
+            finalize_resources=lambda p:provision(p,allow_growth=True),
+            preparation_consensus=consensus)
     memory_call='graph'
     memory_program.materialize()
   if memory_program is not None:
