@@ -34,10 +34,10 @@ from .ir import (
   TensorValue,
 )
 
-def provision_communication_capacity(plans,*,providers=()):
-  """Provision stopped graph transport groups collectively before graph admission."""
+def provision_communication_capacity(plans,*,providers=(),allow_growth=True):
+  """Probe or provision stopped graph transport groups before graph admission."""
   from ._replay import provision_communication_capacity as provision
-  return provision(plans,providers=providers)
+  return provision(plans,providers=providers,allow_growth=allow_growth)
 
 
 __all__ = [

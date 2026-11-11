@@ -8,6 +8,38 @@ import pytest
 from vecops.distributed.compiler import CommunicationCompiler, balanced_targets
 
 
+def test_public_capacity_probe_defers_growth_and_closes_ready_plan():
+  from vecops.graph import provision_communication_capacity
+
+  class Provider:
+    capacity_provider_id = 'publication'
+    needs_growth = True
+    calls = []
+
+    def provision_capacity(self, *, allow_growth):
+      self.calls.append(allow_growth)
+      needs_growth = self.needs_growth
+      if allow_growth:
+        self.needs_growth = False
+      return needs_growth
+
+  provider = Provider()
+
+  class Plan:
+    _communication_capacity_closed = False
+
+    def communication_providers(self):
+      return (provider,)
+
+  plan = Plan()
+  assert provision_communication_capacity((plan,), providers=(provider,), allow_growth=False)
+  assert provider.needs_growth and not plan._communication_capacity_closed
+  assert provision_communication_capacity((plan,))
+  assert not provision_communication_capacity((plan,), allow_growth=False)
+  assert plan._communication_capacity_closed
+  assert provider.calls == [False, True, False]
+
+
 def facts():
   resources = [{'id': f'service-{i}', 'rule': 'opaque', 'kind': 'bandwidth',
                 'sharing': 'read_write', 'read': 100., 'write': 100., 'bandwidth': None}
