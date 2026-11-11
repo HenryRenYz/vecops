@@ -194,9 +194,10 @@ void worker(int rank,Bootstrap* store,const std::string& directory) {
     check(cold->preparation_consensus(true));
     check(cold->statistics().calls==before_consensus.calls &&
         cold->statistics().capacity_growths==before_consensus.capacity_growths);
-    Specification deferred;deferred.operation=Operation::AllGather;
-    deferred.inputs={Layout{{static_cast<int64_t>(page*4+17)},{1},1}};
-    deferred.outputs.assign(ranks,deferred.inputs.front());deferred.copy_levels={0,0};
+    const size_t exchange_bytes=page*8+17;
+    Specification deferred;deferred.operation=Operation::AllToAll;
+    deferred.inputs.assign(ranks,Layout{{static_cast<int64_t>(exchange_bytes)},{1},1});
+    deferred.outputs=deferred.inputs;
     auto deferred_plan=cold->prepare(deferred, /*defer_capacity=*/true);
     check(cold->statistics().capacity_growths==before_consensus.capacity_growths);
     Specification barrier;barrier.operation=Operation::Barrier;
@@ -248,8 +249,9 @@ void worker(int rank,Bootstrap* store,const std::string& directory) {
         const auto targets=detail::balanced_relay_targets(partition,owner,std::vector<uint64_t>(ranks,bytes));
         for(int source=0;source<ranks;++source)needed[source]=needed[source] || targets[source]==owner;
       }
-      size_t rounded=page;while(rounded<bytes)rounded*=2;
-      expected+=rounded*(1+std::count(needed.begin(),needed.end(),true));
+      size_t publication=page;while(publication<ranks*exchange_bytes)publication*=2;
+      const size_t relay_bytes=(bytes+page-1)/page*page;
+      expected+=publication+relay_bytes*std::count(needed.begin(),needed.end(),true);
     }
     exchange("cold-exact-union-observed");check(charged()==expected);
     std::shared_ptr<mm::Allocation> filler;
@@ -274,6 +276,18 @@ void worker(int rank,Bootstrap* store,const std::string& directory) {
         check(output[peer*bytes+i]==static_cast<uint8_t>(i+peer*17));
       check(cold->statistics().capacity_growths==growths);
     }
+    std::vector<uint8_t> exchange_input(exchange_bytes*ranks),exchange_output(exchange_bytes*ranks);
+    std::array<const void*,ranks> exchange_in;
+    std::array<void*,ranks> exchange_out;
+    for(int peer=0;peer<ranks;++peer) {
+      exchange_in[peer]=exchange_input.data()+peer*exchange_bytes;
+      exchange_out[peer]=exchange_output.data()+peer*exchange_bytes;
+      std::fill_n(exchange_input.data()+peer*exchange_bytes,exchange_bytes,rank*ranks+peer);
+    }
+    deferred_plan->execute(exchange_out.data(),exchange_in.data());
+    for(int peer=0;peer<ranks;++peer)for(size_t i=0;i<exchange_bytes;++i)
+      check(exchange_output[peer*exchange_bytes+i]==peer*ranks+rank);
+    check(cold->statistics().capacity_growths==growths);
     cold->close();filler.reset();exchange("cold-publications-and-filler-refunded");
     const auto snapshot=take(authority->snapshot());
     check(snapshot.roots.empty() && snapshot.grants.empty());

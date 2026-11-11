@@ -84,9 +84,10 @@ public:
    * the first invocation. The cold provisioner must close its capacity before
    * a sealed execution. */
   std::shared_ptr<Plan> prepare(Specification specification, bool defer_capacity = false);
-  /** Collectively provision the maximum publication size and union of relay
-   * segments of every registered plan, after the embedding stops submissions
-   * and drains its local queue. All ranks must enter in the same cold order,
+  /** Collectively provision the maximum publication size and the maximum
+   * relayed payload for each registered source, rounded to the backing page
+   * size. The embedding first stops submissions and drains its local queue.
+   * All ranks must enter in the same cold order,
    * with the same completed invocation epoch. A control Barrier or earlier
    * payload invocation does not disable this preparation phase.
    *

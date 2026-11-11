@@ -208,8 +208,9 @@ struct Mapping {
     for(size_t index=0;index<segments;++index) {
       const auto& wire=payloads(header)[index];
       if(!wire.bytes)continue; // absent relay segments consume no physical backing
-      if(wire.bytes!=capacity)throw std::invalid_argument("communication payload capacity mismatch");
-      next->map(store,mul(index,capacity),capacity,store.import(wire),0,true);
+      if(wire.bytes>capacity || (!index && wire.bytes!=capacity))
+        throw std::invalid_argument("communication payload capacity mismatch");
+      next->map(store,mul(index,capacity),wire.bytes,store.import(wire),0,true);
     }
     data=next->address;mapped=total;payload_generation=generation;window=std::move(next);
   }
@@ -303,7 +304,7 @@ struct Communicator::State {
   uint64_t provision_epoch=0;
   uint64_t preparation_epoch=0;
   size_t registered_required=0;
-  std::vector<bool> registered_relays;
+  std::vector<size_t> registered_relays;
   bool sealed=false;
   size_t descriptor_count=0;
   Statistics stats;
@@ -312,6 +313,7 @@ struct Communicator::State {
   ~State() {
     if(!closed && payload) {
       for(auto& [epoch,root]:retired_roots){(void)epoch;roots.push_back(std::move(root));}
+      std::erase_if(roots,[](const auto& root){return !root.allocation;});
       if(!roots.empty())retain_unproven(std::move(roots),payload->runtime);
     }
     if(executor && executor->release)executor->release(executor->context);
@@ -329,31 +331,37 @@ struct Communicator::State {
       }
     }
   }
-  void reserve(size_t required,const std::vector<bool>& needed={}) {
+  void reserve(size_t required,const std::vector<size_t>& needed={}) {
     auto& own=peers[rank];
     const size_t cap=load(&own.header->capacity);
-    bool missing=!cap;
+    bool growth=required>cap || !cap;
     for(size_t source=0;source<needed.size();++source)
-      missing|=needed[source] && !payloads(own.header)[source+1].bytes;
-    if(required<=cap && !missing)return;
+      growth|=needed[source]>payloads(own.header)[source+1].bytes;
+    if(!growth)return;
     if(sealed)throw std::runtime_error("vecops comm sealed capacity exceeded; prepare first");
     size_t next=std::max(cap,payload->page);
     while(next<required)next=mul(next,2);
-    const bool growth=next!=cap;
     std::vector<PayloadWire> descriptors(size+1);
-    if(!growth)std::copy_n(payloads(own.header),size+1,descriptors.begin());
-    std::vector<Root> allocated;
-    if(growth)allocated.push_back(payload->allocate(next,descriptors[0]));
-    for(int source=0;source<size;++source) {
-      const bool used=(!needed.empty() && needed[source]) || (cap && payloads(own.header)[source+1].bytes);
-      if(used && (growth || !descriptors[source+1].bytes))
-        allocated.push_back(payload->allocate(next,descriptors[source+1]));
+    std::copy_n(payloads(own.header),size+1,descriptors.begin());
+    // All slots retain the primary capacity as their virtual stride. Only
+    // the primary publication needs its full size. A relay stores one
+    // AllGather source, independent of the largest AllToAll inbox.
+    roots.resize(size+1);
+    std::vector<Root> replacements(size+1);
+    if(next!=cap)replacements[0]=payload->allocate(next,descriptors[0]);
+    for(size_t source=0;source<needed.size();++source) {
+      auto& wire=descriptors[source+1];
+      if(needed[source]<=wire.bytes)continue;
+      const size_t bytes=mul(add(needed[source],payload->page-1)/payload->page,payload->page);
+      if(bytes>next)throw std::logic_error("relay payload exceeds publication stride");
+      replacements[source+1]=payload->allocate(bytes,wire);
     }
-    if(growth) {
-      for(auto& root:roots)retired_roots.emplace_back(std::max<uint64_t>(1,epoch),std::move(root));
-      roots.clear();
+    for(size_t index=0;index<replacements.size();++index) {
+      if(!replacements[index].allocation)continue;
+      if(roots[index].allocation)
+        retired_roots.emplace_back(std::max<uint64_t>(1,epoch),std::move(roots[index]));
+      roots[index]=std::move(replacements[index]);
     }
-    for(auto& root:allocated)roots.push_back(std::move(root));
     std::copy(descriptors.begin(),descriptors.end(),payloads(own.header));
     store(&own.header->capacity,next);
     store(&own.header->payload_generation,load(&own.header->payload_generation)+1);
@@ -421,7 +429,7 @@ struct Plan::State {
   bool team_rows=false;
   std::vector<int> copy_levels;
   std::vector<std::vector<int>> relay_targets;
-  std::vector<bool> relay_needed;
+  std::vector<size_t> relay_needed;
   explicit State(std::shared_ptr<Communicator> comm, Specification value):owner(std::move(comm)),spec(std::move(value)) {
     copy_levels=spec.copy_levels.empty()?owner->state_->options.copy_levels:spec.copy_levels;
     for(const auto& l:spec.inputs) inputs.emplace_back(l);
@@ -455,7 +463,7 @@ struct Plan::State {
     // between ready and the following copy-preparation barrier.
     relay=spec.operation==Operation::AllGather && owner->state_->options.relay &&
           largest>=owner->state_->options.relay_threshold;
-    relay_needed.assign(owner->size(),false);
+    relay_needed.assign(owner->size(),0);
     if(relay) {
       std::vector<uint64_t> bytes;bytes.reserve(outputs.size());
       for(const auto& output:outputs)bytes.push_back(output.bytes);
@@ -463,7 +471,7 @@ struct Plan::State {
         relay_targets.push_back(detail::balanced_relay_targets(partition,owner->rank(),bytes));
       for(size_t level=0;level<relay_targets.size();++level)if(copy_levels[level])
         for(size_t source=0;source<relay_needed.size();++source)
-          relay_needed[source]=relay_needed[source] || relay_targets[level][source]==owner->rank();
+          if(relay_targets[level][source]==owner->rank())relay_needed[source]=outputs[source].bytes;
     }
   }
 };
@@ -560,9 +568,9 @@ std::shared_ptr<Plan> Communicator::prepare(Specification spec, bool defer_capac
     if(state_->descriptor_count==max_plans)throw std::runtime_error("vecops communication plan capacity exceeded");
     auto& p=*plan->state_;
     state_->registered_required=std::max(state_->registered_required,p.required);
-    if(state_->registered_relays.empty())state_->registered_relays.assign(state_->size,false);
+    if(state_->registered_relays.empty())state_->registered_relays.assign(state_->size,0);
     for(size_t source=0;source<p.relay_needed.size();++source)
-      state_->registered_relays[source]=state_->registered_relays[source] || p.relay_needed[source];
+      state_->registered_relays[source]=std::max(state_->registered_relays[source],p.relay_needed[source]);
     p.descriptor_id=state_->descriptor_count++;
     auto* d=descriptor(state_->peers[state_->rank].header,p.descriptor_id);
     d->operation=static_cast<uint64_t>(p.spec.operation);d->root=p.spec.root;
@@ -627,12 +635,12 @@ bool Communicator::provision_registered_capacity(bool allow_growth) {
     const auto cap=load(&own.header->capacity);
     const auto target=std::max(cap,c.registered_required);
     auto needed=c.registered_relays;
-    if(needed.empty())needed.assign(c.size,false);
+    if(needed.empty())needed.assign(c.size,0);
     bool rebuild=target>cap || !cap;
     for(int source=0;source<c.size;++source) {
-      const bool existing=payloads(own.header)[source+1].bytes!=0;
-      rebuild|=needed[source] && !existing;
-      needed[source]=needed[source] || existing;
+      const size_t existing=payloads(own.header)[source+1].bytes;
+      rebuild|=needed[source]>existing;
+      needed[source]=std::max(needed[source],existing);
     }
     const bool needs_growth=checkpoint(allow_growth ? "validated" : "probe",attempt([&] {
       if(rebuild && c.sealed)throw std::runtime_error("sealed communicator requires unregistered capacity");
