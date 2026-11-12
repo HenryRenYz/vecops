@@ -88,6 +88,26 @@ def _shared(rank, size, store):
     for slot in (1,0):
       assert torch.equal(exchange.consumer(slot)[:,0],torch.arange(size)+slot*100)
       exchange.retire(slot)
+    for shape in ((), (2,0)):
+      gather=vd.PageExchange(shape,torch.int64,operation='all_gather')
+      gather.begin();gather.producer().fill_(rank);gather.publish()
+      assert gather.consumer().shape==(size,*shape)
+      if not shape:
+        assert torch.equal(gather.consumer(),torch.arange(size))
+      gather.retire()
+
+    def escaping_alias():
+      exchange.begin()
+      exchange.producer().fill_(rank)
+      exchange.publish()
+      alias=exchange.consumer()[:,0]
+      exchange.retire()
+      return alias
+
+    graph=GraphCapture('escaping-page-exchange')
+    graph.capture_torch(escaping_alias)
+    with pytest.raises(ValueError,match='aliases must stay within the graph invocation'):
+      graph.compile_torch(native_operators=vd.native_operators())
     dist.barrier()
     vd.seal()
     before=vd.statistics()

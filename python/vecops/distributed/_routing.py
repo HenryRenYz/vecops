@@ -70,6 +70,11 @@ class RoutePlanner:
     self.records=[]
     self._cache={}
     self.consumer_routes={}
+    self.shared_profile={}
+    self.shared_ordinal=0
+    self.shared_audit=False
+    self.shared_measure=None
+    self.shared_cases=()
 
   def configure(self, native, *, kind, inputs, outputs, input_bytes, consumer=None, previous=None):
     # Explicit per-operation routes and applicable empirical profiles already

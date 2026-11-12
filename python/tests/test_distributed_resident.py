@@ -122,6 +122,55 @@ def _worker(rank, size, store, provider):
           actual = replay(sample+iteration)
           expected = torch.stack([2*(torch.arange(count)+peer*100+iteration)+4 for peer in range(size)])
           assert torch.equal(actual, expected)
+
+      # Native producers write shared pages directly. The consumer reads the
+      # page-padded view and computes a private result before lease retirement.
+      from vecops.graph._pointwise import kernel
+      from vecops._arm_vector_state import get_vector_state
+
+      def neg_into(source, destination):
+        compiled = kernel(6, source.shape, source.stride(), 'float32',
+                          source.shape, source.stride(), 'float32',
+                          destination.shape, destination.stride(), 'float32',
+                          2, get_vector_state().env_token)
+        sample = torch.empty_strided(source.shape, source.stride(), dtype=source.dtype).zero_()
+        out = torch.empty_strided(destination.shape, destination.stride(), dtype=destination.dtype)
+        compiled.explicit_torch_function()(sample, sample, out, 0.)
+        operation, specs = compiled.explicit_torch_binding()
+        return lambda x, out: operation(x, x, out, 0., *specs)
+
+      for kind, placement in (('all_gather', 'source'), ('all_to_all', 'source'),
+                              ('all_to_all', 'destination')):
+        region = vd.PageExchange((4097,), torch.float32, slots=2,
+                                 operation=kind, placement=placement)
+        producer, consumer = region.producer(1), region.consumer(1)
+        assert consumer.stride(0)*4 % os.sysconf('SC_PAGE_SIZE') == 0
+        gathered = kind == 'all_gather'
+        assert producer.shape == ((4097,) if gathered else (size, 4097))
+        row = torch.arange(4097, dtype=torch.float32)
+        inp = row + rank*10000 if gathered else row + rank*10000 + torch.arange(size)[:, None]*5000
+        result = torch.empty_like(consumer, memory_format=torch.contiguous_format)
+        produce, consume = neg_into(inp, producer), neg_into(consumer, result)
+
+        def exchange_graph(x):
+          region.begin(1)
+          produce(x, producer)
+          region.publish(1)
+          consume(consumer, result)
+          region.retire(1)
+          return result
+
+        graph = GraphCapture('resident-page-exchange')
+        graph.capture_torch(exchange_graph, inp)
+        exchange_replay = graph.compile_torch(native_operators=vd.native_operators())
+        assert max(exchange_replay.allocator_policy['native_island_sizes']) >= 5
+        before = vd.statistics()
+        for iteration in range(9):
+          expected = row + torch.arange(size)[:, None]*10000 + (0 if gathered else rank*5000) + iteration
+          assert torch.equal(exchange_replay(inp+iteration), expected)
+        after = vd.statistics()
+        assert after['copy_bytes'] == before['copy_bytes']
+        assert after['capacity_growths'] == before['capacity_growths']
       dist.barrier()
       if size == 1:
         vd.backend().abort()

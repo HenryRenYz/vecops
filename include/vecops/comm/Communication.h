@@ -74,6 +74,16 @@ using Exchange = std::function<std::vector<std::string>(const std::string&)>;
 class Plan;
 class ExchangeBuffer;
 enum class PagePlacement : uint32_t { Source, Destination };
+enum class PageExchangeKind : uint32_t { AllToAll, AllGather };
+struct PageExchangeLayout {
+  /** A dense block may be distributed as equal, page-aligned stripes.
+   * Interleaved windows order each stripe by peer before the next stripe.
+   * Zero stripe_bytes selects the ordinary page-padded peer-major layout.
+   */
+  size_t stripe_bytes = 0;
+  bool interleaved_producer = false;
+  bool interleaved_consumer = false;
+};
 class Communicator : public std::enable_shared_from_this<Communicator> {
 public:
   /** All participants must call exchange in the same bootstrap order. */
@@ -112,13 +122,15 @@ public:
    */
   bool preparation_consensus(bool local_success);
   /** Collectively create fixed page aliases outside capture/replay. Producers
-   * write peer-major blocks; consumers see source-major blocks at stable VAs.
+   * write peer-major blocks for AllToAll or one source-owned block for
+   * AllGather. Consumers see source-major blocks at stable VAs.
    * Blocks are page padded, so callers must honor block_stride(). No payload
    * copy or mmap occurs in begin/publish/retire. Explicit producer/consumer
    * lifetime and read-only consumption are required; this is not a c10d output.
    */
   std::shared_ptr<ExchangeBuffer> prepare_exchange(size_t block_bytes,
-      uint32_t slots = 1, PagePlacement placement = PagePlacement::Destination);
+      uint32_t slots = 1, PagePlacement placement = PagePlacement::Destination,
+      PageExchangeKind kind = PageExchangeKind::AllToAll, PageExchangeLayout layout = {});
   Statistics statistics() const;
   /** Freeze capacity and plan registration after explicit model preparation.
    * Existing prepared plans remain reusable with new buffer addresses. */

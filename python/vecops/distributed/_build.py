@@ -119,7 +119,7 @@ def load():
           *['-L'+p for p in library_paths('cpu')],
           *['-Wl,-rpath,'+p for p in library_paths('cpu')],
           str(directory/'libvecops_memory.a'),
-          '-ltorch_python', '-ltorch_cpu', '-ltorch', '-lc10', '-lrt', *link_flags]
+          '-ltorch_python', '-ltorch_cpu', '-ltorch', '-lc10', '-lrt', '-ldl', *link_flags]
       try:
         for variant, flags in variants:
           copy_command=compiler+compile_flags+['-std=c++20','-O3','-fPIC','-Wno-ignored-attributes',

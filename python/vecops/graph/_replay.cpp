@@ -20,6 +20,7 @@
 #include <torch/csrc/jit/runtime/operator.h>
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -292,7 +293,15 @@ class PlanBinding {
 // values. Bind them once and let one physical team advance the entire island.
 class PlanSequenceBinding {
  public:
-  explicit PlanSequenceBinding(std::vector<std::shared_ptr<PlanBinding>> plans) : plans_(std::move(plans)) {
+  struct Timing {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point start;
+    double elapsed_us = 0;
+  };
+  using Markers = std::pair<std::shared_ptr<Timing>, std::shared_ptr<Timing>>;
+  explicit PlanSequenceBinding(std::vector<std::shared_ptr<PlanBinding>> plans,
+                               std::vector<Markers> markers)
+      : plans_(std::move(plans)), markers_(std::move(markers)) {
     for (const auto& plan : plans_) { arguments_ += plan->arguments(); workers_ = std::max(workers_, plan->abi().workers); }
   }
   void call(torch::jit::Stack& stack) {
@@ -313,11 +322,35 @@ class PlanSequenceBinding {
       TORCH_CHECK(pool->team_executor->run(pool->context, workers_, this,
           [](void* opaque, const VecopsTeamContextV1* team) {
             auto& self = *static_cast<PlanSequenceBinding*>(opaque);
-            for (const auto& plan : self.plans_) {
+            auto run = [&](const auto& plan) {
               char message[1024]{}; VecopsError error{sizeof(VecopsError), 0, message, sizeof(message), 0};
               const auto& abi = plan->abi();
               TORCH_CHECK(abi.run_lane(abi.context, team, &error) == VECOPS_STATUS_OK,
                           "native sequence worker failed: ", message);
+            };
+            if (self.markers_.empty()) {
+              for (const auto& plan : self.plans_) run(plan);
+              return;
+            }
+            auto sync = [&] {
+              if (team->worker_count == 1) return;
+              char message[1024]{}; VecopsError error{sizeof(VecopsError), 0, message, sizeof(message), 0};
+              TORCH_CHECK(team->barrier(team->context, &error) == VECOPS_STATUS_OK,
+                          "shared-page calibration barrier failed: ", message);
+            };
+            for (size_t i = 0; i < self.plans_.size(); ++i) {
+              const auto& [begin,end] = self.markers_[i];
+              if (begin) {
+                sync();
+                if (team->worker_id == 0) begin->start = Timing::Clock::now();
+                sync();
+              }
+              run(self.plans_[i]);
+              if (end) {
+                sync();
+                if (team->worker_id == 0)
+                  end->elapsed_us = std::chrono::duration<double,std::micro>(Timing::Clock::now()-end->start).count();
+              }
             }
           }, &error) == VECOPS_STATUS_OK, "native sequence execution failed: ", message);
     } catch (...) {
@@ -329,6 +362,7 @@ class PlanSequenceBinding {
   }
  private:
   std::vector<std::shared_ptr<PlanBinding>> plans_;
+  std::vector<Markers> markers_;
   size_t arguments_ = 0;
   uint32_t workers_ = 1;
 };
@@ -411,6 +445,8 @@ class Executor : public torch::CustomClassHolder {
     std::unordered_map<std::string, std::string> bound_names;
     std::unordered_map<std::string, std::shared_ptr<PlanBinding>> bound_plans;
     std::unordered_map<torch::jit::Node*, std::shared_ptr<PlanBinding>> recorded_nodes;
+    const auto timing_begin = c10::Symbol::attr("vecops_shared_measure_begin");
+    const auto timing_end = c10::Symbol::attr("vecops_shared_measure_end");
     static std::atomic<uint64_t> sequence{0};
     const std::string prefix = "vecops_bound_" +
         std::to_string(reinterpret_cast<uintptr_t>(this)) + "_" +
@@ -515,6 +551,8 @@ class Executor : public torch::CustomClassHolder {
       auto* replacement = graph_->create(c10::Symbol::fromQualString(bound_name),
                                          binding_inputs, node->outputs().size());
       replacement->insertBefore(node);
+      for (auto marker : {timing_begin,timing_end})
+        if (node->hasAttribute(marker)) replacement->i_(marker,node->i(marker));
       if (auto plan = bound_plans.find(bound_name); plan != bound_plans.end()) recorded_nodes.emplace(replacement, plan->second);
       for (size_t i = 0; i < node->outputs().size(); ++i) {
         replacement->output(i)->copyMetadata(node->output(i));
@@ -536,15 +574,36 @@ class Executor : public torch::CustomClassHolder {
       std::vector<std::shared_ptr<PlanBinding>> plans;
       std::vector<torch::jit::Value*> inputs;
       std::vector<c10::Argument> arguments;
+      std::vector<PlanSequenceBinding::Markers> markers;
+      std::unordered_map<int64_t,std::shared_ptr<PlanSequenceBinding::Timing>> pending;
       for (auto* node : island) {
         plans.push_back(recorded_nodes.at(node));
+        PlanSequenceBinding::Markers pair;
+        if (node->hasAttribute(timing_begin)) {
+          auto id = node->i(timing_begin);
+          pair.first = std::make_shared<PlanSequenceBinding::Timing>();
+          TORCH_CHECK(pending.emplace(id,pair.first).second,"duplicate shared-page measurement");
+        }
+        if (node->hasAttribute(timing_end)) {
+          auto id = node->i(timing_end);
+          auto found = pending.find(id);
+          TORCH_CHECK(found!=pending.end(),"shared-page measurement crosses a native island");
+          pair.second = found->second;
+          pending.erase(found);
+          shared_timings_.emplace(id,pair.second);
+        }
+        if (!markers.empty() || pair.first || pair.second) {
+          if (markers.empty()) markers.resize(plans.size()-1);
+          markers.push_back(std::move(pair));
+        }
         for (auto* input : node->inputs()) {
           arguments.emplace_back("arg" + std::to_string(inputs.size()), input->type());
           inputs.push_back(input);
         }
       }
       const auto name = prefix + "island_" + std::to_string(bindings_.schemas.size());
-      auto sequence = std::make_shared<PlanSequenceBinding>(std::move(plans));
+      TORCH_CHECK(pending.empty(),"shared-page measurement crosses a native island");
+      auto sequence = std::make_shared<PlanSequenceBinding>(std::move(plans),std::move(markers));
       c10::FunctionSchema schema(name, "", arguments, {});
       torch::jit::registerOperator(torch::jit::Operator(name, "", schema.arguments(), schema.returns(),
           [sequence](torch::jit::Stack& stack) { sequence->call(stack); }, c10::AliasAnalysisKind::CONSERVATIVE));
@@ -580,6 +639,11 @@ class Executor : public torch::CustomClassHolder {
   int64_t native_islands() const { return native_islands_; }
   int64_t prologue_views() const { return prologue_views_; }
   std::vector<int64_t> native_island_sizes() const { return native_island_sizes_; }
+  std::vector<std::tuple<int64_t,double>> shared_page_samples() const {
+    std::vector<std::tuple<int64_t,double>> samples;
+    for (const auto& [id,timing] : shared_timings_) samples.emplace_back(id,timing->elapsed_us);
+    return samples;
+  }
   std::vector<at::Tensor> run(std::vector<at::Tensor> tensors) {
     RECORD_FUNCTION("vecops::graph_replay", c10::ArrayRef<c10::IValue>());
     TORCH_CHECK(!running_.test_and_set(std::memory_order_acquire),
@@ -629,6 +693,7 @@ class Executor : public torch::CustomClassHolder {
   size_t pool_region_capacity_ = 0;
   int64_t native_islands_ = 0;
   std::vector<int64_t> native_island_sizes_;
+  std::unordered_map<int64_t,std::shared_ptr<PlanSequenceBinding::Timing>> shared_timings_;
   int64_t prologue_views_ = 0;
   std::vector<PoolEnd> pool_exits_;
 };
@@ -667,6 +732,7 @@ VECOPS_DEFINE_GRAPH_LIBRARY(VECOPS_GRAPH_REPLAY_NAMESPACE) {
       .def("run", &Executor::run)
       .def("native_islands", &Executor::native_islands)
       .def("prologue_views", &Executor::prologue_views)
+      .def("shared_page_samples", &Executor::shared_page_samples)
       .def("native_island_sizes", &Executor::native_island_sizes);
   m.class_<CaptureLease>("CaptureLease")
       .def(torch::init<>())

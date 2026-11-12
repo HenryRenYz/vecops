@@ -873,7 +873,7 @@ struct ExchangeBuffer::State {
   }
   bool closed=false;
   std::mutex close_mutex;
-  size_t bytes=0,stride=0,slab=0;
+  size_t bytes=0,stride=0,producer_count=0,producer_slab=0,consumer_slab=0;
   uint32_t count=0;
   std::vector<uint64_t> versions;
   std::vector<uint8_t> phase;
@@ -912,8 +912,8 @@ ExchangeBuffer::~ExchangeBuffer(){
 size_t ExchangeBuffer::block_stride()const noexcept{return state_->stride;}
 size_t ExchangeBuffer::block_bytes()const noexcept{return state_->bytes;}
 uint32_t ExchangeBuffer::slots()const noexcept{return state_->count;}
-void* ExchangeBuffer::producer(uint32_t slot)const{state_->check(slot);return state_->producer.address+slot*state_->slab;}
-const void* ExchangeBuffer::consumer(uint32_t slot)const{state_->check(slot);return state_->consumer.address+slot*state_->slab;}
+void* ExchangeBuffer::producer(uint32_t slot)const{state_->check(slot);return state_->producer.address+slot*state_->producer_slab;}
+const void* ExchangeBuffer::consumer(uint32_t slot)const{state_->check(slot);return state_->consumer.address+slot*state_->consumer_slab;}
 void ExchangeBuffer::abort()noexcept{store(&state_->control(state_->owner->rank())->aborted,1);}
 void ExchangeBuffer::begin(uint32_t slot) {
   auto& s=*state_;
@@ -951,18 +951,34 @@ void ExchangeBuffer::retire(uint32_t slot) {
     store(&s.control(s.owner->rank())->slot[slot].retired,s.versions[slot]);s.phase[slot]=0;
   }catch(...){abort();throw;}
 }
-std::shared_ptr<ExchangeBuffer> Communicator::prepare_exchange(size_t bytes,uint32_t slots,PagePlacement placement) {
+std::shared_ptr<ExchangeBuffer> Communicator::prepare_exchange(size_t bytes,uint32_t slots,
+    PagePlacement placement,PageExchangeKind kind,PageExchangeLayout layout) {
   auto& c=*state_;std::lock_guard lock(c.mutex);
   if(c.closed)throw std::runtime_error("cannot allocate exchange storage after close");
   if(c.sealed)throw std::runtime_error("cannot allocate exchange storage after seal");
   if(!slots || slots>max_slots || (placement!=PagePlacement::Source && placement!=PagePlacement::Destination))
     throw std::invalid_argument("invalid exchange storage options");
+  const bool gather=kind==PageExchangeKind::AllGather;
+  if((!gather && kind!=PageExchangeKind::AllToAll) || (gather && placement!=PagePlacement::Source))
+    throw std::invalid_argument("invalid exchange operation or placement");
   auto s=std::make_unique<ExchangeBuffer::State>();s->owner=shared_from_this();s->bytes=bytes;s->count=slots;
   const size_t page=c.payload->page;
   s->stride=mul(std::max<size_t>(1,add(bytes,page-1)/page),page);
-  s->slab=mul(s->stride,c.size);size_t total=mul(s->slab,slots);
+  const bool striped=layout.interleaved_producer || layout.interleaved_consumer;
+  if(striped != (layout.stripe_bytes!=0) || (gather && layout.interleaved_producer) ||
+     (striped && (!bytes || layout.stripe_bytes%page || bytes%layout.stripe_bytes)))
+    throw std::invalid_argument("invalid page exchange stripe layout");
+  const size_t stripe=striped?layout.stripe_bytes:s->stride;
+  const size_t runs=s->stride/stripe;
+  s->producer_count=gather?1:c.size;
+  s->producer_slab=mul(s->stride,s->producer_count);
+  s->consumer_slab=mul(s->stride,c.size);
+  const size_t producer_total=mul(s->producer_slab,slots),consumer_total=mul(s->consumer_slab,slots);
   s->versions.assign(slots,0);s->phase.assign(slots,0);
-  const auto metadata=std::to_string(bytes)+":"+std::to_string(slots)+":"+std::to_string(static_cast<uint32_t>(placement));
+  const auto metadata=std::to_string(bytes)+":"+std::to_string(slots)+":"+
+      std::to_string(static_cast<uint32_t>(placement))+":"+std::to_string(static_cast<uint32_t>(kind))+":"+
+      std::to_string(layout.stripe_bytes)+":"+std::to_string(layout.interleaved_producer)+":"+
+      std::to_string(layout.interleaved_consumer);
   for(const auto& remote:c.exchange(metadata))if(remote!=metadata)throw std::invalid_argument("exchange storage metadata mismatch");
   uint64_t random=0;system_check(getrandom(&random,sizeof(random),0)==sizeof(random),"vecops exchange random");
   std::string name="/vecops-exchange-"+std::to_string(getuid())+"-"+std::to_string(random);
@@ -981,28 +997,55 @@ std::shared_ptr<ExchangeBuffer> Communicator::prepare_exchange(size_t bytes,uint
   }
   c.exchange("mapped");
   auto& local=s->peers[c.rank];
-  s->root=c.payload->allocate(total,payloads(local.header)[0]);
-  local.map_data(*c.payload,total,1);
-  c.exchange("placed");
-  s->producer.reserve(*c.payload,total);s->consumer.reserve(*c.payload,total);
+  bool placed=false;
+  try {
+    s->root=c.payload->allocate(producer_total,payloads(local.header)[0]);
+    local.map_data(*c.payload,producer_total,1);
+    placed=true;
+  } catch(const std::exception&) {
+    // All participants must make the same decision before importing backing.
+  }
+  auto placement_results=c.exchange(placed?"placed":"allocation failed");
+  if(std::any_of(placement_results.begin(),placement_results.end(),[](const auto& result){return result!="placed";})) {
+    local.window.reset();
+    s->root={};
+    s->closed=true;
+    throw std::runtime_error("shared-page backing admission failed on a peer");
+  }
+  s->producer.reserve(*c.payload,producer_total);s->consumer.reserve(*c.payload,consumer_total);
   std::vector<std::shared_ptr<mm::SharedBacking>> imported;
   for(auto& peer:s->peers)imported.push_back(c.payload->import(payloads(peer.header)[0]));
-  for(uint32_t slot=0;slot<slots;++slot)for(int peer=0;peer<c.size;++peer) {
-    size_t offset=slot*s->slab+peer*s->stride;
-    int producer_rank=placement==PagePlacement::Source?c.rank:peer;
-    int consumer_rank=placement==PagePlacement::Source?peer:c.rank;
-    size_t producer_peer=placement==PagePlacement::Source?peer:c.rank;
-    size_t consumer_peer=placement==PagePlacement::Source?c.rank:peer;
-    s->producer.map(*c.payload,offset,s->stride,imported[producer_rank],slot*s->slab+producer_peer*s->stride,true);
-    s->consumer.map(*c.payload,offset,s->stride,imported[consumer_rank],slot*s->slab+consumer_peer*s->stride,false);
+  const bool source=placement==PagePlacement::Source;
+  if(source)
+    s->producer.map(*c.payload,0,producer_total,imported[c.rank],0,true);
+  else
+    s->consumer.map(*c.payload,0,consumer_total,imported[c.rank],0,false);
+  auto stripe_offset=[&](size_t peer,size_t run,size_t peers,bool interleaved) {
+    return interleaved?(run*peers+peer)*stripe:peer*s->stride+run*stripe;
+  };
+  for(uint32_t slot=0;slot<slots;++slot) {
+    const size_t backing=slot*s->producer_slab;
+    for(int peer=0;peer<c.size;++peer) {
+      for(size_t run=0;run<runs;++run) {
+        if(source) {
+          const size_t offset=slot*s->consumer_slab+stripe_offset(peer,run,c.size,layout.interleaved_consumer);
+          const size_t from=backing+stripe_offset(gather?0:c.rank,run,s->producer_count,layout.interleaved_producer);
+          s->consumer.map(*c.payload,offset,stripe,imported[peer],from,false);
+        } else {
+          const size_t offset=backing+stripe_offset(peer,run,c.size,layout.interleaved_producer);
+          const size_t to=backing+stripe_offset(c.rank,run,c.size,layout.interleaved_consumer);
+          s->producer.map(*c.payload,offset,stripe,imported[peer],to,true);
+        }
+      }
+    }
   }
   // Fault both alias page tables cold. Physical pages were already placed by
   // their owners; these reads do not move pages or make a second payload copy.
   volatile unsigned char touched=0;
-  for(size_t i=0;i<total;i+=page) {
+  for(size_t i=0;i<producer_total;i+=page)
     touched=static_cast<unsigned char>(touched^s->producer.address[i]);
+  for(size_t i=0;i<consumer_total;i+=page)
     touched=static_cast<unsigned char>(touched^s->consumer.address[i]);
-  }
   (void)touched;c.exchange("prepared");
   auto result=std::shared_ptr<ExchangeBuffer>(new ExchangeBuffer(std::move(s)));
   c.exchanges.push_back(result);return result;

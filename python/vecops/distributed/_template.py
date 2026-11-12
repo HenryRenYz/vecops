@@ -34,6 +34,11 @@ def remember(operation, handle, group, **recipe):
   _plans[(operation, int(handle))] = (weakref.ref(group), recipe)
 
 
+def live_group(operation, handle):
+  entry = _plans.get((operation, int(handle)))
+  return entry[0]() if entry is not None else None
+
+
 def routing_for(operation,handle):
   """Return the current group's cold compiler; no process handle is persisted."""
   entry=_plans.get((operation,int(handle)))

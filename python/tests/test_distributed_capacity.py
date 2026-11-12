@@ -35,7 +35,8 @@ def _capacity_worker(rank, size, rendezvous, case):
       assert committed()==1<<20  # source only; no potential relay allocation
       exchange=distributed.PageExchange((17,),torch.float32,slots=2)
       stride=exchange.producer().stride(0)*4
-      assert committed()==(1<<20)+2*size*stride
+      exchange_bytes = 2*size*stride
+      assert committed()==(1<<20)+exchange_bytes
       for iteration in range(3):
         exchange.begin()
         exchange.producer().fill_(rank+iteration)
@@ -43,7 +44,17 @@ def _capacity_worker(rank, size, rendezvous, case):
         for peer,row in enumerate(exchange.consumer()):
           assert torch.all(row==peer+iteration)
         exchange.retire()
-      assert committed()==(1<<20)+2*size*stride
+      gather=distributed.PageExchange((17,),torch.float32,slots=2,operation='all_gather')
+      gather_stride=gather.consumer().stride(0)*4
+      assert committed()==(1<<20)+exchange_bytes+2*gather_stride
+      for slot in (0,1):
+        gather.begin(slot)
+        gather.producer(slot).fill_(rank+slot*100)
+        gather.publish(slot)
+      for slot in (1,0):
+        for peer,row in enumerate(gather.consumer(slot)):
+          assert torch.all(row==peer+slot*100)
+        gather.retire(slot)
     finally:
       dist.destroy_process_group()
     # The PageExchange object still exists, but shutdown has certified stopped

@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <dlfcn.h>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
@@ -155,8 +156,15 @@ void meta_consume(int64_t,at::Tensor,at::Tensor) {}
 struct PreparedExchange {
   std::shared_ptr<vc::ExchangeBuffer> buffer;
   std::weak_ptr<Queue> queue;
+  const VecopsThreadPoolV1* pool=nullptr;
   std::vector<at::Tensor> producers,consumers;
   int64_t id=0;
+  void phase(int64_t phase, uint32_t slot) {
+    if(phase==0)buffer->begin(slot);
+    else if(phase==1)buffer->publish(slot);
+    else if(phase==2)buffer->retire(slot);
+    else TORCH_CHECK(false,"invalid exchange phase");
+  }
 };
 std::unordered_map<int64_t,std::weak_ptr<PreparedExchange>> exchanges;
 void exchange_phase(int64_t id,int64_t phase,int64_t slot,at::TensorList storage) {
@@ -166,13 +174,14 @@ void exchange_phase(int64_t id,int64_t phase,int64_t slot,at::TensorList storage
   try {
   TORCH_CHECK(slot>=0 && slot<p->producers.size(),"invalid exchange slot");
   // Explicit mutable arguments carry graph ordering and alias/liveness effects.
-  TORCH_CHECK(storage.size()==2 && storage[0].is_alias_of(p->producers[slot]) && storage[1].is_alias_of(p->consumers[slot]),
+  auto same=[](const at::Tensor& actual,const at::Tensor& expected) {
+    return actual.is_alias_of(expected) && actual.storage_offset()==expected.storage_offset() &&
+        actual.scalar_type()==expected.scalar_type() && actual.sizes()==expected.sizes() && actual.strides()==expected.strides();
+  };
+  TORCH_CHECK(storage.size()==2 && same(storage[0],p->producers[slot]) && same(storage[1],p->consumers[slot]),
               "exchange storage bindings changed");
   drain_queue(p->queue);
-  if(phase==0)p->buffer->begin(slot);
-  else if(phase==1)p->buffer->publish(slot);
-  else if(phase==2)p->buffer->retire(slot);
-  else TORCH_CHECK(false,"invalid exchange phase");
+  p->phase(phase,slot);
   }catch(...){p->buffer->abort();throw;}
 }
 void abort_exchange(int64_t id) {
@@ -406,6 +415,91 @@ void check_metadata(at::TensorList actual,const std::vector<vc::Layout>& expecte
   TORCH_CHECK(actual.size()==expected.size(),"resident graph communication arity changed");
   for(size_t i=0;i<actual.size();++i){auto m=layout(actual[i]);TORCH_CHECK(actual[i].scalar_type()==types[i] && m.sizes==expected[i].sizes && m.strides==expected[i].strides,"resident graph communication metadata changed");}
 }
+struct ResidentExchangePhase {
+  std::atomic<uint32_t> references{1};
+  std::shared_ptr<PreparedExchange> exchange;
+  VecopsExecutionContext execution{};
+  VecopsPreparedKernelV1 abi{};
+  int64_t phase;
+  uint32_t slot;
+
+  ResidentExchangePhase(std::shared_ptr<PreparedExchange> owner,int64_t operation,uint32_t index)
+      :exchange(std::move(owner)),phase(operation),slot(index) {
+    execution.struct_size=sizeof(execution);
+    execution.requested_threads=1;
+    execution.thread_pool=exchange->pool;
+    abi.struct_size=sizeof(abi);
+    abi.abi_major=1;
+    abi.context=this;
+    abi.workers=1;
+    abi.grids=1;
+    abi.thread_pool=exchange->pool;
+    abi.execution_context=&execution;
+    abi.retain=[](void* c){static_cast<ResidentExchangePhase*>(c)->references.fetch_add(1,std::memory_order_relaxed);};
+    abi.destroy=[](void* c){
+      auto* self=static_cast<ResidentExchangePhase*>(c);
+      if(self->references.fetch_sub(1,std::memory_order_acq_rel)==1)delete self;
+    };
+    abi.bind_prevalidated=abi.bind=[](void* c,const VecopsCall* call,VecopsError* error) {
+      return ResidentKernel::guard(error,[&]{
+        auto& self=*static_cast<ResidentExchangePhase*>(c);
+        TORCH_CHECK(call && call->num_values==2,"exchange requires exactly two storage bindings");
+        const auto& producer=call->values[0];
+        const auto& consumer=call->values[1];
+        auto matches=[](const VecopsValue& value,const at::Tensor& expected) {
+          return value.kind==VECOPS_VALUE_TENSOR && value.value.tensor.byte_offset==0 &&
+              value.value.tensor.data==expected.const_data_ptr();
+        };
+        TORCH_CHECK(matches(producer,self.exchange->producers[self.slot]) &&
+            matches(consumer,self.exchange->consumers[self.slot]),"exchange storage bindings changed");
+      });
+    };
+    abi.enter=[](void* c,VecopsError* error) {
+      return ResidentKernel::guard(error,[&]{
+        auto& self=*static_cast<ResidentExchangePhase*>(c);
+        try { drain_queue(self.exchange->queue); }
+        catch (...) { self.exchange->buffer->abort();throw; }
+      });
+    };
+    abi.run_lane=[](void* c,const VecopsTeamContextV1* team,VecopsError* error) {
+      return ResidentKernel::guard(error,[&]{
+        auto& self=*static_cast<ResidentExchangePhase*>(c);
+        auto barrier=[&]{
+          if(team->worker_count>1)
+            TORCH_CHECK(team->barrier(team->context,error)==VECOPS_STATUS_OK,"exchange team cancelled");
+        };
+        // All producer stores / consumer reads must finish before lane zero
+        // releases ready / retired. On begin and publish all lanes must also
+        // observe lane zero's acquire before accessing the shared aliases.
+        if(self.phase!=0)barrier();
+        if(team->worker_id==0)self.exchange->phase(self.phase,self.slot);
+        if(self.phase!=2)barrier();
+      });
+    };
+    abi.leave=[](void* c,uint32_t success) {
+      if(!success)static_cast<ResidentExchangePhase*>(c)->exchange->buffer->abort();
+    };
+    abi.replay=[](void* c,VecopsError* error) {
+      auto& self=*static_cast<ResidentExchangePhase*>(c);
+      auto status=self.abi.enter(c,error);
+      if(status!=VECOPS_STATUS_OK)return status;
+      status=ResidentKernel::guard(error,[&]{self.exchange->phase(self.phase,self.slot);});
+      self.abi.leave(c,status==VECOPS_STATUS_OK);
+      return status;
+    };
+  }
+};
+std::shared_ptr<ResidentExchangePhase> resident_exchange(int64_t id,int64_t phase,int64_t slot,
+    const std::vector<at::Tensor>& meta) {
+  std::shared_ptr<PreparedExchange> p;
+  {std::lock_guard lock(registry_mutex);auto it=exchanges.find(id);if(it!=exchanges.end())p=it->second.lock();}
+  TORCH_CHECK(p && phase>=0 && phase<=2 && slot>=0 && slot<p->producers.size(),"invalid resident exchange phase");
+  const auto& producer=p->producers[slot];
+  const auto& consumer=p->consumers[slot];
+  check_metadata(meta,{layout(producer),layout(consumer)},{producer.scalar_type(),consumer.scalar_type()});
+  return std::shared_ptr<ResidentExchangePhase>(new ResidentExchangePhase(std::move(p),phase,slot),
+      [](ResidentExchangePhase* plan){plan->abi.destroy(plan);});
+}
 std::shared_ptr<ResidentLease> resident_plan(int64_t id,const std::vector<at::Tensor>& out,const std::vector<at::Tensor>& in,std::vector<uint32_t> types,uint64_t consumer_address) {
   std::shared_ptr<Prepared> p;std::shared_ptr<PreparedConsumer> b;
   {std::lock_guard lock(registry_mutex);
@@ -588,20 +682,37 @@ public:
     control->close();
     return samples;
   }
-  py::tuple prepare_exchange(std::vector<int64_t> shape,at::ScalarType type,uint32_t slots,const std::string& placement) {
+  py::tuple prepare_exchange(std::vector<int64_t> shape,at::ScalarType type,uint32_t slots,
+      const std::string& placement,const std::string& operation,
+      size_t stripe_bytes,bool interleaved_producer,bool interleaved_consumer) {
     TORCH_CHECK(placement=="source" || placement=="destination","page placement must be source or destination");
-    size_t count=1;for(auto n:shape){TORCH_CHECK(n>=0 && (!n || count<=SIZE_MAX/size_t(n)),"invalid exchange shape");count*=n;}
-    size_t item=c10::elementSize(type);TORCH_CHECK(count<=SIZE_MAX/item,"exchange byte count overflow");
-    auto p=std::make_shared<PreparedExchange>();p->queue=queue_;
-    p->buffer=communicator_->prepare_exchange(count*item,slots,placement=="source"?vc::PagePlacement::Source:vc::PagePlacement::Destination);
-    TORCH_CHECK(p->buffer->block_stride()%item==0,"dtype does not divide page stride");
+    const bool gather=operation=="all_gather";
+    TORCH_CHECK(gather || operation=="all_to_all","unsupported page exchange operation");
     auto sizes=shape;sizes.insert(sizes.begin(),getSize());
-    std::vector<int64_t> strides(sizes.size());int64_t step=1;
-    for(size_t d=shape.size();d>0;--d){strides[d]=step;step*=shape[d-1];}
+    std::vector<int64_t> strides(sizes.size());
+    int64_t step=1;bool empty=false;
+    for(size_t d=shape.size();d>0;--d) {
+      const auto n=shape[d-1];
+      TORCH_CHECK(n>=0 && step<=INT64_MAX/std::max<int64_t>(n,1),"invalid exchange shape");
+      strides[d]=step;
+      step*=std::max<int64_t>(n,1);
+      empty|=n==0;
+    }
+    const size_t item=c10::elementSize(type),count=empty?0:step;
+    TORCH_CHECK(count<=SIZE_MAX/item,"exchange byte count overflow");
+    auto p=std::make_shared<PreparedExchange>();p->queue=queue_;p->pool=executor_;
+    p->buffer=communicator_->prepare_exchange(count*item,slots,
+        placement=="source"?vc::PagePlacement::Source:vc::PagePlacement::Destination,
+        gather?vc::PageExchangeKind::AllGather:vc::PageExchangeKind::AllToAll,
+        {stripe_bytes,interleaved_producer,interleaved_consumer});
+    TORCH_CHECK(p->buffer->block_stride()%item==0 && p->buffer->block_stride()/item<=INT64_MAX,
+        "page stride cannot be represented in dtype elements");
     strides[0]=p->buffer->block_stride()/item;
     for(uint32_t slot=0;slot<slots;++slot) {
       auto owner=p->buffer;
-      p->producers.push_back(at::from_blob(owner->producer(slot),sizes,strides,[owner](void*){},at::TensorOptions().dtype(type)));
+      auto producer_sizes=gather?at::IntArrayRef(shape):at::IntArrayRef(sizes);
+      auto producer_strides=gather?at::IntArrayRef(strides).slice(1):at::IntArrayRef(strides);
+      p->producers.push_back(at::from_blob(owner->producer(slot),producer_sizes,producer_strides,[owner](void*){},at::TensorOptions().dtype(type)));
       p->consumers.push_back(at::from_blob(const_cast<void*>(owner->consumer(slot)),sizes,strides,[owner](void*){},at::TensorOptions().dtype(type)));
     }
     p->id=next_id.fetch_add(1);
@@ -683,6 +794,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
   m.def("abort_exchange",abort_exchange);
   m.def("resident_plan",resident_plan);
   m.def("resident_consumer_info",resident_consumer_info);
+  py::class_<ResidentExchangePhase,std::shared_ptr<ResidentExchangePhase>>(m,"ResidentExchangePhase")
+    .def_property_readonly("abi_address",[](const ResidentExchangePhase& plan){return reinterpret_cast<uintptr_t>(&plan.abi);});
+  m.def("resident_exchange",resident_exchange);
+  m.def("shared_exchange_artifacts",[](const std::vector<uint64_t>& addresses) -> std::vector<std::string> {
+    const VecopsThreadPoolV1* pool=nullptr;
+    std::vector<std::string> artifacts;
+    for(auto address:addresses) {
+      const auto* plan=reinterpret_cast<const VecopsPreparedKernelV1*>(address);
+      if(!plan || plan->struct_size<sizeof(VecopsPreparedKernelV1) || plan->abi_major!=1 ||
+         !plan->thread_pool || !plan->enter || !plan->run_lane || !plan->leave)
+        return {};
+      if(pool && pool!=plan->thread_pool)return {};
+      pool=plan->thread_pool;
+      Dl_info loaded{};
+      if(!dladdr(reinterpret_cast<const void*>(plan->run_lane),&loaded) || !loaded.dli_fname)return {};
+      artifacts.emplace_back(loaded.dli_fname);
+    }
+    if(!pool || pool->struct_size<sizeof(VecopsThreadPoolV1) || !pool->team_executor ||
+       pool->team_executor->struct_size<sizeof(VecopsTeamExecutorV1) ||
+       pool->team_executor->abi_major!=1 || !pool->team_executor->run)return {};
+    return artifacts;
+  });
   py::class_<ResidentLease,std::shared_ptr<ResidentLease>>(m,"ResidentLease")
     .def_property_readonly("abi_address",&ResidentLease::address)
     .def_property_readonly("route_modes",&ResidentLease::route_modes)

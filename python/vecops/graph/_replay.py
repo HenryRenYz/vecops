@@ -647,6 +647,13 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
     raise TypeError('native_pointwise must be bool')
   if not isinstance(borrow_outputs, bool):
     raise TypeError('borrow_outputs must be bool')
+  if _describe_only:
+    phases = {instruction.event_id:instruction.arguments for instruction in tape.instructions
+              if instruction.function._schema.name == 'vecops_comm::exchange'}
+    if phases:
+      from vecops.distributed._resident import validate_exchange_leases
+      validate_exchange_leases(capture._torch_execution_graph, phases,
+                               (*tape.input_refs, *tape.output_leaves))
   if _lowered is None and not _describe_only:
     _lowered = _compile_torch_impl(capture, native_operators=native_operators,
         borrow_readonly_state=borrow_readonly_state,native_pointwise=native_pointwise,
@@ -940,9 +947,11 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
     while identity in replacements:
       identity = replacements[identity].id
     return identity
+  shared_values = {}
   def value(item, expected=None):
     if isinstance(item, _Ref):
-      return values[donated_identity(item.id)]
+      identity = donated_identity(item.id)
+      return shared_values[identity] if identity in shared_values else values[identity]
     if isinstance(expected, torch._C.TensorType) and type(item) in (int, float, bool):
       # TorchDispatch may present a Python scalar to a Tensor schema argument;
       # reproduce the dispatcher's wrapped-number conversion in native IR.
@@ -1071,10 +1080,116 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
   prepared_nodes = 0
   native_workspace_leases = []
   static_noops = 0
+  before_exchange, at_exchange, after_exchange = {}, {}, {}
+  shared_decisions = []
+  measurement_begin, measurement_end, shared_measurements = {}, {}, {}
+  shared_bindings, shared_phase_leases = {}, {}
+  if os.environ.get('VECOPS_GRAPH_RESIDENT_COMM','1') != '0' and (
+      os.environ.get('VECOPS_SHARED_PAGE_PROFILE') or os.environ.get('VECOPS_SHARED_PAGE_AUDIT')):
+    from vecops.distributed._shared_lowering import prepare as prepare_shared
+    if runtime is None:
+      from vecops import memory
+      runtime = memory.current_runtime() or memory.default_runtime()
+    native_runtime = getattr(runtime,'native',runtime)
+    shared_view = view or native_runtime.view(native_runtime.current_scope())
+    def placement(ref):
+      try:
+        return _communication_placement(_Ref(donated_identity(ref.id)),execution,tape,
+            memory_program,memory_bindings,native_runtime,shared_view)
+      except (RuntimeError,ValueError,KeyError):
+        return None
+    def workspaces(ordinal,lease):
+      result = []
+      for item in lease.buffer_requirements:
+        key = f'kernel:{ordinal}/'+item['name']
+        if memory_program is None:
+          return None
+        binding = memory_bindings.get(key,key)
+        if binding not in memory_program.program.bindings:
+          return None
+        describe = (memory_program.placement if memory_program.binding is not None else
+                    memory_program.planned_placement)
+        try:
+          endpoint = describe(binding)
+        except (RuntimeError,ValueError,KeyError):
+          return None
+        result.append([item['name'],[(s.pool,s.size_bytes) for s in endpoint.segments]])
+      return result
+    def bind_shared(tensor):
+      key = (tensor.untyped_storage().data_ptr(),tensor.storage_offset(),
+             tensor.dtype,tuple(tensor.shape),tuple(tensor.stride()))
+      if key in shared_bindings:
+        return shared_bindings[key]
+      item = graph.addInput('shared_' + str(len(bound)))
+      item.setType(torch._C.TensorType.get())
+      bound.append(tensor)
+      examples.append(tensor)
+      shared_bindings[key] = item
+      return item
+    selected,measurements = prepare_shared(_lowered,placement,workspaces,native_runtime,shared_view,alias_nodes)
+    for ordinal,(candidate,case,route,rank,size) in measurements.items():
+      measurement_begin[candidate.first] = ordinal
+      measurement_end[candidate.last] = ordinal
+      shared_measurements[ordinal] = (case,route,rank,size)
+    for candidate,region,case,route in selected:
+      roots = {candidate.source:region.producer(),candidate.target:region.consumer()}
+      aliases = {}
+      for identity in candidate.references:
+        tensor = execution.tensors[identity]
+        if tensor.storage_id in roots:
+          m = tensor.metadata
+          aliases[identity] = bind_shared(roots[tensor.storage_id].as_strided(
+              m.shape,m.strides,m.storage_offset))
+      storage = [bind_shared(roots[key]) for key in (candidate.source,candidate.target)]
+      before_exchange[candidate.first] = (region,storage,aliases)
+      at_exchange[candidate.ordinal] = (region,storage)
+      after_exchange[candidate.last] = (region,storage)
+      owners.append(region)
+      shared_decisions.append(dict(ordinal=candidate.ordinal,case=case,route=route,
+                                   bytes=candidate.block_bytes))
+
+  def emit_exchange(region, storage, phase, precision):
+    nonlocal prepared_nodes
+    key = region.handle,phase
+    if key not in shared_phase_leases:
+      from vecops.distributed import load_communication
+      actual = [region.producer(),region.consumer()]
+      metadata = [torch.empty_strided(t.shape,t.stride(),dtype=t.dtype,device='meta') for t in actual]
+      lease = load_communication().resident_exchange(region.handle,phase,0,metadata)
+      shared_phase_leases[key] = lease
+      owners.append(lease)
+    lease = shared_phase_leases[key]
+    items = graph.create('prim::ListConstruct',storage,1)
+    graph.appendNode(items)
+    items.output().setType(torch._C.ListType.ofTensors())
+    node = graph.create('vecops_comm::exchange',
+        [graph.insertConstant(region.handle),graph.insertConstant(phase),
+         graph.insertConstant(0),items.output()],0)
+    graph.appendNode(node)
+    node.s_('vecops_matmul_precision',precision)
+    node.i_('vecops_plan_address',lease.abi_address)
+    node.s_('vecops_plan_flags','2,2')
+    node.s_('vecops_plan_dtypes','0,0')
+    node.s_('vecops_plan_outputs','')
+    node.s_('vecops_plan_argument_paths','3:0,3:1')
+    prepared_nodes += 1
+    return node
+
+  def mark_measurement(node, stage, ordinal):
+    if ordinal is not None:
+      node.i_('vecops_shared_measure_'+stage,ordinal)
+
   for ordinal, instruction in enumerate(tape.instructions):
     if ordinal in native_rewrites:
       instruction = replace(instruction, arguments=native_rewrites[ordinal])
     if ordinal in alias_nodes:
+      continue
+    if ordinal in before_exchange:
+      region,storage,shared_values = before_exchange[ordinal]
+      start=emit_exchange(region,storage,0,instruction.matmul_precision)
+      mark_measurement(start,'begin',measurement_begin.get(ordinal))
+    if ordinal in at_exchange:
+      emit_exchange(*at_exchange[ordinal],1,instruction.matmul_precision)
       continue
     # Torch's composite to/contiguous entry can be recorded even when it
     # returned the exact input TensorImpl. Static input metadata guarantees
@@ -1131,6 +1246,10 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
       arguments.append(value(item, expected))
     node = graph.create(schema.name, arguments, len(schema.returns));graph.appendNode(node)
     node.s_('vecops_matmul_precision', instruction.matmul_precision)
+    if ordinal not in before_exchange:
+      mark_measurement(node,'begin',measurement_begin.get(ordinal))
+    if ordinal not in after_exchange:
+      mark_measurement(node,'end',measurement_end.get(ordinal))
     for output, ret in zip(node.outputs(), schema.returns):
       output.setType(ret.type)
     # JIT nodes resolve overloads from their exact input types. Fail rather than
@@ -1172,6 +1291,10 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
     elif len(schema.returns) > 1:
       for item, output in zip(instruction.result, node.outputs()):
         assign(item, output)
+    if ordinal in after_exchange:
+      retire=emit_exchange(*after_exchange[ordinal],2,instruction.matmul_precision)
+      mark_measurement(retire,'end',measurement_end.get(ordinal))
+      shared_values = {}
   outputs = [value(x) for x in tape.output_leaves if isinstance(x, _Ref)]
   # Prepared kernels describe workspace first. Physical roots and addresses are
   # supplied by the same resource compiler used for graph tensor buffers.
@@ -1241,6 +1364,9 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
   executor = executor_class(ir, examples)
   result = TorchReplay(executor, tape, bound, owners, ir, execution,
                        len(planned), memory_program, unplanned)
+  if shared_measurements:
+    timing_path = f"{os.environ['VECOPS_SHARED_PAGE_AUDIT']}.samples.{os.getpid()}.jsonl"
+    result._run = _shared_timing_runner(executor,shared_measurements,timing_path,capture.name)
   if getattr(tape, 'metadata_only', False):
     # Describe output storage without submitting the executable. Initializer
     # outputs can then bind a steady graph before any numeric work is done.
@@ -1255,6 +1381,7 @@ def _compile_torch_impl(capture, *, memory_program=None, runtime=None, view=None
   result._protected_storages = {execution.tensors[x].storage_id for x in opaque_tensors}
   result.allocator_policy.update(
       recorded_cpp_plan_nodes=prepared_nodes,
+      shared_page_collectives=shared_decisions,
       native_pointwise_nodes=len(pointwise),
       hoisted_static_views=len(alias_nodes),
       eliminated_static_noops=static_noops,
@@ -1370,6 +1497,19 @@ def _communication_placement(ref,execution,tape,prepared,bindings,runtime,view):
   return dict(weights)
 
 
+def _shared_timing_runner(executor, measurements, path, graph_name):
+  import json
+  def run(tensors):
+    outputs = executor.run(tensors)
+    with open(path,'a') as stream:
+      for ordinal,elapsed in executor.shared_page_samples():
+        case,route,rank,size = measurements[ordinal]
+        print(json.dumps(dict(case=case,route=route,rank=rank,size=size,graph=graph_name,
+                              ordinal=ordinal,elapsed_us=elapsed)),file=stream)
+    return outputs
+  return run
+
+
 class TorchReplay:
   """CPU inference executable compiled by :class:`GraphCapture`.
 
@@ -1409,6 +1549,7 @@ class TorchReplay:
                              'functional_aten':'native ATen allocator',
                              'unplanned_storages':unplanned}
     self._lock = threading.Lock()
+    self._run = executor.run
 
   def fixed_output_values(self, values):
     """Cold descriptors for fixed, privately owned output storage only."""
@@ -1449,7 +1590,7 @@ class TorchReplay:
         raise ValueError('graph replay flat input count changed')
       if any(type(x) not in (torch.Tensor, torch.nn.Parameter) for x in tensors):
         raise TypeError('graph replay rejects Tensor subclasses, FakeTensors and tensor modes')
-      result = iter(self._executor.run([*tensors, *self._bound]))
+      result = iter(self._run([*tensors, *self._bound]))
       outputs = [next(result) if isinstance(x, _Ref) else x for x in self._output_leaves]
       return tree_unflatten(outputs, self._output_spec)
     finally:
@@ -1471,7 +1612,7 @@ class TorchReplay:
           _check_tensor(actual);tensors.append(actual)
         elif type(actual) is not type(expected) or actual != expected:
           raise ValueError('graph replay static non-Tensor input changed')
-      result = iter(self._executor.run(tensors + list(self._bound)))
+      result = iter(self._run(tensors + list(self._bound)))
       outputs = [next(result) if isinstance(x, _Ref) else x for x in self._output_leaves]
       return tree_unflatten(outputs, self._output_spec)
     finally:

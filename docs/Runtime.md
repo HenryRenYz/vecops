@@ -30,6 +30,56 @@ atomic_ref operations for 32/64-bit integers and float/double, with old-value
 returns and documented NaN comparison semantics. These are thread-level
 primitives, not a cross-process coordination API.
 
+## Same-node shared-page collectives
+
+`vecops.distributed.PageExchange` prepares fixed shared-page aliases for a
+same-node process group. In AllToAll, the producer writes one block per
+destination. Source placement keeps writes local and allows peer reads.
+Destination placement moves the peer access to the producer's stores.
+In AllGather, each rank writes one source-owned block. Every consumer sees
+the same physical blocks through a read-only rank-major view whose leading
+stride includes page padding.
+
+Each slot follows `begin → direct producer writes → publish → consumer reads → retire`.
+Compile graphs with the shared tensors as fixed external bindings. The
+compiler checks phase order, read-only consumer access and that the aliases
+stay within the invocation. It can include all three synchronization operations in the same native
+execution island as the producer and consumer. It fences the team before
+publishing writes or retiring reads, and before workers use acquired pages.
+Keep alias use inside its lease and finish asynchronous access before
+retirement. Copy to separate storage when the result needs to outlive the
+lease or be independently writable. Preparing the aliases maps pages once.
+Replay neither remaps them nor copies a collective payload.
+
+Ordinary compiled AllGather and AllToAll can use these aliases when the
+compiler proves that one native producer defines the entire private send
+storage and that all readers of the receive storage finish in the same
+resident team. It accepts equal page-aligned rank blocks, including a dense
+storage where peers are interleaved by uniform page-aligned stripes. External
+outputs, writable consumers, ragged splits, and incompatible strides retain
+their ordinary copy semantics.
+
+For performance calibration, set `VECOPS_SHARED_PAGE_AUDIT` to a writable
+prefix and run the same representative graph with
+`VECOPS_SHARED_PAGE_CALIBRATE` set to `copy`, `source`, or `destination`.
+Use a separate output directory for each route and verify numerical results.
+Timing starts on the resident team before the producer and ends after the
+consumer. The shared path also includes acquisition, publication and
+retirement. The traces record per-rank elapsed microseconds and exclude
+compilation and host argument binding. Set
+`VECOPS_SHARED_PAGE_CALIBRATE_CASES` to a comma-separated list of case keys
+to limit the comparison.
+
+Build a profile with `python -m vecops.distributed.shared_calibration --copy
+DIR --source DIR --destination DIR --output PROFILE`. Set
+`VECOPS_SHARED_PAGE_PROFILE` to that file and remove the calibration mode for
+production. The compiler matches the rank geometry, memory placement, team,
+copy route and executed kernel binaries. It selects a shared route when
+every measured batch clears the configured minimum gain. It uses the copy
+plan for missing evidence or unavailable shared backing. Disjoint windows
+in the same graph reuse shared backing when their layouts and routes match.
+The ordinary resource program is retained alongside the shared mappings.
+
 ## KernelDef binding
 
 A `TensorDef` coordinate is one of: fixed integer, named `ConstInt`, anonymous

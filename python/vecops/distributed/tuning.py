@@ -116,7 +116,9 @@ def context(policy, members, threads, binary):
   # worker counts and per-rank manual frequency tags. Reference-file enablement
   # is checked during bootstrap but is not part of the measured workload.
   return {'policy':policy.fingerprint,
-          'members':[{k:v for k,v in member.items() if k not in {'threads','runtime','calibration'}} for member in members],
+          'members':[{k:v for k,v in member.items() if k not in {
+              'threads','runtime','calibration','shared_page_profile','shared_page_error',
+              'shared_page_audit','shared_page_measure','shared_page_filter'}} for member in members],
           'threads':[member.get('threads',threads) for member in members],
           'binary':binary,
           'runtime':[member['runtime'] if 'runtime' in member else runtime_signature() for member in members]}

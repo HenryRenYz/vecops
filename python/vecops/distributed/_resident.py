@@ -66,6 +66,65 @@ class _Lease:
     return self.native.abi_address
 
 
+@dataclass
+class _ExchangeLease:
+  native: object
+  argument_paths = ('3:0', '3:1')
+  buffer_requirements = ()
+
+  @property
+  def abi_address(self):
+    return self.native.abi_address
+
+  def activate_buffers(self, bindings, owner):
+    if bindings:
+      raise ValueError('page exchange synchronization has no workspace')
+
+  def suspend_buffers(self):
+    pass
+
+
+def validate_exchange_leases(execution, phases, boundary_tensors):
+  """Verify phase order and storage permissions before preparing native plans."""
+  if not phases:
+    return
+  storages = {}
+  slots = {}
+  for handle, _phase, slot, tensors in phases.values():
+    key = (handle, slot)
+    pair = tuple(execution.tensors[ref.id].storage_id for ref in tensors)
+    if len(pair) != 2 or pair[0] == pair[1] or slots.setdefault(key, pair) != pair:
+      raise ValueError('page exchange slot must use a fixed pair of storage bindings')
+    for index, storage in enumerate(pair):
+      if storages.setdefault(storage, (key, index)) != (key, index):
+        raise ValueError('page exchange slots must have distinct storage bindings')
+  if any(execution.tensors[ref.id].storage_id in storages
+         for ref in boundary_tensors if hasattr(ref, 'id')):
+    raise ValueError('page exchange aliases must stay within the graph invocation')
+
+  state = dict.fromkeys(slots, 0)
+  for event in execution.events:
+    if event.id in phases:
+      handle, phase, slot, _tensors = phases[event.id]
+      key = (handle, slot)
+      if state[key] != phase:
+        raise ValueError('page exchange requires begin, publish and retire in order')
+      state[key] = (phase+1) % 3
+      continue
+    for use in event.uses:
+      access = use.access.value
+      binding = storages.get(execution.tensors[use.tensor_id].storage_id)
+      if binding is None or access in {'alias', 'allocate'}:
+        continue
+      key, index = binding
+      if index == 1 and use.access.writes:
+        raise ValueError('page exchange consumer storage is read-only')
+      if state[key] != index+1:
+        raise ValueError('page exchange storage used outside its lease')
+  if any(state.values()):
+    raise ValueError('page exchange lease must be retired before graph exit')
+
+
 def install(module):
   from vecops import _schema_bridge
 
@@ -74,11 +133,6 @@ def install(module):
       return None
     import torch
     from vecops._dtype import normalize_dtype
-    borrowed = function._schema.name == 'vecops_comm::consume'
-    identity = arguments[0]
-    outputs = [arguments[1]] if borrowed else arguments[1]
-    inputs = [arguments[2]] if borrowed else arguments[2]
-
     def meta(ref):
       m = describe(ref)
       if str(m.device) != 'cpu':
@@ -86,6 +140,16 @@ def install(module):
       return torch.empty_strided(m.shape, m.strides, device='meta',
                                  dtype=getattr(torch, m.dtype.removeprefix('torch.')))
 
+    name = function._schema.name
+    if name == 'vecops_comm::exchange':
+      identity, phase, slot, storage = arguments
+      native = module.resident_exchange(identity, phase, slot, [meta(ref) for ref in storage])
+      return _ExchangeLease(native), [2, 2], [0, 0], []
+
+    borrowed = name == 'vecops_comm::consume'
+    identity = arguments[0]
+    outputs = [arguments[1]] if borrowed else arguments[1]
+    inputs = [arguments[2]] if borrowed else arguments[2]
     out_meta, in_meta = [meta(x) for x in outputs], [meta(x) for x in inputs]
     # Opaque-byte complex collectives remain legal via the ordinary native op.
     if any(t.is_complex() for t in out_meta+in_meta):
@@ -132,5 +196,5 @@ def install(module):
     output_access = [nested[1][1]] if borrowed else [2]*len(outputs)
     return lease, output_access+[1]*len(inputs), [0]*len(types), []
 
-  for name in ('vecops_comm::run', 'vecops_comm::consume'):
+  for name in ('vecops_comm::run', 'vecops_comm::consume', 'vecops_comm::exchange'):
     _schema_bridge.register_replay_plan_provider(name, prepare)

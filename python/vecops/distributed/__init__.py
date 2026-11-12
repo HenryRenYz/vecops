@@ -88,12 +88,22 @@ def _create(dist_options, pg_options=None):
   policy = platform.communication
   from .tuning import context, load_profile, runtime_signature
   from .compiler import rank_facts, CommunicationCompiler
+  from ._shared_lowering import profile_manifest
+  try:
+    shared_profile, shared_digest = profile_manifest()
+    shared_error = None
+  except (OSError, ValueError, TypeError, AttributeError) as error:
+    shared_profile, shared_digest, shared_error = {}, None, str(error)
   local = {'resources':rank_facts(runtime,payload_pool,threads), 'host': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
            'platform': platform.fingerprint, 'binary': extension.build_id,
            'threads':threads, 'runtime':runtime_signature(),
            'payload_pool':payload_pool,'payload_page':payload_page,
            'capacity_authority':runtime.native.capacity_authority(),
-           'calibration':bool(policy.get('calibration'))}
+           'calibration':bool(policy.get('calibration')),
+           'shared_page_profile':shared_digest,'shared_page_error':shared_error,
+           'shared_page_audit':bool(os.environ.get('VECOPS_SHARED_PAGE_AUDIT')),
+           'shared_page_measure':os.environ.get('VECOPS_SHARED_PAGE_CALIBRATE'),
+           'shared_page_filter':os.environ.get('VECOPS_SHARED_PAGE_CALIBRATE_CASES')}
   store.set(f'vecops/identity/{rank}', json.dumps(local))
   members = [json.loads(store.get(f'vecops/identity/{r}').decode()) for r in range(size)]
   if len({x['host'] for x in members}) != 1:
@@ -110,6 +120,16 @@ def _create(dist_options, pg_options=None):
     raise ValueError('communication calibration enablement differs across ranks')
   if len({x['payload_page'] for x in members}) != 1:
     raise ValueError('communication participants require a common runtime page quantum')
+  if any(x['shared_page_error'] for x in members):
+    raise ValueError('invalid shared-page profile: '+str([x['shared_page_error'] for x in members]))
+  if len({x['shared_page_profile'] for x in members}) != 1:
+    raise ValueError('shared-page profiles differ across ranks')
+  for key in ('shared_page_audit','shared_page_measure','shared_page_filter'):
+    if len({x[key] for x in members}) != 1:
+      raise ValueError('shared-page measurement options differ across ranks')
+  if local['shared_page_measure'] is not None and (
+      not local['shared_page_audit'] or local['shared_page_measure'] not in {'copy','source','destination'}):
+    raise ValueError('shared-page calibration requires an audit path and copy, source or destination')
   compiler=CommunicationCompiler([member['resources'] for member in members],
       stage_us=policy.get('stage_us'))
   groups=list(range(size))
@@ -137,8 +157,13 @@ def _create(dist_options, pg_options=None):
       levels, modes,
       policy.get('copy_schedule','auto')!='peer', bool(policy.get('early_snapshot',False)))
   backend.payload_page=payload_page
-  from ._routing import install
+  from ._routing import install, for_backend
   install(backend,compiler,store,rank,size,policy)
+  shared_planner=for_backend(backend)
+  shared_planner.shared_profile=shared_profile
+  shared_planner.shared_audit=local['shared_page_audit']
+  shared_planner.shared_measure=local['shared_page_measure']
+  shared_planner.shared_cases=tuple(filter(None,(local['shared_page_filter'] or '').split(',')))
   signature = context(platform, members, threads, extension.build_id)
   backend.tuning_context = json.dumps(signature, sort_keys=True)
   # Performance portability must not weaken this full live authority context.
@@ -398,11 +423,13 @@ __all__ += ['consume_all_gather']
 
 
 class PageExchange:
-  """Explicit fixed-layout zero-copy AllToAll storage, prepared collectively.
+  """Fixed-layout zero-copy AllToAll or AllGather storage, prepared collectively.
 
   Construct before capture. Each slot has a peer-major producer Tensor and
-  source-major read-only consumer Tensor; their first stride includes page
-  padding. Producers must write directly into producer(slot) between begin and
+  source-major read-only consumer Tensor for AllToAll. AllGather uses a single
+  source-owned producer block of shape block_shape per rank. Rank-major
+  tensors include page padding in their first stride. Producers must write
+  directly into producer(slot) between begin and
   publish. Consumers must finish before retire. Keep tensors within the region
   lifetime and never mutate consumer storage (the mapping is OS read-only).
   Use private clone/copy for an independently writable or retained result.
@@ -410,14 +437,17 @@ class PageExchange:
   Process-group shutdown ends this region's access permission and removes its
   aliases. All producer/consumer readers must finish before shutdown.
   """
-  def __init__(self, block_shape, dtype, *, slots=1, placement='destination', group=None):
+  def __init__(self, block_shape, dtype, *, slots=1, placement=None, group=None,
+               operation='all_to_all', _stripe_layout=(0,False,False)):
     import torch.distributed as dist
     from vecops.graph.capture import current_capture
     if current_capture() is not None:
       raise RuntimeError('prepare PageExchange before graph capture')
+    if placement is None:
+      placement = 'source' if operation == 'all_gather' else 'destination'
     self.group = group or dist.distributed_c10d._get_default_group()
     self.handle, self.producers, self.consumers = backend(self.group).prepare_exchange(
-        list(block_shape), dtype, slots, placement)
+        list(block_shape), dtype, slots, placement, operation, *_stripe_layout)
 
   def producer(self, slot=0):
     return self.producers[slot]
